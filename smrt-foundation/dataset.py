@@ -5,15 +5,89 @@ import polars as pl
 import numpy as np
 import pyarrow.parquet as pq
 from pathlib import Path
-from torch.utils.data import IterableDataset
+from torch.utils.data import IterableDataset, Dataset
 from typing import Dict
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pad_sequence
+import math
 
 
 def compute_log_normalization_stats(df, features, epsilon=1):
     means = {col: (df[col].explode() + epsilon).log().mean() for col in features}
     stds = {col: (df[col].explode() + epsilon).log().explode().std() for col in features}
     return means, stds
+
+class SMRTSequenceDataset(Dataset):
+    """
+    loads a full context of SMRT data (seq, ipd, pw)
+    """
+    def __init__(self, parquet_path: str, columns: list):
+      
+        self.data_df = pl.read_parquet(parquet_path)
+        self.columns = columns
+        # always include seq
+        if 'seq' not in self.columns:
+            self.columns.insert(0, 'seq')
+        
+        # Select only kinetics columns that are actually present
+        self.kinetics_cols = [c for c in ['fi', 'fp', 'ri', 'rp'] if c in self.columns and c in self.data_df.columns]
+        self.data_df = self.data_df.select(['seq'] + self.kinetics_cols)
+        
+    def __len__(self):
+        return len(self.data_df)
+
+    def __getitem__(self, idx):
+        row_data = self.data_df.row(idx, named=True)
+        
+        seq_ids = torch.tensor(row_data['seq'], dtype=torch.long)
+        
+        kinetics = []
+        for col in self.kinetics_cols:
+            if col in row_data:
+                kinetics.append(torch.tensor(row_data[col], dtype=torch.float32))
+            
+        if kinetics:
+            # make into [L, 4] tensor
+            kinetics_tensor = torch.stack(kinetics, dim=1)
+        else:
+            # Create [L, 0] tensor if no kinetics
+            kinetics_tensor = torch.empty(len(seq_ids), 0, dtype=torch.float32)
+
+        return {
+            "seq_ids": seq_ids,       # [L]
+            "kinetics": kinetics_tensor # [L, 4] or [L, 0]
+        }
+    
+
+def cpc_collate_fn(batch, pad_idx=4):
+    """
+    Pads sequences and kinetics to the max length in the batch.
+    """
+    seqs = [item['seq_ids'] for item in batch]
+    kins = [item['kinetics'] for item in batch]
+
+    pad_seqs = pad_sequence(seqs, batch_first=True, padding_value=pad_idx)
+    
+    max_len = pad_seqs.shape[1]
+    batch_size = len(batch)
+    
+    # Check if we have kinetics data
+    has_kinetics = kins[0].shape[1] > 0
+    
+    if has_kinetics:
+        kinetics_dim = kins[0].shape[1]
+        pad_kins = torch.zeros(batch_size, max_len, kinetics_dim, dtype=torch.float32)
+        for i, k in enumerate(kins):
+            L = k.shape[0]
+            pad_kins[i, :L, :] = k
+    else:
+        # Create an empty tensor [B, L, 0]
+        pad_kins = torch.empty(batch_size, max_len, 0, dtype=torch.float32)
+
+    return {
+        "seq_ids": pad_seqs,
+        "kinetics": pad_kins
+    }
 
 class MethylIterableDataset(IterableDataset):
   '''
