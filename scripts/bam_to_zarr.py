@@ -6,13 +6,13 @@ import numpy as np
 from smrt_foundation.utils import parse_yaml
 
 from numcodecs import blosc
-blosc.set_nthreads(4)
+blosc.set_nthreads(6)
 
+# --- Profile boilerplate begin ---
 import os
 import builtins
 import atexit
 
-# --- Conditional Profiling Setup ---
 if os.environ.get('TimeLINE_PROFILE'):
     # Only imports line_profiler if the env var is set
     from line_profiler import LineProfiler
@@ -36,7 +36,7 @@ else:
 
 # Inject into builtins so @profile is available everywhere
 builtins.profile = profile
-# -----------------------------------
+# --- Profile boilerplate end ---
 
 @profile
 def _process_read(read, optional_tags, required_tags, per_base_tags):
@@ -81,23 +81,28 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
     tags_union = required_tags.union(set(optional_tags))
 
     seq_map = config['data']['token_map']
+    # transfer to numpy byte array
+    lookup_table = np.zeros(128, dtype=np.uint8)
+    for base, val in seq_map.items():
+        if len(base) == 1:
+            lookup_table[ord(base)] = val
     
     counters = { "reads_processed": 0, "reads_skipped": 0, }
 
     n = len(per_base_tags.intersection(tags_union)) + 2 # add one for seq and one for qual, which is not a tag
 
     root = zarr.create_group(store=zarr_path)
-    shard_size = 10_000_000
+    shard_size = 40_000_000
     chunk_size = 100_000
     z_data = root.create_array(name = 'data', shape=(n, 0), chunks=(n, chunk_size), shards=(n, shard_size), dtype='uint8', overwrite=True)
     z_indptr = root.create_array(name = 'indptr', shape=(1,), chunks=(shard_size,), shards=(shard_size,), dtype='uint32', overwrite=True)
     z_indptr[0] = 0 # initialize the start of the index pointers
     total_len=0
     # Batching info. This is important for zarr write performance. Writes should be larger than a shard
-    batch_size = (shard_size/17_000)*2 # approx reads per 10 shards -> We write 10 shards per batch
+    batch_size = 5000 
     batch_data = []
     batch_indptr = []
-    with pysam.AlignmentFile(bam_path, "rb", check_sq=False) as bam:
+    with pysam.AlignmentFile(bam_path, "rb", check_sq=False, threads=5) as bam:
         for i, read in enumerate(bam):
             if i >= n_reads and n_reads != 0:
                 break
@@ -109,10 +114,8 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
                 continue
             counters["reads_processed"] += 1 
             tag_dict = read_data["tag_data"]
-            # seq_len = read_data["seq_len"]
-            seq_str = read_data["seq"].upper()
 
-            seq_vec = np.array([seq_map.get(base, 0) for base in seq_str], dtype=np.uint8)
+            seq_vec = lookup_table[np.frombuffer(read_data["seq"].upper().encode('ascii'), dtype=np.uint8)]
             qual_vec = np.array(read_data["qual"], dtype = np.uint8)
             fi_vec = np.array(tag_dict['fi'], dtype=np.uint8)
             fp_vec = np.array(tag_dict['fp'], dtype=np.uint8)

@@ -59,7 +59,7 @@ def zarr_conversion(bam_path, output_path, n_reads, optional_tags, denomination,
     tags_str = ' '.join(optional_tags)
     profiler_env = "TimeLINE_PROFILE=1" if profile else ""
 
-    options = {'cores': 4, 'memory': '16gb', 'walltime': '00:30:00'}
+    options = {'cores': 12, 'memory': '64gb', 'walltime': '00:30:00'}
     spec = f"""
     source $(conda info --base)/etc/profile.d/conda.sh
     conda activate smrt-foundation
@@ -115,7 +115,7 @@ zarr_conversion_test = gwf.target_from_template(
     template=zarr_conversion(
         bam_path=CONFIG['zarr_test']['bam'],
         output_path=CONFIG['zarr_test']['ds'],
-        n_reads= 100, #CONFIG['zarr_test']['n_reads'],
+        n_reads= CONFIG['zarr_test']['n_reads'],
         denomination=CONFIG['zarr_test']['denomination'],
         optional_tags=CONFIG['zarr_test']['optional_tags'],
         config=CONFIG['config_path'],
