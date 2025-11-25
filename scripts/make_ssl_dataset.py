@@ -4,37 +4,17 @@ import argparse
 import sys
 import os
 import yaml
+from smrt_foundation.dataset import SCHEMA
+from smrt_foundation.utils import parse_yaml
+
+
+
 
 ### Purpose ###
 # converts a BAM file into a parquet file of fixed-size windows 
 # for transformer or general context-based ssl training.
 
-### --- Globals --- ####
-REQUIRED_TAGS = {"fi", "ri", "fp", "rp"}
-PER_BASE_TAGS = {"fi", "ri", "fp", "rp", "sm", "sx"}
-DTYPE_MAP = {
-    "read_name": pl.String,
-    "read_pos": pl.UInt32, # Changed from cg_pos
-    "seq": pl.List(pl.UInt8),
-    "qual": pl.List(pl.UInt8),
-    "np": pl.UInt8,
-    "sm": pl.List(pl.UInt8),
-    "sx": pl.List(pl.UInt8),
-    "fi": pl.List(pl.UInt8),
-    "fp": pl.List(pl.UInt8),
-    "ri": pl.List(pl.UInt8),
-    "rp": pl.List(pl.UInt8),
-}
-
-#### --- Helper Functions --- ###
-def load_config(config_path):
-    """Loads a YAML config file."""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
-
-
-def _process_read(read, optional_tags, required_tags):
+def _process_read(read, optional_tags, required_tags, per_base_tags):
     """
     Processes a single pysam.AlignmentRead.
     Checks for required tags and extracts all full-length tag data.
@@ -58,7 +38,7 @@ def _process_read(read, optional_tags, required_tags):
 
     # return None if any of the tag data lengths that do not match seq
     for tag in tags_union:
-        if tag in PER_BASE_TAGS and read_data[tag] is not None:
+        if tag in per_base_tags and read_data[tag] is not None:
             if len(read_data[tag]) != seq_len:
                 return None 
     # retun a dictionary with data from the read
@@ -70,12 +50,12 @@ def _process_read(read, optional_tags, required_tags):
         "seq_len": seq_len
     }
 
-def bam_to_df(bam_path: str, denomination: str, n_reads: int, context: int, optional_tags: list, config_dict):
-    required_tags = REQUIRED_TAGS
+def bam_to_df(bam_path: str, denomination: str, n_reads: int, context: int, optional_tags: list, config: dict):
+    per_base_tags = config['data']['per_base_tags']
+    required_tags = config['data']['kinetics_features']
     tags_union = required_tags.union(set(optional_tags))
 
-    seq_map = config_dict['data']['token_map']
-    # trans_table = str.maketrans({k: str(v) for k, v in seq_map.items()})
+    seq_map = config['data']['token_map']
 
     final_cols = ["read_name", "read_pos", "seq", "qual"] + list(tags_union)
     col_data = {key: [] for key in final_cols}
@@ -118,7 +98,7 @@ def bam_to_df(bam_path: str, denomination: str, n_reads: int, context: int, opti
                         col_data[tag].append(None) 
                         continue
                     
-                    if tag in PER_BASE_TAGS:
+                    if tag in per_base_tags:
                         sliced_values = values[rev_win_start:rev_win_end] if tag in {"ri", "rp"} else values[win_start:win_end]
                         col_data[tag].append(sliced_values)
                     else: # Non-per-base tags like 'np'
@@ -137,7 +117,7 @@ def bam_to_df(bam_path: str, denomination: str, n_reads: int, context: int, opti
         print("no valid windows were found. Returning empty dataframe.")
         return pl.DataFrame()
     
-    final_schema = {k: v for k, v in DTYPE_MAP.items() if k in col_data and col_data[k]}
+    final_schema = {k: v for k, v in SCHEMA.items() if k in col_data and col_data[k]}
     df = pl.DataFrame(col_data, schema=final_schema).with_columns(
         pl.lit(denomination).alias('sample')
     )
@@ -170,7 +150,7 @@ def main():
                         type=str,
                         required=True,
                         help="path for output file")
-    parser.add_argument('--config_dict',
+    parser.add_argument('--config',
                         type=str,
                         required=True,
                         help='Path the config file for model configuration')
@@ -183,14 +163,15 @@ def main():
         print("Error: n_reads should be positive or 0 (to indicate all reads).")
         sys.exit(1)
     
-    config_dict = load_config(args.config_dict)
+    config = parse_yaml(args.config)
+
 
     df = bam_to_df(bam_path=os.path.expanduser(args.input_path),
                    denomination=args.denomination,
                    n_reads=args.n_reads, 
                    context=args.context,
                    optional_tags=args.optional_tags,
-                   config_dict=config_dict)
+                   config=config)
 
     df.write_parquet(args.output_path)
 

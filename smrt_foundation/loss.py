@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-def cpc_loss(c_target: torch.Tensor, predictions: list) -> torch.Tensor:
+def cpc_loss(c_target, predictions):
     """
     Computes the InfoNCE loss for CPC.
     

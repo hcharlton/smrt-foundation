@@ -116,3 +116,7 @@ class CPCDNA(nn.Module):
         return c, predictions
 
 
+
+MODEL_REGISTRY = {
+    'CPCDNA': CPCDNA,
+}

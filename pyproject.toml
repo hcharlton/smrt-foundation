@@ -6,5 +6,5 @@ build-backend = "setuptools.build_meta"
 name = "smrt-foundation"
 version = "0.1.0"
 
-[tool.setuptools.packages.find]
-where = ["smrt-foundation"]
+[tool.setuptools]
+packages = ["smrt_foundation"]

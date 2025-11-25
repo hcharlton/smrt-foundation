@@ -1,0 +1,34 @@
+model:
+  architecture: 'CPCDNA' 
+  params:
+    d_model: 128
+    nhead: 4
+    num_layers: 4
+    dim_feedforward: 512
+    predict_steps: 5
+    vocab_size: 5      # A, C, G, T, N 
+    kinetics_dim: 4  # fi, fp, ri, rp
+    dropout: 0.1
+
+data:
+  pad_idx: 4 
+  token_map:
+    'A': 0
+    'C': 1
+    'G': 2
+    'T': 3
+    'N': 4
+    '[MASK]': 5
+    '[PAD]': 6
+  kinetics_features: ['fi', 'fp', 'ri', 'rp']
+  per_base_tags: ["fi", "ri", "fp", "rp", "sm", "sx"]
+
+
+training:
+  epochs: 50
+  batch_size: 64
+  optimizer: 
+    name: 'AdamW'
+    params:
+      lr: 0.0001
+      weight_decay: 0.01

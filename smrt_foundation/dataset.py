@@ -1,5 +1,3 @@
-# datasetclass.py
-
 import torch
 import polars as pl
 import numpy as np
@@ -9,7 +7,24 @@ from torch.utils.data import IterableDataset, Dataset
 from typing import Dict
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
-import math
+
+
+REQUIRED_TAGS = {"fi", "ri", "fp", "rp"}
+PER_BASE_TAGS = {"fi", "ri", "fp", "rp", "sm", "sx"}
+
+SCHEMA = {
+    "read_name": pl.String,
+    "read_pos": pl.UInt32, # Changed from cg_pos
+    "seq": pl.List(pl.UInt8),
+    "qual": pl.List(pl.UInt8),
+    "np": pl.UInt8,
+    "sm": pl.List(pl.UInt8),
+    "sx": pl.List(pl.UInt8),
+    "fi": pl.List(pl.UInt8),
+    "fp": pl.List(pl.UInt8),
+    "ri": pl.List(pl.UInt8),
+    "rp": pl.List(pl.UInt8),
+}
 
 
 def compute_log_normalization_stats(df, features, epsilon=1):
@@ -23,7 +38,7 @@ class SMRTSequenceDataset(Dataset):
     """
     def __init__(self, parquet_path: str, columns: list):
       
-        self.data_df = pl.read_parquet(parquet_path)
+        self.data_df = pl.read_parquet(parquet_path).head(100)
         self.columns = columns
         # always include seq
         if 'seq' not in self.columns:
@@ -47,21 +62,19 @@ class SMRTSequenceDataset(Dataset):
                 kinetics.append(torch.tensor(row_data[col], dtype=torch.float32))
             
         if kinetics:
-            # make into [L, 4] tensor
-            kinetics_tensor = torch.stack(kinetics, dim=1)
+            kinetics_tensor = torch.stack(kinetics, dim=1) # L,4
         else:
-            # Create [L, 0] tensor if no kinetics
-            kinetics_tensor = torch.empty(len(seq_ids), 0, dtype=torch.float32)
+            kinetics_tensor = torch.empty(len(seq_ids), 0, dtype=torch.float32) # L,0
 
         return {
-            "seq_ids": seq_ids,       # [L]
+            "seq_ids": seq_ids,       # L
             "kinetics": kinetics_tensor # [L, 4] or [L, 0]
         }
     
 
-def cpc_collate_fn(batch, pad_idx=4):
+def cpc_collate_fn(batch, pad_idx):
     """
-    Pads sequences and kinetics to the max length in the batch.
+    pads sequences and kinetics to the max length in the batch
     """
     seqs = [item['seq_ids'] for item in batch]
     kins = [item['kinetics'] for item in batch]
@@ -89,6 +102,8 @@ def cpc_collate_fn(batch, pad_idx=4):
         "kinetics": pad_kins
     }
 
+
+# old dataset for methylcnn
 class MethylIterableDataset(IterableDataset):
   '''
   Iterable dataset for parquet format methylation samples.
