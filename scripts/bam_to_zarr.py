@@ -14,7 +14,7 @@ import builtins
 import atexit
 
 if os.environ.get('TimeLINE_PROFILE'):
-    # Only imports line_profiler if the env var is set
+    # only imports line_profiler if the env var is set
     from line_profiler import LineProfiler
     lp = LineProfiler()
     
@@ -22,19 +22,16 @@ if os.environ.get('TimeLINE_PROFILE'):
     def profile(func):
         return lp(func)
         
-    # Save data when the script exits (successfully or via error)
+    # save log
     def save_profile():
-        # You can change the filename here if needed
+        # filename
         lp.dump_stats('profile_output.lprof') 
         print("\n[Profiler] Stats saved to 'profile_output.lprof'")
     
     atexit.register(save_profile)
 else:
-    # No-op decorator: runs code at native speed
     def profile(func):
         return func
-
-# Inject into builtins so @profile is available everywhere
 builtins.profile = profile
 # --- Profile boilerplate end ---
 
@@ -93,13 +90,13 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
 
     root = zarr.create_group(store=zarr_path)
     shard_size = 40_000_000
-    chunk_size = 100_000
+    chunk_size = 2_000_000
     z_data = root.create_array(name = 'data', shape=(n, 0), chunks=(n, chunk_size), shards=(n, shard_size), dtype='uint8', overwrite=True)
     z_indptr = root.create_array(name = 'indptr', shape=(1,), chunks=(shard_size,), shards=(shard_size,), dtype='uint32', overwrite=True)
     z_indptr[0] = 0 # initialize the start of the index pointers
     total_len=0
     # Batching info. This is important for zarr write performance. Writes should be larger than a shard
-    batch_size = 5000 
+    batch_size = 4_000
     batch_data = []
     batch_indptr = []
     with pysam.AlignmentFile(bam_path, "rb", check_sq=False, threads=5) as bam:
