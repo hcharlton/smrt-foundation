@@ -17,14 +17,26 @@ CONFIG = {
         },
     'zarr_test':{
         'bam': 'data/00_raw/unlabeled/da1_subset_10k.bam',
-        'denomination': 'da1',
         'ds': 'data/01_processed/ssl_sets/da1_subset_10k.zarr',
         'optional_tags': [],
         'n_reads': 0,
         },
+    'zarr_test_ob007':{
+        'bam': 'data/00_raw/unlabeled/ob007_kinetics_diploid.bam',
+        'ds': 'data/01_processed/ssl_sets/ob007.zarr',
+        'optional_tags': ['sm','sx'],
+        'n_reads': 100_000,
+        },
     'stats':{
         'path': 'data/02_analysis/norm_stats.yaml'
-        }
+        },
+    'da1_to_zarr':{
+        'bam': 'data/00_raw/unlabeled/da1_kinetics_diploid.bam',
+        'denomination': 'da1',
+        'ds': 'data/01_processed/ssl_sets/da1_kinetics_diploid.zarr',
+        'optional_tags': [],
+        'n_reads': 0,
+        },
     }
 
 # SLURM backend gwf worker
@@ -52,7 +64,7 @@ def compute_norm_stats(train_parquet_path, output_json_path):
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
 
-def zarr_conversion(bam_path, output_path, n_reads, optional_tags, denomination, config, profile=False):
+def zarr_conversion(bam_path, output_path, n_reads, optional_tags, config, profile=False):
     inputs = {'in_file': bam_path}
     outputs = {'out_file': output_path}
 
@@ -69,8 +81,7 @@ def zarr_conversion(bam_path, output_path, n_reads, optional_tags, denomination,
         --n_reads {n_reads} \\
         --output_path {output_path} \\
         --optional_tags {tags_str} \\
-        --config {config} \\
-        --denomination {denomination}
+        --config {config}
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 def create_ssl_dataset(bam_path, output_path, n_reads, context, optional_tags, denomination, config):
@@ -110,18 +121,42 @@ da1_data_target = gwf.target_from_template(
     )
 )
 
-zarr_conversion_test = gwf.target_from_template(
-    name="da1_subset_to_zarr",
+zar_test_target = gwf.target_from_template(
+    name="zarr_test",
     template=zarr_conversion(
         bam_path=CONFIG['zarr_test']['bam'],
         output_path=CONFIG['zarr_test']['ds'],
         n_reads= CONFIG['zarr_test']['n_reads'],
-        denomination=CONFIG['zarr_test']['denomination'],
         optional_tags=CONFIG['zarr_test']['optional_tags'],
         config=CONFIG['config_path'],
         profile=True
     )
 )
+
+zar_test_ob007_target = gwf.target_from_template(
+    name="zarr_test_ob007",
+    template=zarr_conversion(
+        bam_path=CONFIG['zarr_test_ob007']['bam'],
+        output_path=CONFIG['zarr_test_ob007']['ds'],
+        n_reads= CONFIG['zarr_test_ob007']['n_reads'],
+        optional_tags=CONFIG['zarr_test_ob007']['optional_tags'],
+        config=CONFIG['config_path'],
+        profile=True
+    )
+)
+
+# zarr_da1_conversion = gwf.target_from_template(
+#     name="da1_to_zarr",
+#     template=zarr_conversion(
+#         bam_path=CONFIG['zarr_test']['bam'],
+#         output_path=CONFIG['zarr_test']['ds'],
+#         n_reads= CONFIG['zarr_test']['n_reads'],
+#         denomination=CONFIG['zarr_test']['denomination'],
+#         optional_tags=CONFIG['zarr_test']['optional_tags'],
+#         config=CONFIG['config_path'],
+#         profile=True
+#     )
+# )
 
 
 # stats_target = gwf.target_from_template(

@@ -71,11 +71,48 @@ def _process_read(read, optional_tags, required_tags, per_base_tags):
         "tag_data": read_data,
         "seq_len": seq_len
     }
+
+def _check_tags(bam_path, tags, n_reads=100, threshold=0.8):
+    """
+    Checks the first n_check reads. 
+    Raises ValueError if ANY requested tag is missing in > threshold % of reads.
+    """
+    if not tags:
+        return
+
+    tag_counts = {t: 0 for t in tags}
+    reads_checked = 0
+
+    with pysam.AlignmentFile(bam_path, "rb", check_sq=False) as bam:
+        for i, read in enumerate(bam):
+            if i >= n_reads:
+                break
+            reads_checked += 1
+            for t in tags:
+                if read.has_tag(t):
+                    tag_counts[t] += 1
+    
+    if reads_checked == 0:
+        raise ValueError("BAM file appears empty.")
+
+    # value error if any of the tags don't meet the threshold
+    for t, count in tag_counts.items():
+        missing_rate = 1.0 - (count / reads_checked)
+        if missing_rate > threshold:
+             raise ValueError(
+                 f"Tag '{t}' is missing in {missing_rate:.1%} of the first {reads_checked} reads. "
+                 f"Threshold is {threshold:.0%}. Aborting."
+             )
+    
+    print(f"Validation successful: All requested tags present in >{1-threshold:.0%} of checked reads.")
+
 @profile
 def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list, config: dict):
     per_base_tags = set(config['data']['per_base_tags'])
     required_tags = set(config['data']['kinetics_features'])
     tags_union = required_tags.union(set(optional_tags))
+
+    _check_tags(bam_path=bam_path, tags=tags_union, n_reads=20)
 
     seq_map = config['data']['token_map']
     # transfer to numpy byte array
@@ -86,7 +123,7 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
     
     counters = { "reads_processed": 0, "reads_skipped": 0, }
 
-    n = len(per_base_tags.intersection(tags_union)) + 2 # add one for seq and one for qual, which is not a tag
+    n = len(per_base_tags.intersection(tags_union)) + 2 # add one for seq and one for qual, which are not tags but are in the sequence
 
     root = zarr.create_group(store=zarr_path)
     shard_size = 40_000_000
@@ -119,12 +156,15 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
             ri_vec = np.array(tag_dict['ri'], dtype=np.uint8)
             rp_vec = np.array(tag_dict['rp'], dtype=np.uint8)
 
-            read_array = np.stack([seq_vec, 
-                                   qual_vec, 
+            optional_tag_arrays = [np.array(tag_dict[optional_tag]) for optional_tag in optional_tags] 
+
+            read_array = np.stack(([seq_vec,
                                    fi_vec, 
                                    fp_vec,
                                    ri_vec, 
-                                   rp_vec], axis=0)
+                                   rp_vec, 
+                                   qual_vec,
+                                   ] + optional_tag_arrays), axis=0)
             read_len = read_array.shape[1]
             total_len += read_len
             print(read_len)
@@ -180,10 +220,6 @@ def main():
                         type=str,
                         required=True,
                         help='Path the config file for model configuration')
-    parser.add_argument('--denomination',
-                        type=str,
-                        required=True,
-                        help='name of sample to be used in dataframe')
     args = parser.parse_args()
     if args.n_reads < 0:
         print("Error: n_reads should be positive or 0 (to indicate all reads).")
