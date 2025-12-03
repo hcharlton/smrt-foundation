@@ -128,7 +128,7 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
 
     root = zarr.create_group(store=zarr_path)
     shard_size_bases = 400_000_000 # unit: bases
-    chunk_size_bases = 1_000_000 #20_000_000 -> fast
+    chunk_size_bases = 20_000_000 #20_000_000 -> fast for write
     z_data = root.create_array(name = 'data', shape=(n, 0), chunks=(n, chunk_size_bases), shards=(n, shard_size_bases), dtype='uint8', overwrite=True)
     z_indptr = root.create_array(name = 'indptr', shape=(1,), chunks=(shard_size_bases,), dtype='uint64', overwrite=True)
     z_indptr[0] = 0 # initialize the start of the index pointers
