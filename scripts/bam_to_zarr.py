@@ -63,11 +63,11 @@ def _process_read(read, optional_tags, required_tags, per_base_tags):
         if tag in per_base_tags and read_data[tag] is not None:
             if len(read_data[tag]) != seq_len:
                 return None 
-    # retun a dictionary with data from the read
+    # return a dictionary with data from the read
     return {
         "name": read.query_name,
         "seq": read.query_sequence,
-        "qual": list(read.query_qualities),
+        "qual": np.frombuffer(read.qual.encode('ascii'), dtype=np.uint8) - 33,
         "tag_data": read_data,
         "seq_len": seq_len
     }
@@ -108,11 +108,12 @@ def _check_tags(bam_path, tags, n_reads=100, threshold=0.8):
 
 @profile
 def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list, config: dict):
-    per_base_tags = set(config['data']['per_base_tags'])
-    required_tags = set(config['data']['kinetics_features'])
-    tags_union = required_tags.union(set(optional_tags))
+    per_base_tags = set(config['data']['per_base_tags']) # from config — defines which tags *could be* present at each base
+    # if 
+    required_tags = set(config['data']['kinetics_features']) # we always need the kinetics for the model training 
+    tags_union = required_tags.union(set(optional_tags)) # the set of all the tags to collect at each base
 
-    _check_tags(bam_path=bam_path, tags=tags_union, n_reads=20)
+    _check_tags(bam_path=bam_path, tags=tags_union, n_reads=20) # check that the requested tags exist -> exit if they aren't
 
     seq_map = config['data']['token_map']
     # transfer to numpy byte array
@@ -123,17 +124,17 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
     
     counters = { "reads_processed": 0, "reads_skipped": 0, }
 
-    n = len(per_base_tags.intersection(tags_union)) + 2 # add one for seq and one for qual, which are not tags but are in the sequence
+    n = len(per_base_tags.intersection(tags_union)) + 2 # Add one for seq and one for qual, which are not tags but are in the sequence
 
     root = zarr.create_group(store=zarr_path)
-    shard_size = 40_000_000
-    chunk_size = 2_000_000
-    z_data = root.create_array(name = 'data', shape=(n, 0), chunks=(n, chunk_size), shards=(n, shard_size), dtype='uint8', overwrite=True)
-    z_indptr = root.create_array(name = 'indptr', shape=(1,), chunks=(shard_size,), shards=(shard_size,), dtype='uint32', overwrite=True)
+    shard_size_bases = 400_000_000 # unit: bases
+    chunk_size_bases = 1_000_000 #20_000_000 -> fast
+    z_data = root.create_array(name = 'data', shape=(n, 0), chunks=(n, chunk_size_bases), shards=(n, shard_size_bases), dtype='uint8', overwrite=True)
+    z_indptr = root.create_array(name = 'indptr', shape=(1,), chunks=(shard_size_bases,), dtype='uint64', overwrite=True)
     z_indptr[0] = 0 # initialize the start of the index pointers
     total_len=0
     # Batching info. This is important for zarr write performance. Writes should be larger than a shard
-    batch_size = 4_000
+    batch_size_reads = shard_size_bases/1_000 # Largely empirical. Note that the unit of this is reads... which conservatively are 10-20k bases 
     batch_data = []
     batch_indptr = []
     with pysam.AlignmentFile(bam_path, "rb", check_sq=False, threads=5) as bam:
@@ -167,11 +168,10 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
                                    ] + optional_tag_arrays), axis=0)
             read_len = read_array.shape[1]
             total_len += read_len
-            print(read_len)
             batch_data.append(read_array)
             batch_indptr.append(total_len)
 
-            if len(batch_data) >= batch_size:
+            if len(batch_data) >= batch_size_reads:
                 stacked_batch = np.concatenate(batch_data, axis=1, dtype='uint8')
                 z_data.append(stacked_batch, axis=1)
                 z_indptr.append(np.array(batch_indptr, dtype='uint32'))
@@ -191,7 +191,6 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
     if counters["reads_processed"] == 0:
         print("no valid reads were found.")
 
-    
 @profile
 def main():
     parser = argparse.ArgumentParser(

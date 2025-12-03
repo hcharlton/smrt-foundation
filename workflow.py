@@ -25,7 +25,7 @@ CONFIG = {
         'bam': 'data/00_raw/unlabeled/ob007_kinetics_diploid.bam',
         'ds': 'data/01_processed/ssl_sets/ob007.zarr',
         'optional_tags': ['sm','sx'],
-        'n_reads': 100_000,
+        'n_reads': 200_000,
         },
     'stats':{
         'path': 'data/02_analysis/norm_stats.yaml'

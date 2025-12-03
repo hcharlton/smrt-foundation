@@ -21,7 +21,7 @@ data:
     '[MASK]': 5
     '[PAD]': 6
   kinetics_features: ['fi', 'fp', 'ri', 'rp']
-  per_base_tags: ["fi", "ri", "fp", "rp", "sm", "sx"]
+  per_base_tags: ["fi", "ri", "fp", "rp", "sm", "sx", "sa", "fn", "rn"]
 
 
 training:
