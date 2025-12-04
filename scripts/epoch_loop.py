@@ -120,7 +120,7 @@ dl = DataLoader(
     shuffle=False,
     num_workers=0,
     collate_fn=collate_ragged,
-    pin_memory=False, # Critical for H100 throughput
+    pin_memory=False, # should be important for h100 throughput?
     # prefetch_factor=4
 )
 

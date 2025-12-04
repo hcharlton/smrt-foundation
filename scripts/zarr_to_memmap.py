@@ -17,11 +17,9 @@ def zarr_to_sharded_memmap_channels_last(
     z_data = root['data'] 
     indptr = root['indptr'][:]
     
-    # Input is now (Total_Time, Features)
-    n_features = z_data.shape[1] 
     
-    # Output will be (N, Seq_Len, Features + 1)
-    # This is the "Channels Last" standard for Transformers
+    # target output: (N, Seq_Len, Features + 1) -> +1 for padding mask
+    # adopted channel last as standard
     
     total_reads = len(indptr) - 1
     current_shard = []
@@ -40,7 +38,7 @@ def zarr_to_sharded_memmap_channels_last(
         for r in range(i, end_batch):
             r_len = indptr[r+1] - indptr[r]
             
-            # Extract read: (r_len, Features)
+            # Extract read: (r_lesn, Features)
             read = chunk_data[local_start : local_start + r_len, :]
             local_start += r_len
             

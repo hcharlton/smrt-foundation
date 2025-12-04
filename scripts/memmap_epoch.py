@@ -1,6 +1,8 @@
 import glob
 import torch
-from torch.utils.data import Dataset
+import numpy as np
+from torch.utils.data import Dataset, Dataloader
+from tqdm import tqdm
 
 class ShardedMemmapDataset(Dataset):
     def __init__(self, data_dir):
@@ -21,8 +23,23 @@ class ShardedMemmapDataset(Dataset):
         # Binary search or simple bisect to find file_idx
         file_idx = np.searchsorted(self.cumulative_sizes, idx, side='right') - 1
         local_idx = idx - self.cumulative_sizes[file_idx]
-        
-        # Load specific slice from disk (zero-copy if cached)
-        # Using mmap_mode='r' is crucial here
+
         data = np.load(self.files[file_idx], mmap_mode='r')
-        return torch.from_numpy(data[local_idx].copy()) # copy() triggers the actual read
+        return torch.from_numpy(data[local_idx].copy()) 
+    
+# ds = GenomicZarrDataset('./ob007.memmap')
+y = np.load('ob007.memmap/shard_00001.npy', mmap_mode='r')
+# dl = DataLoader(
+    #     ds, 
+    #     batch_size=1, 
+    #     shuffle=False,
+    #     num_workers=0,
+    #     pin_memory=False, 
+    #     # prefetch_factor=4
+    # )
+
+
+# for batch in tqdm(dl):
+    # x = batch
+
+print(y.shape)
