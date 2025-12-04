@@ -129,7 +129,7 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
     root = zarr.create_group(store=zarr_path)
     shard_size_bases = 400_000_000 # unit: bases
     chunk_size_bases = 20_000_000 #20_000_000 -> fast for write
-    z_data = root.create_array(name = 'data', shape=(n, 0), chunks=(n, chunk_size_bases), shards=(n, shard_size_bases), dtype='uint8', overwrite=True)
+    z_data = root.create_array(name = 'data', shape=(0, n), chunks=(chunk_size_bases, n), shards=(shard_size_bases, n), dtype='uint8', overwrite=True)
     z_indptr = root.create_array(name = 'indptr', shape=(1,), chunks=(shard_size_bases,), dtype='uint64', overwrite=True)
     z_indptr[0] = 0 # initialize the start of the index pointers
     total_len=0
@@ -172,14 +172,14 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
             batch_indptr.append(total_len)
 
             if len(batch_data) >= batch_size_reads:
-                stacked_batch = np.concatenate(batch_data, axis=1, dtype='uint8')
-                z_data.append(stacked_batch, axis=1)
+                stacked_batch = np.concatenate(batch_data, axis=0, dtype='uint8')
+                z_data.append(stacked_batch, axis=0)
                 z_indptr.append(np.array(batch_indptr, dtype='uint32'))
                 batch_data = []
                 batch_indptr = []
         if batch_data:
-            stacked_batch = np.concatenate(batch_data, axis=1, dtype='uint8')
-            z_data.append(stacked_batch, axis=1)
+            stacked_batch = np.concatenate(batch_data, axis=0, dtype='uint8')
+            z_data.append(stacked_batch, axis=0)
             z_indptr.append(np.array(batch_indptr, dtype='uint32'))
     
 
