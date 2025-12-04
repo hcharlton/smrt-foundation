@@ -165,8 +165,8 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
                                    ri_vec, 
                                    rp_vec, 
                                    qual_vec,
-                                   ] + optional_tag_arrays), axis=0)
-            read_len = read_array.shape[1]
+                                   ] + optional_tag_arrays), axis=1)
+            read_len = read_array.shape[0]
             total_len += read_len
             batch_data.append(read_array)
             batch_indptr.append(total_len)
@@ -174,13 +174,13 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
             if len(batch_data) >= batch_size_reads:
                 stacked_batch = np.concatenate(batch_data, axis=0, dtype='uint8')
                 z_data.append(stacked_batch, axis=0)
-                z_indptr.append(np.array(batch_indptr, dtype='uint32'))
+                z_indptr.append(np.array(batch_indptr, dtype='uint64'))
                 batch_data = []
                 batch_indptr = []
         if batch_data:
             stacked_batch = np.concatenate(batch_data, axis=0, dtype='uint8')
             z_data.append(stacked_batch, axis=0)
-            z_indptr.append(np.array(batch_indptr, dtype='uint32'))
+            z_indptr.append(np.array(batch_indptr, dtype='uint64'))
     
 
     print("--- Debugging Counters ---")
