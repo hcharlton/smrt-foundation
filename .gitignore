@@ -1,5 +1,7 @@
 
 data/
+*.memmap
+*.npy
 *.lprof
 *.stdout
 *.stderr

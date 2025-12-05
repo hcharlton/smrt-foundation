@@ -1,45 +1,63 @@
 import glob
-import torch
 import numpy as np
-from torch.utils.data import Dataset, Dataloader
+import torch
 from tqdm import tqdm
+from torch.utils.data import Dataset, DataLoader
 
 class ShardedMemmapDataset(Dataset):
     def __init__(self, data_dir):
-        self.files = sorted(glob.glob(f"{data_dir}/shard_*.npy"))
-        self.file_indices = []
-        self.cumulative_sizes = [0]
+        self.shard_paths = sorted(glob.glob(f"{data_dir}/*.npy"))
         
-        # Quick index build (reads headers only)
-        for f in self.files:
-            # parsing header without loading data
-            shape = np.load(f, mmap_mode='r').shape 
-            self.cumulative_sizes.append(self.cumulative_sizes[-1] + shape[0])
-            
+        # Load the first shard just to read metadata (shape/dtype)
+        tmp = np.load(self.shard_paths[0], mmap_mode='r')
+        self.shard_size = tmp.shape[0]
+        self.seq_len = tmp.shape[1]
+        self.n_feats = tmp.shape[2]
+        
+        # Calculate total length (approximate if last shard is smaller, 
+        # but exact calculation is better if you have a metadata file)
+        self.total_len = len(self.shard_paths) * self.shard_size 
+        
+        # Cache open memmaps (optional, depends on RAM)
+        self.memmaps = [None] * len(self.shard_paths)
+
     def __len__(self):
-        return self.cumulative_sizes[-1]
-    
+        return self.total_len
+
     def __getitem__(self, idx):
-        # Binary search or simple bisect to find file_idx
-        file_idx = np.searchsorted(self.cumulative_sizes, idx, side='right') - 1
-        local_idx = idx - self.cumulative_sizes[file_idx]
+        # Locate shard and local index
+        shard_idx = idx // self.shard_size
+        local_idx = idx % self.shard_size
+        
+        # Lazy loading of memmaps
+        if self.memmaps[shard_idx] is None:
+            self.memmaps[shard_idx] = np.load(self.shard_paths[shard_idx], mmap_mode='r')
+            
+        # Get data (still on disk/OS cache)
+        # Copy to a fresh array to force load into RAM before converting to Tensor
+        # This prevents the "Negative Strides" error in PyTorch
+        data = np.array(self.memmaps[shard_idx][local_idx])
+        
+        # Split mask and features (since you stacked them)
+        features = data[:, :-1]
+        mask = data[:, -1]
+        
+        return {
+            "input": torch.from_numpy(features).long(), # or float
+            "mask": torch.from_numpy(mask).bool()
+        }
 
-        data = np.load(self.files[file_idx], mmap_mode='r')
-        return torch.from_numpy(data[local_idx].copy()) 
-    
-# ds = GenomicZarrDataset('./ob007.memmap')
-y = np.load('ob007.memmap/shard_00001.npy', mmap_mode='r')
-# dl = DataLoader(
-    #     ds, 
-    #     batch_size=1, 
-    #     shuffle=False,
-    #     num_workers=0,
-    #     pin_memory=False, 
-    #     # prefetch_factor=4
-    # )
-
-
-# for batch in tqdm(dl):
-    # x = batch
-
-print(y.shape)
+ds = ShardedMemmapDataset("./ob007.memmap")
+dl = DataLoader(
+    ds,
+    batch_size=512,
+    num_workers=4,
+    pin_memory=False,
+    shuffle=False,
+    persistent_workers=True
+)
+steps = 1000
+for i, batch in tqdm(enumerate(dl), total=steps, unit='batch'):
+    _ = batch['input']
+    if i >= steps:
+        break
