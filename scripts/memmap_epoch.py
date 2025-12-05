@@ -46,18 +46,27 @@ class ShardedMemmapDataset(Dataset):
             "input": torch.from_numpy(features).long(), # or float
             "mask": torch.from_numpy(mask).bool()
         }
-
-ds = ShardedMemmapDataset("./ob007.memmap")
-dl = DataLoader(
-    ds,
-    batch_size=512,
-    num_workers=4,
-    pin_memory=False,
-    shuffle=False,
-    persistent_workers=True
-)
-steps = 1000
-for i, batch in tqdm(enumerate(dl), total=steps, unit='batch'):
-    _ = batch['input']
-    if i >= steps:
-        break
+def main():
+    ds = ShardedMemmapDataset("../data/01_processed/ssl_sets/ob007.memmap")
+    dl = DataLoader(
+        ds,
+        batch_size=1024,
+        num_workers=8,
+        pin_memory=False,
+        shuffle=False,
+        persistent_workers=False,
+        prefetch_factor=8
+    )
+    steps = 500
+    iterator = iter(dl)
+    for i in tqdm(range(steps), unit='batch'):
+        try:
+            batch = next(iterator)
+        except StopIteration:
+            break
+    
+        _ = batch['input']
+    del iterator
+    del dl
+if __name__ == "__main__":
+    main()
