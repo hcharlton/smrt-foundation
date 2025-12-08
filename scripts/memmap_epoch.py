@@ -1,4 +1,5 @@
 import glob
+import os
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -6,7 +7,8 @@ from torch.utils.data import Dataset, DataLoader
 
 class ShardedMemmapDataset(Dataset):
     def __init__(self, data_dir):
-        self.shard_paths = sorted(glob.glob(f"{data_dir}/*.npy"))
+        expanded_dir = os.path.expandvars(data_dir)
+        self.shard_paths = sorted(glob.glob(os.path.join(expanded_dir, "*.npy")))
         
         # use first shard for metadata -> this makes the script break on the
         # last shard
@@ -43,10 +45,10 @@ class ShardedMemmapDataset(Dataset):
             "mask": torch.from_numpy(mask).bool()
         }
 def main():
-    ds = ShardedMemmapDataset("../data/01_processed/ssl_sets/ob007.memmap")
+    ds = ShardedMemmapDataset("$TMPDIR")
     dl = DataLoader(
         ds,
-        batch_size=1024,
+        batch_size=512,
         num_workers=8,
         pin_memory=False,
         shuffle=False,
