@@ -89,7 +89,7 @@ def zarr_to_sharded_memmap_channels_last(
 if __name__ == "__main__":
     zarr_to_sharded_memmap_channels_last(
         zarr_path='../data/01_processed/ssl_sets/ob007.zarr',
-        output_dir='./ob007.memmap',
+        output_dir='./ob007_2.memmap',
         seq_len=4096,
         shard_size=8192
     )

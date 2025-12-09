@@ -36,40 +36,33 @@ builtins.profile = profile
 # --- Profile boilerplate end ---
 
 @profile
-def _process_read(read, optional_tags, required_tags, per_base_tags):
+def _process_read(read, tags):
     """
     Processes a single pysam.AlignmentRead.
     Checks for required tags and extracts all full-length tag data.
     """
-    if not all(read.has_tag(tag) for tag in required_tags):
+    if not all(read.has_tag(tag) for tag in set(tags)-{'seq', 'qual'}):
         return None
-    tags_union = required_tags.union(set(optional_tags))
     read_data = {}
-    for tag in tags_union:
+    for tag in set(tags) - {'seq', 'qual'}:
         tag_data = read.get_tag(tag) if read.has_tag(tag) else None
         read_data[tag] = tag_data
-
-    # return None if any required tags are missing
-    if any(read_data[tag] is None or len(read_data[tag]) == 0 for tag in required_tags):
+    read_data |= {
+        'seq': read.query_sequence,
+        'qual': np.frombuffer(read.qual.encode('ascii'), dtype=np.uint8) - 33
+    }
+    
+    # return None if any tags are missing
+    if any(read_data[tag] is None or len(read_data[tag]) == 0 for tag in tags):
         return None
-
-    # return None if qualities is not the same length as seq
-    seq_len = read.query_length
-    if len(read.query_qualities) != seq_len:
+    # return None if the sequence is not consistent length across tags
+    if len(set([len(v) for k, v in read_data.items()])) != 1:
         return None
-
-    # return None if any of the tag data lengths that do not match seq
-    for tag in tags_union:
-        if tag in per_base_tags and read_data[tag] is not None:
-            if len(read_data[tag]) != seq_len:
-                return None 
     # return a dictionary with data from the read
     return {
         "name": read.query_name,
-        "seq": read.query_sequence,
-        "qual": np.frombuffer(read.qual.encode('ascii'), dtype=np.uint8) - 33,
-        "tag_data": read_data,
-        "seq_len": seq_len
+        "data": read_data,
+        "seq_len": read.query_length
     }
 
 def _check_tags(bam_path, tags, n_reads=100, threshold=0.8):
@@ -108,14 +101,23 @@ def _check_tags(bam_path, tags, n_reads=100, threshold=0.8):
 
 @profile
 def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list, config: dict):
-    per_base_tags = set(config['data']['per_base_tags']) # from config — defines which tags *could be* present at each base
-    # if 
-    required_tags = set(config['data']['kinetics_features']) # we always need the kinetics for the model training 
-    tags_union = required_tags.union(set(optional_tags)) # the set of all the tags to collect at each base
-
-    _check_tags(bam_path=bam_path, tags=tags_union, n_reads=20) # check that the requested tags exist -> exit if they aren't
-
     seq_map = config['data']['token_map']
+    fixed_tags = ['seq','qual'] + sorted(list(config['data']['kinetics_features']))
+    variable_tags = sorted([t for t in optional_tags if t not in fixed_tags])
+    out_columns = fixed_tags+variable_tags
+    n = len(out_columns) 
+    tag_to_idx = {tag: i for i, tag in enumerate(out_columns)}
+    _check_tags(bam_path=bam_path, tags=set(out_columns)-{'seq','qual'}, n_reads=20) # check that the requested tags exist -> exit if they don't
+
+    def _generate_array(tag, read_data):
+        """
+        Helper function to convert a python list to a np array
+        """
+        if tag == 'seq':
+            return lookup_table[np.frombuffer(read_data[tag].upper().encode('ascii'), dtype=np.uint8)]
+        else:
+            return np.array(read_data[tag], dtype=np.uint8)
+        
     # transfer to numpy byte array
     lookup_table = np.zeros(128, dtype=np.uint8)
     for base, val in seq_map.items():
@@ -124,17 +126,19 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
     
     counters = { "reads_processed": 0, "reads_skipped": 0, }
 
-    n = len(per_base_tags.intersection(tags_union)) + 2 # Add one for seq and one for qual, which are not tags but are in the sequence
-
+    #initialize zarr object
     root = zarr.create_group(store=zarr_path)
+    root.attrs['features'] = out_columns
+    root.attrs['tag_to_idx'] = tag_to_idx
     shard_size_bases = 400_000_000 # unit: bases
-    chunk_size_bases = 20_000_000 #20_000_000 -> fast for write
+    chunk_size_bases = 40_000_000 #20_000_000 -> fast for write
+    # initialize the arrays
     z_data = root.create_array(name = 'data', shape=(0, n), chunks=(chunk_size_bases, n), shards=(shard_size_bases, n), dtype='uint8', overwrite=True)
     z_indptr = root.create_array(name = 'indptr', shape=(1,), chunks=(shard_size_bases,), dtype='uint64', overwrite=True)
     z_indptr[0] = 0 # initialize the start of the index pointers
     total_len=0
     # Batching info. This is important for zarr write performance. Writes should be larger than a shard
-    batch_size_reads = shard_size_bases/1_000 # Largely empirical. Note that the unit of this is reads... which conservatively are 10-20k bases 
+    batch_size_reads = shard_size_bases/2_000 # Largely empirical. Note that the unit of this is reads... which conservatively are 10-20k bases 
     batch_data = []
     batch_indptr = []
     with pysam.AlignmentFile(bam_path, "rb", check_sq=False, threads=5) as bam:
@@ -142,30 +146,13 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
             if i >= n_reads and n_reads != 0:
                 break
             
-            read_data = _process_read(read, optional_tags, required_tags, per_base_tags=per_base_tags)
+            read_dict = _process_read(read, tags=out_columns)
             
-            if read_data is None:
+            if read_dict is None:
                 counters["reads_skipped"] += 1
                 continue
             counters["reads_processed"] += 1 
-            tag_dict = read_data["tag_data"]
-
-            seq_vec = lookup_table[np.frombuffer(read_data["seq"].upper().encode('ascii'), dtype=np.uint8)]
-            qual_vec = np.array(read_data["qual"], dtype = np.uint8)
-            fi_vec = np.array(tag_dict['fi'], dtype=np.uint8)
-            fp_vec = np.array(tag_dict['fp'], dtype=np.uint8)
-            ri_vec = np.array(tag_dict['ri'], dtype=np.uint8)
-            rp_vec = np.array(tag_dict['rp'], dtype=np.uint8)
-
-            optional_tag_arrays = [np.array(tag_dict[optional_tag]) for optional_tag in optional_tags] 
-
-            read_array = np.stack(([seq_vec,
-                                   fi_vec, 
-                                   fp_vec,
-                                   ri_vec, 
-                                   rp_vec, 
-                                   qual_vec,
-                                   ] + optional_tag_arrays), axis=1)
+            read_array = np.stack(([_generate_array(tag, read_dict['data']) for tag, idx in tag_to_idx.items()]), axis=1)
             read_len = read_array.shape[0]
             total_len += read_len
             batch_data.append(read_array)
