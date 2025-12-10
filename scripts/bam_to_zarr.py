@@ -135,10 +135,12 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
     # initialize the arrays
     z_data = root.create_array(name = 'data', shape=(0, n), chunks=(chunk_size_bases, n), shards=(shard_size_bases, n), dtype='uint8', overwrite=True)
     z_indptr = root.create_array(name = 'indptr', shape=(1,), chunks=(shard_size_bases,), dtype='uint64', overwrite=True)
+    # z_data = root.create_array(name = 'data', shape=(0, n), chunks=(shard_size_bases, n), dtype='uint8', overwrite=True)
     z_indptr[0] = 0 # initialize the start of the index pointers
     total_len=0
     # Batching info. This is important for zarr write performance. Writes should be larger than a shard
-    batch_size_reads = shard_size_bases/2_000 # Largely empirical. Note that the unit of this is reads... which conservatively are 10-20k bases 
+    # batch_size_reads = shard_size_bases/2_000 # Largely empirical. Note that the unit of this is reads... which conservatively are 10-20k bases 
+    batch_size_reads = shard_size_bases/2_000
     batch_data = []
     batch_indptr = []
     with pysam.AlignmentFile(bam_path, "rb", check_sq=False, threads=5) as bam:

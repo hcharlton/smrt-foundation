@@ -75,7 +75,7 @@ def zarr_conversion(bam_path, output_path, n_reads, optional_tags, config, profi
     tags_str = ' '.join(optional_tags)
     profiler_env = "TimeLINE_PROFILE=1" if profile else ""
 
-    options = {'cores': 12, 'memory': '256gb', 'walltime': '00:30:00'}
+    options = {'cores': 12, 'memory': '128gb', 'walltime': '00:30:00'}
     spec = f"""
     source $(conda info --base)/etc/profile.d/conda.sh
     conda activate smrt-foundation
@@ -112,49 +112,49 @@ def create_ssl_dataset(bam_path, output_path, n_reads, context, optional_tags, d
 
 ### ---------- WORKFLOW GRAPH ------------
 
-da1_data_target = gwf.target_from_template(
-    name="create_da1_ssl_dataset",
-    template=create_ssl_dataset(
-        bam_path=CONFIG['da1_data']['bam'],
-        output_path=CONFIG['da1_data']['ds'],
-        n_reads=CONFIG['da1_data']['n_reads'],
-        context=CONFIG['da1_data']['context'],
-        denomination=CONFIG['da1_data']['denomination'],
-        optional_tags=CONFIG['da1_data']['optional_tags'],
-        config=CONFIG['config_path']
-    )
-)
+# da1_data_target = gwf.target_from_template(
+#     name="create_da1_ssl_dataset",
+#     template=create_ssl_dataset(
+#         bam_path=CONFIG['da1_data']['bam'],
+#         output_path=CONFIG['da1_data']['ds'],
+#         n_reads=CONFIG['da1_data']['n_reads'],
+#         context=CONFIG['da1_data']['context'],
+#         denomination=CONFIG['da1_data']['denomination'],
+#         optional_tags=CONFIG['da1_data']['optional_tags'],
+#         config=CONFIG['config_path']
+#     )
+# )
 
-zar_test_target = gwf.target_from_template(
-    name="zarr_test",
-    template=zarr_conversion(
-        bam_path=CONFIG['zarr_test']['bam'],
-        output_path=CONFIG['zarr_test']['ds'],
-        n_reads= CONFIG['zarr_test']['n_reads'],
-        optional_tags=CONFIG['zarr_test']['optional_tags'],
-        config=CONFIG['config_path'],
-        profile=True
-    )
-)
+# zar_test_target = gwf.target_from_template(
+#     name="zarr_test",
+#     template=zarr_conversion(
+#         bam_path=CONFIG['zarr_test']['bam'],
+#         output_path=CONFIG['zarr_test']['ds'],
+#         n_reads= CONFIG['zarr_test']['n_reads'],
+#         optional_tags=CONFIG['zarr_test']['optional_tags'],
+#         config=CONFIG['config_path'],
+#         profile=True
+#     )
+# )
 
-zar_test_ob007_target = gwf.target_from_template(
-    name="zarr_test_ob007",
-    template=zarr_conversion(
-        bam_path=CONFIG['zarr_test_ob007']['bam'],
-        output_path=CONFIG['zarr_test_ob007']['ds'],
-        n_reads= CONFIG['zarr_test_ob007']['n_reads'],
-        optional_tags=CONFIG['zarr_test_ob007']['optional_tags'],
-        config=CONFIG['config_path'],
-        profile=True
-    )
-)
+# zar_test_ob007_target = gwf.target_from_template(
+#     name="zarr_test_ob007",
+#     template=zarr_conversion(
+#         bam_path=CONFIG['zarr_test_ob007']['bam'],
+#         output_path=CONFIG['zarr_test_ob007']['ds'],
+#         n_reads= CONFIG['zarr_test_ob007']['n_reads'],
+#         optional_tags=CONFIG['zarr_test_ob007']['optional_tags'],
+#         config=CONFIG['config_path'],
+#         profile=True
+#     )
+# )
 
 da1_to_zarr = gwf.target_from_template(
     name="da1_to_zarr",
     template=zarr_conversion(
         bam_path=CONFIG['da1_to_zarr']['bam'],
         output_path=CONFIG['da1_to_zarr']['ds'],
-        n_reads=200_000, # CONFIG['da1_to_zarr']['n_reads'],
+        n_reads= CONFIG['da1_to_zarr']['n_reads'],
         optional_tags=CONFIG['da1_to_zarr']['optional_tags'],
         config=CONFIG['config_path'],
         profile=True
@@ -166,7 +166,7 @@ ob007_to_zarr = gwf.target_from_template(
     template=zarr_conversion(
         bam_path=CONFIG['ob007_to_zarr']['bam'],
         output_path=CONFIG['ob007_to_zarr']['ds'],
-        n_reads=200_000, # CONFIG['da1_to_zarr']['n_reads'],
+        n_reads= 2_000_000, #CONFIG['da1_to_zarr']['n_reads'],
         optional_tags=CONFIG['ob007_to_zarr']['optional_tags'],
         config=CONFIG['config_path'],
         profile=True
