@@ -41,6 +41,7 @@ CONFIG = {
         'optional_tags': ['sm','sx'],
         'n_reads': 0,
         },
+    
     }
 
 # SLURM backend gwf worker
@@ -75,7 +76,7 @@ def zarr_conversion(bam_path, output_path, n_reads, optional_tags, config, profi
     tags_str = ' '.join(optional_tags)
     profiler_env = "TimeLINE_PROFILE=1" if profile else ""
 
-    options = {'cores': 12, 'memory': '128gb', 'walltime': '00:30:00'}
+    options = {'cores': 12, 'memory': '128gb', 'walltime': '18:00:00'}
     spec = f"""
     source $(conda info --base)/etc/profile.d/conda.sh
     conda activate smrt-foundation
@@ -109,6 +110,27 @@ def create_ssl_dataset(bam_path, output_path, n_reads, context, optional_tags, d
         --denomination {denomination}
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+def memmap_conversion(zarr_path, output_path, config_path, shard_size = 16384, shards=0, profile=False):
+    inputs = {'in_file': zarr_path}
+    outputs = {'out_file': output_path}
+    options = {'cores': 12, 'memory': '64gb', 'walltime': '00:30:00'}
+
+    profiler_env = "TimeLINE_PROFILE=1" if profile else ""
+
+    spec = f"""
+    source $(conda info --base)/etc/profile.d/conda.sh
+    conda activate smrt-foundation
+    cd {p('')}
+    {profiler_env} python -m scripts.zarr_to_memmap \\
+        --input_path {zarr_path} \\
+        --output_path {output_path} \\
+        --config_path {config_path} \\
+        --shard_size {shard_size} \\
+        --max_shards {shards}
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
 
 ### ---------- WORKFLOW GRAPH ------------
 
@@ -166,9 +188,20 @@ ob007_to_zarr = gwf.target_from_template(
     template=zarr_conversion(
         bam_path=CONFIG['ob007_to_zarr']['bam'],
         output_path=CONFIG['ob007_to_zarr']['ds'],
-        n_reads= 2_000_000, #CONFIG['da1_to_zarr']['n_reads'],
+        n_reads= CONFIG['da1_to_zarr']['n_reads'],
         optional_tags=CONFIG['ob007_to_zarr']['optional_tags'],
         config=CONFIG['config_path'],
+        profile=True
+    )
+)
+
+zarr_to_memmap_test = gwf.target_from_template(
+    name='zarr_to_memmap_test',
+    template=memmap_conversion(
+        zarr_path=ob007_to_zarr.outputs['out_file'],
+        output_path='data/01_processed/ssl_sets/ob007.memmap',
+        config_path=CONFIG['config_path'],
+        shards=100,
         profile=True
     )
 )

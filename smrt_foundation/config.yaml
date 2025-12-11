@@ -3,6 +3,7 @@ model:
   params:
     d_model: 128
     nhead: 4
+    context: 4096
     num_layers: 4
     dim_feedforward: 512
     predict_steps: 5

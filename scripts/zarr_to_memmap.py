@@ -2,14 +2,47 @@ import os
 import math
 import numpy as np
 import zarr
+import sys
 from tqdm import tqdm
+import argparse
+from smrt_foundation.utils import parse_yaml
 
-def zarr_to_sharded_memmap_channels_last(
+# --- Profile boilerplate begin ---
+import os
+import builtins
+import atexit
+
+if os.environ.get('TimeLINE_PROFILE'):
+    # only imports line_profiler if the env var is set
+    from line_profiler import LineProfiler
+    lp = LineProfiler()
+    
+    # decorator definition
+    def profile(func):
+        return lp(func)
+        
+    # save log
+    def save_profile():
+        # filename
+        profiler_out_path = 'zarr_to_memmap.lprof'
+        lp.dump_stats(profiler_out_path) 
+        print("\n[Profiler] Stats saved to 'profile_output.lprof'")
+    
+    atexit.register(save_profile)
+else:
+    def profile(func):
+        return func
+builtins.profile = profile
+# --- Profile boilerplate end ---
+
+@profile
+def zarr_to_sharded_memmap(
     zarr_path: str,
     output_dir: str,
+    max_shards: int,
     seq_len: int = 4096,
     shard_size: int = 16384,
-    pad_value: int = 0
+    pad_value: int = 0,
 ):
     os.makedirs(output_dir, exist_ok=True)
     
@@ -27,6 +60,8 @@ def zarr_to_sharded_memmap_channels_last(
     batch_size = 1000 
     
     for i in tqdm(range(0, total_reads, batch_size), desc="Processing reads"):
+        if shard_idx > max_shards and max_shard != 0:
+            break
         end_batch = min(i + batch_size, total_reads)
         idx_start = indptr[i]
         idx_end = indptr[end_batch]
@@ -48,18 +83,17 @@ def zarr_to_sharded_memmap_channels_last(
                 seg_start = seg * seq_len
                 seg_end = min(seg_start + seq_len, r_len)
                 
-                # 1. Extract Data
+                # get data
                 segment = read[seg_start:seg_end, :]
                 current_seg_len = segment.shape[0]
                 
-                # 2. Create Mask: (current_seg_len, 1)
+                # make mask (currently contains no information)
                 mask_segment = np.ones((current_seg_len, 1), dtype=np.uint8)
                 
-                # 3. Stack Features + Mask -> (current_seg_len, Features+1)
-                # Concatenate along axis 1 (columns)
+                # stack mask and features
                 combined_segment = np.hstack([segment, mask_segment]).astype(np.uint8)
                 
-                # 4. Pad Time Dimension (axis 0)
+                # add information to mask
                 if current_seg_len < seq_len:
                     pad_width = seq_len - current_seg_len
                     # Pad axis 0 with pad_value, axis 1 (features) with 0
@@ -86,10 +120,44 @@ def zarr_to_sharded_memmap_channels_last(
         save_path = os.path.join(output_dir, f"shard_{shard_idx:05d}.npy")
         np.save(save_path, arr)
 
-if __name__ == "__main__":
-    zarr_to_sharded_memmap_channels_last(
-        zarr_path='../data/01_processed/ssl_sets/ob007.zarr',
-        output_dir='./ob007_2.memmap',
-        seq_len=4096,
-        shard_size=8192
+def main():
+    parser = argparse.ArgumentParser(
+        description='Converts a large zarr file into padded binary numpy tensors in shards'
     )
+    parser.add_argument('--input_path',
+                        type=str,
+                        required=True,
+                        help='path to input zarr file')
+    parser.add_argument('--output_path',
+                        type=str,
+                        required=True,
+                        help='path for output -> will create a directory')
+    parser.add_argument('--config_path',
+                        type=str,
+                        required=True,
+                        help='path to config file')
+    parser.add_argument('--shard_size',
+                        type=int,
+                        required=True,
+                        help='number of samples per shard'
+                        )
+    parser.add_argument('--max_shards',
+                        type=int,
+                        required=True,
+                        help='the max number of shards to output. 0 -> process entire zarr file into shards' )
+    args = parser.parse_args()
+    if args.max_shards < 0:
+        print("Error: n_reads should be positive or 0 (to indicate all reads).")
+        sys.exit(1)
+
+    config = parse_yaml(args.config_path)
+    context = config['model']['params']['context']
+    zarr_to_sharded_memmap(
+        zarr_path=args.input_path,
+        output_dir=os.path.expanduser(args.output_path),
+        seq_len=context,
+        shard_size=args.shard_size,
+        max_shards= args.max_shards
+    )
+if __name__ == "__main__":
+    main()

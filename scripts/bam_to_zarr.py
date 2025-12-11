@@ -143,6 +143,7 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
     batch_size_reads = shard_size_bases/2_000
     batch_data = []
     batch_indptr = []
+    batch_i_bases = 0
     with pysam.AlignmentFile(bam_path, "rb", check_sq=False, threads=5) as bam:
         for i, read in enumerate(bam):
             if i >= n_reads and n_reads != 0:
@@ -153,19 +154,23 @@ def bam_to_zarr(bam_path: str, zarr_path: str, n_reads: int, optional_tags: list
             if read_dict is None:
                 counters["reads_skipped"] += 1
                 continue
-            counters["reads_processed"] += 1 
-            read_array = np.stack(([_generate_array(tag, read_dict['data']) for tag, idx in tag_to_idx.items()]), axis=1)
-            read_len = read_array.shape[0]
+            counters["reads_processed"] += 1
+                        
+            read_len = read_dict['seq_len']
+            batch_i_bases += read_len
             total_len += read_len
+
+            read_array = np.stack(([_generate_array(tag, read_dict['data']) for tag, idx in tag_to_idx.items()]), axis=1)
             batch_data.append(read_array)
             batch_indptr.append(total_len)
 
-            if len(batch_data) >= batch_size_reads:
+            if batch_i_bases  >= shard_size_bases:
                 stacked_batch = np.concatenate(batch_data, axis=0, dtype='uint8')
                 z_data.append(stacked_batch, axis=0)
                 z_indptr.append(np.array(batch_indptr, dtype='uint64'))
                 batch_data = []
                 batch_indptr = []
+                batch_i_bases = 0
         if batch_data:
             stacked_batch = np.concatenate(batch_data, axis=0, dtype='uint8')
             z_data.append(stacked_batch, axis=0)

@@ -51,15 +51,17 @@ def main():
         batch_size=512,
         num_workers=8,
         pin_memory=False,
-        shuffle=False,
+        shuffle=True,
         persistent_workers=False,
         prefetch_factor=8
     )
-    steps = 500
+    steps = 3200
     iterator = iter(dl)
     for i in tqdm(range(steps), unit='batch'):
         try:
             batch = next(iterator)
+            if i % 100 == 0:
+                print(batch['input'].shape)
         except StopIteration:
             break
     
