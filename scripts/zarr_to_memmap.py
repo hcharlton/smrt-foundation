@@ -59,8 +59,8 @@ def zarr_to_sharded_memmap(
     shard_idx = 0
     batch_size = 1000 
     
-    for i in tqdm(range(0, total_reads, batch_size), desc="Processing reads"):
-        if shard_idx > max_shards and max_shard != 0:
+    for i in range(0, total_reads, batch_size):
+        if shard_idx > max_shards and max_shards != 0:
             break
         end_batch = min(i + batch_size, total_reads)
         idx_start = indptr[i]

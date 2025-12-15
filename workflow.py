@@ -114,6 +114,7 @@ def create_ssl_dataset(bam_path, output_path, n_reads, context, optional_tags, d
 def memmap_conversion(zarr_path, output_path, config_path, shard_size = 16384, shards=0, profile=False):
     inputs = {'in_file': zarr_path}
     outputs = {'out_file': output_path}
+    
     options = {'cores': 12, 'memory': '64gb', 'walltime': '00:30:00'}
 
     profiler_env = "TimeLINE_PROFILE=1" if profile else ""
