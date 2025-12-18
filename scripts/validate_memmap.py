@@ -5,18 +5,18 @@ import argparse
 import sys
 
 def verify_output(data_dir):
-    print(f"🔍 Verifying data in: {data_dir}\n")
+    print(print("Verifying data in: {data_dir}\n")
     
     # --- 1. Load Metadata ---
-    schema_path = os.path.join(data_dir, "dataset_schema.json")
+    schema_path = os.path.join(data_dir, "schema.json")
     if not os.path.exists(schema_path):
-        print("❌ CRITICAL: dataset_schema.json not found!")
+        print ("error: dataset_schema.json not found!")
         sys.exit(1)
         
     with open(schema_path, 'r') as f:
         schema = json.load(f)
     
-    print("✅ Schema loaded successfully.")
+    print("Schema loaded successfully.")
     features = schema['features']
     seq_idx = features.index('seq')
     mask_idx = features.index('mask')
@@ -25,17 +25,17 @@ def verify_output(data_dir):
     # --- 2. Load First Shard ---
     shard_path = os.path.join(data_dir, "shard_00000.npy")
     if not os.path.exists(shard_path):
-        print("❌ CRITICAL: shard_00000.npy not found!")
+        print("error: shard_00000.npy not found!")
         sys.exit(1)
         
     data = np.load(shard_path)
-    print(f"✅ Loaded shard_00000.npy. Shape: {data.shape} | Dtype: {data.dtype}")
+    print(f"loaded shard_00000.npy. Shape: {data.shape} | Dtype: {data.dtype}")
     
     if data.dtype != np.float16:
-        print(f"⚠️  WARNING: Data is {data.dtype}, expected float16.")
+        print(f"warning: Data is {data.dtype}, expected float16.")
 
-    # --- TEST A: Column Integrity (Seq vs Signal) ---
-    print("\n[TEST A] Column Type Integrity")
+    # --- TEST 1: Column Integrity (Seq vs Signal) ---
+    print("\n[TEST 1] Column Type Integrity")
     
     # Check Sequence Column: Should be essentially integers (0.0, 1.0, 2.0, 3.0, 4.0)
     seq_col = data[:, :, seq_idx].flatten()
@@ -46,13 +46,13 @@ def verify_output(data_dir):
     is_discrete = np.all(np.abs(valid_seq - np.round(valid_seq)) < 0.1)
     if is_discrete:
         unique_vals = np.unique(np.round(valid_seq))
-        print(f"   ✅ 'seq' column contains discrete values: {unique_vals}")
+        print(f"'seq' column contains discrete values: {unique_vals}")
     else:
-        print(f"   ❌ 'seq' column contains non-integers! Did you accidentally normalize it?")
+        print(f" 'seq' column contains non-integers — indicates it was normalized")
         print(f"      Sample values: {valid_seq[:10]}")
 
-    # --- TEST B: Normalization Stats ---
-    print("\n[TEST B] Statistical Normalization Check (Target: Mean~0, Std~1)")
+    # --- TEST 2: Normalization Stats ---
+    print("\n[TEST 2] Statistical Normalization Check (Target: Mean~0, Std~1)")
     
     for i, feat in enumerate(features):
         if feat in ['seq', 'mask']: continue
@@ -63,11 +63,11 @@ def verify_output(data_dir):
         curr_mean = np.mean(valid_data)
         curr_std = np.std(valid_data)
         
-        status = "✅" if abs(curr_mean) < 0.2 and abs(curr_std - 1.0) < 0.2 else "⚠️ "
+        status = "success" if abs(curr_mean) < 0.2 and abs(curr_std - 1.0) < 0.2 else "warning "
         print(f"   {status} Feature '{feat}': Mean={curr_mean:.3f}, Std={curr_std:.3f}")
 
-    # --- TEST C: Reverse Complement Logic ---
-    print("\n[TEST C] Reverse Complement Alignment")
+    # --- TEST 2: Reverse Complement Logic ---
+    print("\n[TEST 3] Reverse Complement Alignment")
     # We assume Row 0 is FWD and Row 1 is REV
     
     fwd_row = data[0]
@@ -79,9 +79,9 @@ def verify_output(data_dir):
     rev_len = np.sum(rev_row[:, mask_idx])
     
     if fwd_len != rev_len:
-         print(f"   ❌ Length mismatch! Fwd: {fwd_len}, Rev: {rev_len}")
+         print(f"error: length mismatch. Fwd: {fwd_len}, Rev: {rev_len}")
     else:
-         print(f"   ✅ Sequence lengths match ({int(fwd_len)} bp).")
+         print(f"success: sequence lengths match ({int(fwd_len)} bp).")
 
     # 2. Verify Sequence Transformation (Time Flip + Complement)
     # Extract only valid sequence parts
@@ -102,29 +102,29 @@ def verify_output(data_dir):
     match_pct = np.mean(matches) * 100
     
     if match_pct > 99.9:
-        print(f"   ✅ Reverse Complement logic is PERFECT (100% match).")
-        print(f"      Sample Fwd: {seq_fwd_valid[:5]} ...")
-        print(f"      Sample Rev: {seq_rev_valid[:5]} ... (should be RC of end of Fwd)")
+        print(f"   success on reverse complement logic.")
+        print(f"           Sample Fwd: {seq_fwd_valid[:5]} ...")
+        print(f"           Sample Rev: {seq_rev_valid[:5]} ... (should be RC of end of Fwd)")
     else:
-        print(f"   ❌ Logic FAIL. Only {match_pct:.2f}% match.")
-        print("      Debug:")
-        print(f"      Fwd (End, flipped): {manual_flip[:5]}")
-        print(f"      Expected RC:        {manual_rc[:5]}")
-        print(f"      Actual Rev File:    {seq_rev_valid[:5]}")
+        print(f"   error on reverse complement: match pct {match_pct:.2f}% match.")
+        print("          Debug:")
+        print(f"         Fwd (End, flipped): {manual_flip[:5]}")
+        print(f"         Expected RC:        {manual_rc[:5]}")
+        print(f"         Actual Rev File:    {seq_rev_valid[:5]}")
 
-    # --- TEST D: Padding Check ---
-    print("\n[TEST D] Padding Safety")
+    # --- TEST 4: Padding Check ---
+    print("\n[TEST 4] Padding Safety")
     # Check regions where mask is 0. All other features MUST be 0.
     
     invalid_mask = data[:, :, mask_idx] == 0.0
     if np.sum(invalid_mask) > 0:
         leakage = np.sum(np.abs(data[invalid_mask]))
         if leakage == 0.0:
-            print("   ✅ Padding is clean (all zeros).")
+            print("success: padding is clean (all 0s outside data).")
         else:
-            print(f"   ❌ Garbage found in padding zones! Sum of absolute values: {leakage}")
+            print(f"error: non-valid padding found in padding zones. sum of absolute values: {leakage}")
     else:
-        print("   ℹ️  No padding found in this shard (full sequences).")
+        print("padding not present indicating a full seqeuence.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

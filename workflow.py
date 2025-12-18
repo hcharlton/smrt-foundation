@@ -81,27 +81,6 @@ def create_ssl_dataset(bam_path, output_path, n_reads, context, optional_tags, d
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
-def memmap_conversion(zarr_path, output_path, config_path, shard_size = 16384, shards=0, profile=False):
-    inputs = {'in_file': zarr_path}
-    outputs = {'out_file': output_path}
-    
-    options = {'cores': 12, 'memory': '64gb', 'walltime': '18:00:00'}
-
-    profiler_env = "TimeLINE_PROFILE=1" if profile else ""
-
-    spec = f"""
-    source $(conda info --base)/etc/profile.d/conda.sh
-    conda activate smrt-foundation
-    cd {p('')}
-    {profiler_env} python -m scripts.zarr_to_memmap \\
-        --input_path {zarr_path} \\
-        --output_path {output_path} \\
-        --config_path {config_path} \\
-        --shard_size {shard_size} \\
-        --max_shards {shards}
-    """
-    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
-
 def inject_norm_stats(zarr_path, chunk_stride, idx_stride, num_threads):
     sentinel = f"{zarr_path}.stats_added"
     inputs = {'infile': zarr_path}
@@ -122,6 +101,69 @@ def inject_norm_stats(zarr_path, chunk_stride, idx_stride, num_threads):
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
     
+def memmap_conversion(
+    zarr_path, 
+    output_path, 
+    config_path, 
+    shard_size=16384, 
+    shards=0, 
+    seq_len=4096,
+    fwd_features=['seq', 'fi', 'fp'],
+    rev_features=['seq', 'ri', 'rp'],
+    reverse_complement=True,
+    profile=False
+):
+    inputs = {'in_file': zarr_path}
+    outputs = {'out_file': output_path}
+    
+    options = {'cores': 4, 'memory': '32gb', 'walltime': '00:30:00'}
+
+    profiler_env = "TimeLINE_PROFILE=1" if profile else ""
+    
+    rc_flag = "--reverse_complement" if reverse_complement else ""
+    
+    fwd_str = " ".join(fwd_features)
+    rev_str = " ".join(rev_features)
+
+    spec = f"""
+    source $(conda info --base)/etc/profile.d/conda.sh
+    conda activate smrt-foundation
+    cd {p('')}
+    
+    {profiler_env} python -m scripts.zarr_to_memmap \\
+        --input_path {zarr_path} \\
+        --output_path {output_path} \\
+        --config_path {config_path} \\
+        --shard_size {shard_size} \\
+        --max_shards {shards} \\
+        --seq_len {seq_len} \\
+        --fwd_features {fwd_str} \\
+        --rev_features {rev_str} \\
+        {rc_flag}
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+
+def validate_memmap(
+    memmap_path,
+    log_path
+):
+    inputs = {'in_file': memmap_path}
+    outputs = {'out_file': log_path}
+
+    options = {'cores': 4, 'memory': '32gb', 'walltime': '00:30:00'}
+    
+    spec = f"""
+    source $(conda info --base)/etc/profile.d/conda.sh
+    conda activate smrt-foundation
+    cd {p('')}
+    
+    {profiler_env} python -m scripts.validate_memmap \\
+        --input_path {zarr_path} \\
+        --output_path {output_path}
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
 
 
 ### ---------- WORKFLOW GRAPH ------------
@@ -151,16 +193,6 @@ ob007_to_zarr = gwf.target_from_template(
     )
 )
 
-zarr_to_memmap_test = gwf.target_from_template(
-    name='zarr_to_memmap_test',
-    template=memmap_conversion(
-        zarr_path=ob007_to_zarr.outputs['out_file'],
-        output_path='data/01_processed/ssl_sets/ob007_100shards.memmap',
-        config_path=CONFIG['config_path'],
-        shards=100,
-        profile=True
-    )
-)
 
 ob007_to_memmap = gwf.target_from_template(
     name='ob007_to_memmap',
@@ -194,57 +226,16 @@ stats_test = gwf.target_from_template(
 # )
 
 
-def memmap_conversion_split(
-    zarr_path, 
-    output_path, 
-    config_path, 
-    shard_size=16384, 
-    shards=0, 
-    seq_len=4096,
-    fwd_features=['seq', 'fi', 'fp'],
-    rev_features=['seq', 'ri', 'rp'],
-    reverse_complement=True,
-    profile=False
-):
-    inputs = {'in_file': zarr_path}
-    outputs = {'out_file': output_path}
-    
-    options = {'cores': 4, 'memory': '32gb', 'walltime': '00:30:00'}
-
-    profiler_env = "TimeLINE_PROFILE=1" if profile else ""
-    
-    rc_flag = "--reverse_complement" if reverse_complement else ""
-    
-    fwd_str = " ".join(fwd_features)
-    rev_str = " ".join(rev_features)
-
-    spec = f"""
-    source $(conda info --base)/etc/profile.d/conda.sh
-    conda activate smrt-foundation
-    cd {p('')}
-    
-    {profiler_env} python -m scripts.zarr_to_memmap_3 \\
-        --input_path {zarr_path} \\
-        --output_path {output_path} \\
-        --config_path {config_path} \\
-        --shard_size {shard_size} \\
-        --max_shards {shards} \\
-        --seq_len {seq_len} \\
-        --fwd_features {fwd_str} \\
-        --rev_features {rev_str} \\
-        {rc_flag}
-    """
-    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
 
-zarr_to_memmap_test_2 = gwf.target_from_template(
-    name='zarr_to_memmap_test_2',
-    template=memmap_conversion_split(
+zarr_to_memmap_test = gwf.target_from_template(
+    name='zarr_to_memmap_test',
+    template=memmap_conversion(
         zarr_path=ob007_to_zarr.outputs['out_file'],
-        output_path='data/01_processed/ssl_sets/ob007_100shards_split.memmap',
+        output_path='data/01_processed/ssl_sets/ob007_test_memmap.memmap',
         config_path=CONFIG['config_path'],
         shards=3,
-        seq_len = 4096
+        seq_len = 4096,
         shard_size=16384,
         fwd_features=['seq', 'fi', 'fp'],
         rev_features=['seq', 'ri', 'rp'],
@@ -252,3 +243,4 @@ zarr_to_memmap_test_2 = gwf.target_from_template(
         profile=True
     )
 )
+

@@ -1,176 +1,181 @@
 import os
 import math
+import json
 import numpy as np
 import zarr
-import sys
-from tqdm import tqdm
 import argparse
-from smrt_foundation.utils import parse_yaml
+import yaml
 
-# --- Profile boilerplate begin ---
-import os
-import builtins
-import atexit
+class ShardWriter:
+    def __init__(self, output_dir, shard_size, seq_len, num_features, pad_value=0.0):
+        self.output_dir = output_dir
+        self.shard_size = shard_size
+        self.shape = (shard_size, seq_len, num_features)
+        self.buffer = np.full(self.shape, pad_value, dtype=np.float16)
+        self.ptr = 0
+        self.shard_idx = 0
 
-if os.environ.get('TimeLINE_PROFILE'):
-    # only imports line_profiler if the env var is set
-    from line_profiler import LineProfiler
-    lp = LineProfiler()
-    
-    # decorator definition
-    def profile(func):
-        return lp(func)
+    def add(self, data):
+        """Adds a single segment to the buffer. Flushes if full."""
+        # Flush if full
+        if self.ptr >= self.shard_size:
+            self._flush()
         
-    # save log
-    def save_profile():
-        # filename
-        profiler_out_path = 'zarr_to_memmap.lprof'
-        lp.dump_stats(profiler_out_path) 
-        print("\n[Profiler] Stats saved to 'profile_output.lprof'")
-    
-    atexit.register(save_profile)
-else:
-    def profile(func):
-        return func
-builtins.profile = profile
-# --- Profile boilerplate end ---
+        # write step
+        # data shape: (seq_len, features)
+        # buffer shape: (shard, seq_len, features)
+        self.buffer[self.ptr, :data.shape[0], :] = data
+        self.ptr += 1
 
-@profile
+    def _flush(self):
+        save_path = os.path.join(self.output_dir, f"shard_{self.shard_idx:05d}.npy")
+        data_to_save = self.buffer[:self.ptr] if self.ptr < self.shard_size else self.buffer
+        np.save(save_path, data_to_save)
+        
+        self.shard_idx += 1
+        self.ptr = 0
+        self.buffer.fill(0.0) # Reset
+
+    def finalize(self):
+        if self.ptr > 0:
+            self._flush()
+
+def get_normalization_vectors(fwd_feats, rev_feats, zarr_attrs):
+    """Generates mean/std vectors and metadata dictionary."""
+    norm_stats = zarr_attrs.get('log_norm', {})
+    num = len(fwd_feats)
+    
+    # Vectors (Float32 for precision during math)
+    fwd_m, fwd_s = np.zeros(num, dtype=np.float32), np.ones(num, dtype=np.float32)
+    rev_m, rev_s = np.zeros(num, dtype=np.float32), np.ones(num, dtype=np.float32)
+    stats_meta = {}
+
+    for i, (f, r) in enumerate(zip(fwd_feats, rev_feats)):
+        if f in norm_stats: fwd_m[i], fwd_s[i] = norm_stats[f]['mean'], norm_stats[f]['std']
+        if r in norm_stats: rev_m[i], rev_s[i] = norm_stats[r]['mean'], norm_stats[r]['std']
+        
+        stats_meta[f"col_{i}_{f}"] = {
+            "fwd": {"name": f, "mean": float(fwd_m[i]), "std": float(fwd_s[i])},
+            "rev": {"name": r, "mean": float(rev_m[i]), "std": float(rev_s[i])}
+        }
+    return fwd_m, fwd_s, rev_m, rev_s, stats_meta
+
 def zarr_to_sharded_memmap(
-    zarr_path: str,
-    output_dir: str,
-    max_shards: int,
-    config,
-    target_Features = ['seq', 'fi']
-    seq_len: int = 4096,
-    shard_size: int = 16384,
-    pad_value: int = 0,
+    zarr_path, output_dir, config, 
+    fwd_features=['seq', 'fi', 'fp'], 
+    rev_features=['seq', 'ri', 'rp'],
+    seq_len=4096, shard_size=16384, max_shards=0, 
+    use_rc=False
 ):
     os.makedirs(output_dir, exist_ok=True)
-    
     root = zarr.open(zarr_path, mode='r')
-    log_norm = root.attrs['log_norm']
-    tag_to_idx = root.attrs['tag_to_idx']
-    z_data = root['data'] 
+    
+    f_mean, f_std, r_mean, r_std, stats_meta = get_normalization_vectors(
+        fwd_features, rev_features, root.attrs
+    )
+    
+    # collect features
+    output_feats = fwd_features + ['mask']
+    # make normalization mask (no normalization of the padding or seq)
+    is_loggable = np.array([f != 'seq' for f in fwd_features]) # Mask for log1p
+    try: seq_idx = fwd_features.index('seq')
+    except ValueError: seq_idx = None
+
+    # save data schema
+    with open(os.path.join(output_dir, "schema.json"), "w") as f:
+        json.dump({
+            "output_shape": ["Batch", seq_len, len(output_feats)],
+            "features": output_feats,
+            "normalization": stats_meta,
+            "reverse_complement": use_rc,
+            "dtype": "float16"
+        }, f, indent=4)
+
+    # 2. Setup IO
+    writer = ShardWriter(output_dir, shard_size, seq_len, len(output_feats))
+    z_data = root['data']
     indptr = root['indptr'][:]
     
-    
-    # target output: (N, Seq_Len, Features + 1) -> +1 for padding mask
-    # adopted channel last as standard
-    
-    total_reads = len(indptr) - 1
-    current_shard = []
-    shard_idx = 0
+    # Prepare indices for loading
+    all_feats = root.attrs['features']
+    load_indices = list(set([all_feats.index(f) for f in fwd_features + rev_features]))
+    idx_map = {orig: i for i, orig in enumerate(load_indices)}
+    fwd_local = [idx_map[all_feats.index(f)] for f in fwd_features]
+    rev_local = [idx_map[all_feats.index(f)] for f in rev_features]
+
+    # loop over batches
     batch_size = 1000
-    # generate vector of normalization constants
-    kinetics_features = config['data']['kinetics_features']
+    total_reads = len(indptr) - 1
     
     for i in range(0, total_reads, batch_size):
-        if shard_idx > max_shards and max_shards != 0:
-            break
-        end_batch = min(i + batch_size, total_reads)
-        idx_start = indptr[i]
-        idx_end = indptr[end_batch]
+        if max_shards and writer.shard_idx > max_shards: break
         
-        # Load batch: (Batch_Time, Features)
-        forward_features = ['seq', 'fi', 'fp']
-        reverse_features = ['seq', 'ri', 'rp']
-        chunk_data = z_data[idx_start:idx_end, :]
-        local_start = 0
+        idx_start, idx_end = indptr[i], indptr[min(i + batch_size, total_reads)]
         
-        for r in range(i, end_batch):
+        # Load & Pre-process Batch
+        chunk = z_data[idx_start:idx_end, load_indices].astype(np.float32)
+        b_fwd, b_rev = chunk[:, fwd_local], chunk[:, rev_local]
+
+        # apply masked log1 and normalize
+        np.log1p(b_fwd, out=b_fwd, where=is_loggable)
+        np.log1p(b_rev, out=b_rev, where=is_loggable)
+        
+        b_fwd = ((b_fwd - f_mean) / f_std).astype(np.float16)
+        b_rev = ((b_rev - r_mean) / r_std).astype(np.float16)
+
+        # separate into reads
+        local_ptr = 0
+        for r in range(i, min(i + batch_size, total_reads)):
             r_len = indptr[r+1] - indptr[r]
-            
-            # Extract read: (r_lesn, Features)
-            read = chunk_data[local_start : local_start + r_len, :]
-            local_start += r_len
-            
-            num_segments = math.ceil(r_len / seq_len)
-            
-            for seg in range(num_segments):
-                seg_start = seg * seq_len
-                seg_end = min(seg_start + seq_len, r_len)
-                
-                # get data
-                segment = read[seg_start:seg_end, :]
-                current_seg_len = segment.shape[0]
-                
-                # make mask (currently contains no information)
-                mask_segment = np.ones((current_seg_len, 1), dtype=np.uint8)
-                
-                # stack mask and features
-                combined_segment = np.hstack([segment, mask_segment]).astype(np.uint8)
-                
-                # add information to mask
-                if current_seg_len < seq_len:
-                    pad_width = seq_len - current_seg_len
-                    # Pad axis 0 with pad_value, axis 1 (features) with 0
-                    combined_segment = np.pad(
-                        combined_segment, 
-                        ((0, pad_width), (0, 0)), 
-                        'constant', 
-                        constant_values=pad_value
-                    )
-                    # Re-cast to ensure strict uint8
-                    combined_segment = combined_segment.astype(np.uint8)
+            read_fwd = b_fwd[local_ptr : local_ptr + r_len]
+            read_rev = b_rev[local_ptr : local_ptr + r_len]
+            local_ptr += r_len
 
-                current_shard.append(combined_segment)
+            # pad and write 
+            num_segs = math.ceil(r_len / seq_len)
+            for s in range(num_segs):
+                start, end = s * seq_len, min((s + 1) * seq_len, r_len)
                 
-                if len(current_shard) >= shard_size:
-                    arr = np.stack(current_shard)
-                    save_path = os.path.join(output_dir, f"shard_{shard_idx:05d}.npy")
-                    np.save(save_path, arr)
-                    current_shard = []
-                    shard_idx += 1
+                # forward
+                seg = np.zeros((end-start, len(output_feats)), dtype=np.float16)
+                seg[:, :-1] = read_fwd[start:end]
+                seg[:, -1] = 1.0 # Mask
+                writer.add(seg)
 
-    if current_shard:
-        arr = np.stack(current_shard)
-        save_path = os.path.join(output_dir, f"shard_{shard_idx:05d}.npy")
-        np.save(save_path, arr)
+                # reverse
+                seg_rev_data = read_rev[start:end]
+                if use_rc:
+                    seg_rev_data = np.flip(seg_rev_data, axis=0) # Reverse Time
+                    if seq_idx is not None:
+                        # Complement Seq (3.0 - seq)
+                        seq_col = seg_rev_data[:, seq_idx]
+                        seq_col[seq_col < 3.5] = 3.0 - seq_col[seq_col < 3.5]
+                
+                seg = np.zeros((end-start, len(output_feats)), dtype=np.float16)
+                seg[:, :-1] = seg_rev_data
+                seg[:, -1] = 1.0 # Mask
+                writer.add(seg)
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Converts a large zarr file into padded binary numpy tensors in shards'
-    )
-    parser.add_argument('--input_path',
-                        type=str,
-                        required=True,
-                        help='path to input zarr file')
-    parser.add_argument('--output_path',
-                        type=str,
-                        required=True,
-                        help='path for output -> will create a directory')
-    parser.add_argument('--optional_tags',
-                        type=str,
-                        default=[],
-                        help='which tags to include in the output. seq and kinetics always included')
-    parser.add_argument('--config_path',
-                        type=str,
-                        required=True,
-                        help='path to config file')
-    parser.add_argument('--shard_size',
-                        type=int,
-                        required=True,
-                        help='number of samples per shard'
-                        )
-    parser.add_argument('--max_shards',
-                        type=int,
-                        required=True,
-                        help='the max number of shards to output. 0 -> process entire zarr file into shards' )
-    args = parser.parse_args()
-    if args.max_shards < 0:
-        print("Error: n_reads should be positive or 0 (to indicate all reads).")
-        sys.exit(1)
+    writer.finalize()
 
-    config = parse_yaml(args.config_path)
-    context = config['model']['params']['context']
-    zarr_to_sharded_memmap(
-        zarr_path=args.input_path,
-        output_dir=os.path.expanduser(args.output_path),
-        config=config,
-        seq_len=context,
-        shard_size=args.shard_size,
-        max_shards= args.max_shards
-    )
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input_path", required=True)
+    parser.add_argument("--output_path", required=True)
+    parser.add_argument("--config_path", required=True)
+    parser.add_argument("--max_shards", type=int, default=0)
+    parser.add_argument("--shard_size", type=int, default=16384)
+    parser.add_argument("--seq_len", type=int, default=4096)
+    parser.add_argument("--fwd_features", nargs='+', default=['seq', 'fi', 'fp'])
+    parser.add_argument("--rev_features", nargs='+', default=['seq', 'ri', 'rp'])
+    parser.add_argument("--reverse_complement", action="store_true")
+
+    args = parser.parse_args()
+    with open(args.config_path, 'r') as f: config = yaml.safe_load(f)
+
+    zarr_to_sharded_memmap(
+        zarr_path=args.input_path, output_dir=args.output_path, config=config,
+        seq_len=args.seq_len, shard_size=args.shard_size, max_shards=args.max_shards,
+        fwd_features=args.fwd_features, rev_features=args.rev_features,
+        use_rc=args.reverse_complement
+    )
