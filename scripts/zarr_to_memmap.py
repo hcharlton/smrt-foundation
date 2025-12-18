@@ -40,6 +40,8 @@ def zarr_to_sharded_memmap(
     zarr_path: str,
     output_dir: str,
     max_shards: int,
+    config,
+    target_Features = ['seq', 'fi']
     seq_len: int = 4096,
     shard_size: int = 16384,
     pad_value: int = 0,
@@ -47,6 +49,8 @@ def zarr_to_sharded_memmap(
     os.makedirs(output_dir, exist_ok=True)
     
     root = zarr.open(zarr_path, mode='r')
+    log_norm = root.attrs['log_norm']
+    tag_to_idx = root.attrs['tag_to_idx']
     z_data = root['data'] 
     indptr = root['indptr'][:]
     
@@ -57,7 +61,9 @@ def zarr_to_sharded_memmap(
     total_reads = len(indptr) - 1
     current_shard = []
     shard_idx = 0
-    batch_size = 1000 
+    batch_size = 1000
+    # generate vector of normalization constants
+    kinetics_features = config['data']['kinetics_features']
     
     for i in range(0, total_reads, batch_size):
         if shard_idx > max_shards and max_shards != 0:
@@ -67,6 +73,8 @@ def zarr_to_sharded_memmap(
         idx_end = indptr[end_batch]
         
         # Load batch: (Batch_Time, Features)
+        forward_features = ['seq', 'fi', 'fp']
+        reverse_features = ['seq', 'ri', 'rp']
         chunk_data = z_data[idx_start:idx_end, :]
         local_start = 0
         
@@ -132,6 +140,10 @@ def main():
                         type=str,
                         required=True,
                         help='path for output -> will create a directory')
+    parser.add_argument('--optional_tags',
+                        type=str,
+                        default=[],
+                        help='which tags to include in the output. seq and kinetics always included')
     parser.add_argument('--config_path',
                         type=str,
                         required=True,
@@ -155,6 +167,7 @@ def main():
     zarr_to_sharded_memmap(
         zarr_path=args.input_path,
         output_dir=os.path.expanduser(args.output_path),
+        config=config,
         seq_len=context,
         shard_size=args.shard_size,
         max_shards= args.max_shards
