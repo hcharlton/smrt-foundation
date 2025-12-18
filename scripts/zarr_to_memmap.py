@@ -12,8 +12,8 @@ class ShardWriter:
         self.shard_size = shard_size
         self.shape = (shard_size, seq_len, num_features)
         self.buffer = np.full(self.shape, pad_value, dtype=np.float16)
-        self.ptr = 0
-        self.shard_idx = 0
+        self.ptr = 0 # tracks sample idx in shard
+        self.shard_idx = 0 # tracks 
 
     def add(self, data):
         """Adds a single segment to the buffer. Flushes if full."""
@@ -39,6 +39,26 @@ class ShardWriter:
     def finalize(self):
         if self.ptr > 0:
             self._flush()
+            
+def build_rc_lookup(config):
+    """
+    Creates a numpy lookup table for RC conversion based on config maps.
+    Returns: np.array where index=input_token, value=rc_token
+    """
+    token_map = config['data']['token_map']
+    rc_map = config['data']['rc_map']
+    
+    max_token = max(token_map.values())
+    
+    lookup = np.arange(max_token + 1, dtype=np.int8)
+    
+    for base, idx in token_map.items():
+        if base in rc_map:
+            comp_base = rc_map[base]
+            if comp_base in token_map:
+                lookup[idx] = token_map[comp_base]
+                
+    return lookup
 
 def get_normalization_vectors(fwd_feats, rev_feats, zarr_attrs):
     """Generates mean/std vectors and metadata dictionary."""
@@ -60,6 +80,8 @@ def get_normalization_vectors(fwd_feats, rev_feats, zarr_attrs):
         }
     return fwd_m, fwd_s, rev_m, rev_s, stats_meta
 
+
+
 def zarr_to_sharded_memmap(
     zarr_path, output_dir, config, 
     fwd_features=['seq', 'fi', 'fp'], 
@@ -73,6 +95,8 @@ def zarr_to_sharded_memmap(
     f_mean, f_std, r_mean, r_std, stats_meta = get_normalization_vectors(
         fwd_features, rev_features, root.attrs
     )
+
+    rc_lookup = build_rc_lookup(config)
     
     # collect features
     output_feats = fwd_features + ['mask']
@@ -80,7 +104,7 @@ def zarr_to_sharded_memmap(
     is_loggable = np.array([f != 'seq' for f in fwd_features]) # Mask for log1p
     try: seq_idx = fwd_features.index('seq')
     except ValueError: seq_idx = None
-
+    
     # save data schema
     with open(os.path.join(output_dir, "schema.json"), "w") as f:
         json.dump({
@@ -136,21 +160,20 @@ def zarr_to_sharded_memmap(
             for s in range(num_segs):
                 start, end = s * seq_len, min((s + 1) * seq_len, r_len)
                 
-                # forward
+                # --- forward ---
                 seg = np.zeros((end-start, len(output_feats)), dtype=np.float16)
                 seg[:, :-1] = read_fwd[start:end]
                 seg[:, -1] = 1.0 # Mask
                 writer.add(seg)
 
-                # reverse
+                # --- reverse ---
                 seg_rev_data = read_rev[start:end]
-                if use_rc:
-                    seg_rev_data = np.flip(seg_rev_data, axis=0) # Reverse Time
-                    if seq_idx is not None:
-                        # Complement Seq (3.0 - seq)
-                        seq_col = seg_rev_data[:, seq_idx]
-                        seq_col[seq_col < 3.5] = 3.0 - seq_col[seq_col < 3.5]
-                
+                seg_rev_data = np.flip(seg_rev_data, axis=0) # Reverse Time
+                if seq_idx is not None:
+                    seq_floats = seg_rev_data[:, seq_idx]
+                    seq_ints = seq_floats.astype(np.int8)
+                    seq_rc = rc_lookup[seq_ints]
+                    seg_rev_data[:,seq_idx] = seq_rc.astype(np.float16)          
                 seg = np.zeros((end-start, len(output_feats)), dtype=np.float16)
                 seg[:, :-1] = seg_rev_data
                 seg[:, -1] = 1.0 # Mask

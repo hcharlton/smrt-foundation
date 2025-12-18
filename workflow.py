@@ -146,10 +146,10 @@ def memmap_conversion(
 
 def validate_memmap(
     memmap_path,
-    log_path
+    config_path
 ):
     inputs = {'in_file': memmap_path}
-    outputs = {'out_file': log_path}
+    outputs = {'out_file': os.path.join(memmap_path, 'validation.log')}
 
     options = {'cores': 4, 'memory': '32gb', 'walltime': '00:30:00'}
     
@@ -158,9 +158,9 @@ def validate_memmap(
     conda activate smrt-foundation
     cd {p('')}
     
-    {profiler_env} python -m scripts.validate_memmap \\
-        --input_path {zarr_path} \\
-        --output_path {output_path}
+    python -m scripts.validate_memmap \\
+        --input_path {memmap_path}\\
+        --config_path {config_path}
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
@@ -244,3 +244,9 @@ zarr_to_memmap_test = gwf.target_from_template(
     )
 )
 
+validate_memmap_test = gwf.target_from_template(
+    name='validate_memmap_test',
+    template=validate_memmap(
+        memmap_path = zarr_to_memmap_test.outputs['out_file'],
+        config_path = CONFIG['config_path'])
+)
