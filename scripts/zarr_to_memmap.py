@@ -43,7 +43,7 @@ class ShardWriter:
 def build_rc_lookup(config):
     """
     Creates a numpy lookup table for RC conversion based on config maps.
-    Returns: np.array where index=input_token, value=rc_token
+    Returns: np.array where index=input_token, value=rc_token (requires ints)
     """
     token_map = config['data']['token_map']
     rc_map = config['data']['rc_map']
@@ -122,12 +122,15 @@ def zarr_to_sharded_memmap(
     
     # Prepare indices for loading
     all_feats = root.attrs['features']
+    # find the col indices for the features we actually will use
     load_indices = list(set([all_feats.index(f) for f in fwd_features + rev_features]))
+    # make a new map
     idx_map = {orig: i for i, orig in enumerate(load_indices)}
+    # get indices in the loaded array for the forward and reverse views
     fwd_local = [idx_map[all_feats.index(f)] for f in fwd_features]
     rev_local = [idx_map[all_feats.index(f)] for f in rev_features]
 
-    # loop over batches
+    # write in batches
     batch_size = 1000
     total_reads = len(indptr) - 1
     
@@ -145,7 +148,7 @@ def zarr_to_sharded_memmap(
         np.log1p(b_rev, out=b_rev, where=is_loggable)
         
         b_fwd = ((b_fwd - f_mean) / f_std).astype(np.float16)
-        b_rev = ((b_rev - r_mean) / r_std).astype(np.float16)
+        b_rev =  ((b_rev - r_mean) / r_std).astype(np.float16)
 
         # separate into reads
         local_ptr = 0
@@ -167,8 +170,7 @@ def zarr_to_sharded_memmap(
                 writer.add(seg)
 
                 # --- reverse ---
-                seg_rev_data = read_rev[start:end]
-                seg_rev_data = np.flip(seg_rev_data, axis=0) # Reverse Time
+                seg_rev_data =np.flip(read_rev[start:end], axis=0)
                 if seq_idx is not None:
                     seq_floats = seg_rev_data[:, seq_idx]
                     seq_ints = seq_floats.astype(np.int8)
