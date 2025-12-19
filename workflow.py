@@ -24,13 +24,13 @@ CONFIG = {
         'idx_stride': 20,
     },
     'datasets': {
-        'da1': {
-            'bam': 'data/00_raw/unlabeled/da1_kinetics_diploid.bam',
-            'zarr': 'data/01_processed/ssl_sets/da1.zarr',
-            'memmap': 'data/01_processed/ssl_sets/da1.memmap',
-            'optional_tags': [],
-            'n_reads': 0,
-        },
+        # 'da1': {
+        #     'bam': 'data/00_raw/unlabeled/da1_kinetics_diploid.bam',
+        #     'zarr': 'data/01_processed/ssl_sets/da1.zarr',
+        #     'memmap': 'data/01_processed/ssl_sets/da1.memmap',
+        #     'optional_tags': [],
+        #     'n_reads': 0,
+        # },
         'ob007': {
             'bam': 'data/00_raw/unlabeled/ob007_kinetics_diploid.bam',
             'zarr': 'data/01_processed/ssl_sets/ob007.zarr',
