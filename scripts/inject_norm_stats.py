@@ -47,15 +47,6 @@ def inject_stats(zarr_path:str, stats:dict):
     z.attrs['log_norm'] = stats
     return None
 
-# def compute_log_normalization_stats(df, features, epsilon=1):
-#     means = {col: (df[col].explode() + epsilon).log().mean() for col in features}
-#     stds = {col: (df[col].explode() + epsilon).log().explode().std() for col in features}
-#     output_dict = {'log_norm':{
-#         'means': means,
-#         'stds': stds
-#     }}
-#     return output_dict
-
 
 def main():
     parser = argparse.ArgumentParser(
