@@ -13,7 +13,8 @@ if IS_GEFION:
 else:
     root_dir = '/home/chcharlton/mutationalscanning/Workspaces/chcharlton/smrt-foundation'
     gwf_defaults = {'account': 'mutationalscanning'}
-
+# idea here is that we can just add more dataset parameters,
+# and then they'll get processed. We only have to modify the config
 CONFIG = {
     'project_root': root_dir,
     'config_path': 'smrt_foundation/config.yaml',
@@ -24,6 +25,7 @@ CONFIG = {
         'idx_stride': 20,
     },
     'datasets': {
+        # not on gefion yet
         # 'da1': {
         #     'bam': 'data/00_raw/unlabeled/da1_kinetics_diploid.bam',
         #     'zarr': 'data/01_processed/ssl_sets/da1.zarr',
@@ -221,7 +223,7 @@ def process_dataset(name, data):
         )
     )
     
-    # 3. test targets for ob007
+    # 3. test targets for ob007 (small)
     if name == 'ob007':
         # generate statistics
         gwf.target_from_template(
@@ -239,7 +241,7 @@ def process_dataset(name, data):
             name='zarr_to_memmap_test',
             template=memmap_conversion(
                 zarr_path=zarr_target.outputs['out_file'],
-                output_path='data/01_processed/ssl_sets/ob007_test_memmap.memmap',
+                output_path='data/01_processed/ssl_sets/ob007_test.memmap',
                 config_path=CONFIG['config_path'],
                 shards=10,
                 seq_len = 4096,
