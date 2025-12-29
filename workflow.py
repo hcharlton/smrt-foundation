@@ -74,7 +74,7 @@ def zarr_conversion(bam_path, output_path, n_reads, optional_tags, config, profi
     options = {'cores': 12, 'memory': '128gb', 'walltime': '18:00:00'}
     spec = f"""
     source $(conda info --base)/etc/profile.d/conda.sh
-    conda activate smrt-foundation
+    conda activate data_prep
     cd {p('')}
     {profiler_env} python -m scripts.bam_to_zarr \
         --input {bam_path} \
@@ -94,7 +94,7 @@ def create_ssl_dataset(bam_path, output_path, n_reads, context, optional_tags, d
     options = {'cores': 16, 'memory': '128gb', 'walltime': '01:00:00'}
     spec = f"""
     source $(conda info --base)/etc/profile.d/conda.sh
-    conda activate smrt-foundation
+    conda activate data_prep
     cd {p('')}
     python -m scripts.make_ssl_dataset \
         --input {bam_path} \
@@ -115,7 +115,7 @@ def inject_norm_stats(zarr_path, chunk_stride, idx_stride, num_threads):
 
     spec = f"""
     source $(conda info --base)/etc/profile.d/conda.sh
-    conda activate jax-prep
+    conda activate data_prep
     cd {p('')}
     python -m scripts.inject_norm_stats \
         --input_path {zarr_path} \
@@ -141,7 +141,7 @@ def memmap_conversion(
     inputs = {'in_file': zarr_path}
     outputs = {'out_file': output_path}
 
-    options = {'cores': 4, 'memory': '32gb', 'walltime': '00:30:00'}
+    options = {'cores': 4, 'memory': '32gb', 'walltime': '18:00:00'}
 
     profiler_env = "TimeLINE_PROFILE=1" if profile else ""
     rc_flag = "--reverse_complement" if reverse_complement else ""
@@ -150,7 +150,7 @@ def memmap_conversion(
 
     spec = f"""
     source $(conda info --base)/etc/profile.d/conda.sh
-    conda activate smrt-foundation
+    conda activate data_prep
     cd {p('')}
 
     {profiler_env} python -m scripts.zarr_to_memmap \
@@ -174,7 +174,7 @@ def validate_memmap(memmap_path, config_path):
 
     spec = f"""
     source $(conda info --base)/etc/profile.d/conda.sh
-    conda activate smrt-foundation
+    conda activate data_prep
     cd {p('')}
 
     python -m scripts.validate_memmap \
