@@ -68,7 +68,7 @@ def zarr_conversion(bam_path, output_path, n_reads, optional_tags, config, profi
     inputs = {'in_file': bam_path}
     outputs = {'out_file': output_path}
     if IS_GEFION:
-        options = {'cores': 1, 'memory': '4gb', 'walltime': '00:10:00'
+        options = {'cores': 1, 'memory': '4gb', 'walltime': '00:10:00'}
         spec = f"""
         if [ ! e "{output_path}" ]; then
             echo "ERROR: the zarr file for this job does not appear to already have been transferred to Gefion"
@@ -76,7 +76,7 @@ def zarr_conversion(bam_path, output_path, n_reads, optional_tags, config, profi
         fi
         echo "updating timestamp of transferred zarr file"
         touch {output_path}
-        """}
+        """
 
     tags_str = ' '.join(optional_tags)
     profiler_env = "TimeLINE_PROFILE=1" if profile else ""
