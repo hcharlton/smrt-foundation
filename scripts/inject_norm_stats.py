@@ -2,7 +2,6 @@
 # import os
 # import yaml
 import jax.numpy as jnp
-import tensorstore as ts
 import concurrent.futures
 import zarr
 import argparse
