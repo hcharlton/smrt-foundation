@@ -77,6 +77,7 @@ def zarr_conversion(bam_path, output_path, n_reads, optional_tags, config, profi
         echo "updating timestamp of transferred zarr file"
         touch {output_path}
         """
+        return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
     tags_str = ' '.join(optional_tags)
     profiler_env = "TimeLINE_PROFILE=1" if profile else ""
