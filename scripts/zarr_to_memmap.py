@@ -7,13 +7,14 @@ import argparse
 import yaml
 
 class ShardWriter:
-    def __init__(self, output_dir, shard_size, seq_len, num_features, pad_value=1.0):
+    def __init__(self, output_dir, shard_size, seq_len, num_features):
         self.output_dir = output_dir
         self.shard_size = shard_size
-        self.pad_value = pad_value
-        self.data_value = 0.0 if self.pad_value == 1.0 else 1.0
+        self.pad_value = 1.0
+        self.data_value = 0.0
         self.shape = (shard_size, seq_len, num_features)
-        self.buffer = np.full(self.shape, self.pad_value, dtype=np.float16)
+        self.buffer = np.zeros(self.shape, dtype=np.float16)
+        self.buffer[:,:,-1] = self.pad_value # padding channel set to pdding value
         self.ptr = 0 # tracks sample idx in shard
         self.shard_idx = 0 # tracks
 
@@ -36,7 +37,8 @@ class ShardWriter:
         
         self.shard_idx += 1
         self.ptr = 0
-        self.buffer.fill(self.pad_value) # Reset
+        self.buffer.fill(0.0) # Reset to null
+        self.buffer[:,:,-1] = self.pad_value # mask the entirety
 
     def finalize(self):
         if self.ptr > 0:
@@ -180,7 +182,7 @@ def zarr_to_sharded_memmap(
                     seg_rev_data[:,seq_idx] = seq_rc.astype(np.float16)          
                 seg = np.zeros((end-start, len(output_feats)), dtype=np.float16)
                 seg[:, :-1] = seg_rev_data
-                seg[:, -1] = writer.data_value # overwrite active segment of mask
+                seg[:, -1] = writer.data_value # overwrite mask to activate data segment
                 writer.add(seg)
 
     writer.finalize()
