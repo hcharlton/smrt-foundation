@@ -51,7 +51,7 @@ def verify_output(data_dir, config_path):
     logging.info("[TEST 1] Check Column Type Integrity")
 
     seq_col = data[:, :, seq_idx].flatten()
-    valid_seq = seq_col[data[:, :, mask_idx].flatten() == 1.0]
+    valid_seq = seq_col[data[:, :, mask_idx].flatten() == 0.0]
 
     is_discrete = np.all(np.abs(valid_seq - np.round(valid_seq)) < 0.1)
     if is_discrete:
@@ -68,7 +68,7 @@ def verify_output(data_dir, config_path):
         if feat in ['seq', 'mask']: continue
 
         col_data = data[:, :, i]
-        valid_data = col_data[data[:, :, mask_idx] == 1.0]
+        valid_data = col_data[data[:, :, mask_idx] == 0.0]
 
         curr_mean = np.mean(valid_data, dtype = np.float64)
         curr_std = np.std(valid_data, dtype = np.float64)
@@ -90,8 +90,8 @@ def verify_output(data_dir, config_path):
     fwd_row = data[0]
     rev_row = data[1]
 
-    fwd_len = np.sum(fwd_row[:, mask_idx])
-    rev_len = np.sum(rev_row[:, mask_idx])
+    fwd_len = np.sum(fwd_row[:, mask_idx]==0.0)
+    rev_len = np.sum(rev_row[:, mask_idx]==0.0)
 
     if fwd_len != rev_len:
          logging.error(f"Length mismatch. Fwd: {fwd_len}, Rev: {rev_len}")
@@ -123,17 +123,18 @@ def verify_output(data_dir, config_path):
 
     # --- TEST 4: Padding Check ---
     logging.info("[TEST 4] Check Padding")
-
-    invalid_mask = data[:, :, mask_idx] == 0.0
-    if np.sum(invalid_mask) > 0:
-        leakage = np.sum(np.abs(data[invalid_mask]))
-        if leakage == 0.0:
-            logging.info("padding is clean: entire padded slice sums to 0")
+    padding_mask = data[:,:,mask_idx] == 1.0
+    if np.sum(padding_mask) > 0:
+        padding_features = data[padding_mask, :-1]
+        non_zero_padded_features = np.sum(padding_features != 0.0)
+        if non_zero_padded_features == 0:
+            logging.info("Success: All padded features contain pure zeros.")
         else:
-            logging.error(f"non-valid padding found. sum of absolute values: {leakage}")
+            logging.error(f"Failure: found {non_zero_padded_features} non-zero values in feature section of padding")
+            bad_indices = np.where(padding_features != 0.0)
+            logging.info(f"sample non-zero pad value: {padding_features[bad_indices][0]}")
     else:
-        logging.info("padding not present indicating a full sequence")
-
+        logging.info("No padding found in this shard")
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_path", required=True)
