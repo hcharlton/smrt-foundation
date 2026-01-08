@@ -24,7 +24,7 @@ CONFIG = {
         'chunk_stride': 5,
         'idx_stride': 20,
     },
-    'datasets': {
+    'ssl_datasets': {
         # not on gefion yet
         # 'da1': {
         #     'bam': 'data/00_raw/unlabeled/da1_kinetics_diploid.bam',
@@ -197,7 +197,7 @@ def validate_memmap(memmap_path, config_path):
 
 # pipeline logic
 
-def process_dataset(name, data):
+def process_ssl_dataset(name, data):
     """
     Generates the graph nodes for a single dataset.
     """
@@ -274,5 +274,5 @@ def process_dataset(name, data):
 
 
 # loop to create targets
-for name, data in CONFIG['datasets'].items():
-    process_dataset(name, data)
+for name, data in CONFIG['ssl_datasets'].items():
+    process_ssl_dataset(name, data)

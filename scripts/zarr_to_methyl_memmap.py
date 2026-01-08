@@ -7,15 +7,13 @@ import argparse
 import yaml
 
 class ShardWriter:
-    def __init__(self, output_dir, shard_size, seq_len, num_features, pad_value=1.0):
+    def __init__(self, output_dir, shard_size, seq_len, num_features, pad_value=0.0):
         self.output_dir = output_dir
         self.shard_size = shard_size
-        self.pad_value = pad_value
-        self.data_value = 0.0 if self.pad_value == 1.0 else 1.0
         self.shape = (shard_size, seq_len, num_features)
-        self.buffer = np.full(self.shape, self.pad_value, dtype=np.float16)
+        self.buffer = np.full(self.shape, pad_value, dtype=np.float16)
         self.ptr = 0 # tracks sample idx in shard
-        self.shard_idx = 0 # tracks
+        self.shard_idx = 0 # tracks 
 
     def add(self, data):
         """Adds a single segment to the buffer. Flushes if full."""
@@ -36,7 +34,7 @@ class ShardWriter:
         
         self.shard_idx += 1
         self.ptr = 0
-        self.buffer.fill(self.pad_value) # Reset
+        self.buffer.fill(0.0) # Reset
 
     def finalize(self):
         if self.ptr > 0:
@@ -67,7 +65,7 @@ def get_normalization_vectors(fwd_feats, rev_feats, zarr_attrs):
     norm_stats = zarr_attrs.get('log_norm', {})
     num = len(fwd_feats)
     
-    # use float32 for precision during processing
+    # Vectors (Float32 for precision during math)
     fwd_m, fwd_s = np.zeros(num, dtype=np.float32), np.ones(num, dtype=np.float32)
     rev_m, rev_s = np.zeros(num, dtype=np.float32), np.ones(num, dtype=np.float32)
     stats_meta = {}
@@ -168,7 +166,7 @@ def zarr_to_sharded_memmap(
                 # --- forward ---
                 seg = np.zeros((end-start, len(output_feats)), dtype=np.float16)
                 seg[:, :-1] = read_fwd[start:end]
-                seg[:, -1] = writer.data_value # overwrite mask to activate data segment
+                seg[:, -1] = 1.0 # Mask
                 writer.add(seg)
 
                 # --- reverse ---
@@ -180,7 +178,7 @@ def zarr_to_sharded_memmap(
                     seg_rev_data[:,seq_idx] = seq_rc.astype(np.float16)          
                 seg = np.zeros((end-start, len(output_feats)), dtype=np.float16)
                 seg[:, :-1] = seg_rev_data
-                seg[:, -1] = writer.data_value # overwrite active segment of mask
+                seg[:, -1] = 1.0 # Mask
                 writer.add(seg)
 
     writer.finalize()
