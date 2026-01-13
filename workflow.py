@@ -254,7 +254,7 @@ def process_ssl_dataset(name, data):
                 zarr_path=zarr_target.outputs['out_file'],
                 output_path='data/01_processed/ssl_sets/ob007_test.memmap',
                 config_path=CONFIG['config_path'],
-                shards=10,
+                shards=30,
                 seq_len = 4096,
                 shard_size=16384,
                 fwd_features=['seq', 'fi', 'fp'],
