@@ -152,7 +152,7 @@ def memmap_conversion(
     inputs = {'in_file': zarr_path}
     outputs = {'out_file': output_path}
 
-    options = {'cores': 4, 'memory': '32gb', 'walltime': '18:00:00'}
+    options = {'cores': 8, 'memory': '64gb', 'walltime': '18:00:00'}
 
     profiler_env = "TimeLINE_PROFILE=1" if profile else ""
     rc_flag = "--reverse_complement" if reverse_complement else ""
