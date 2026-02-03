@@ -39,6 +39,20 @@ CONFIG = {
             'memmap': 'data/01_processed/ssl_sets/ob007.memmap',
             'optional_tags': ['sm', 'sx'],
             'n_reads': 0,
+        },
+        'cpg_pos':{
+            'bam': 'data/00_raw/labeled/methylated_hifi_reads.bam',
+            'zarr': 'data/01_processed/ssl_sets/cpg_pos.zarr',
+            'memmap': 'data/01_processed/ssl_sets/cpg_pos.memmap',
+            'optional_tags': [],
+            'n_reads': 10,
+        },
+        'cpg_neg':{
+            'bam': 'data/00_raw/labeled/unmethylated_hifi_reads.bam',
+            'zarr': 'data/01_processed/ssl_sets/cpg_neg.zarr',
+            'memmap': 'data/01_processed/ssl_sets/cpg_neg.memmap',
+            'optional_tags': [],
+            'n_reads': 10,
         }
     }
 }
@@ -143,7 +157,7 @@ def memmap_conversion(
     config_path,
     shard_size=16384,
     shards=0,
-    seq_len=4096,
+    context=4096,
     fwd_features=['seq', 'fi', 'fp'],
     rev_features=['seq', 'ri', 'rp'],
     reverse_complement=True,
@@ -164,13 +178,13 @@ def memmap_conversion(
     conda activate data_prep
     cd {p('')}
 
-    {profiler_env} python -m scripts.zarr_to_memmap \
+    {profiler_env} python -m scripts.zarr_to_memmap_instanceNorm \
         --input_path {zarr_path} \
         --output_path {output_path} \
         --config_path {config_path} \
         --shard_size {shard_size} \
         --max_shards {shards} \
-        --seq_len {seq_len} \
+        --context {context} \
         --fwd_features {fwd_str} \
         --rev_features {rev_str} \
         {rc_flag}
@@ -188,7 +202,7 @@ def validate_memmap(memmap_path, config_path):
     conda activate data_prep
     cd {p('')}
 
-    python -m scripts.validate_memmap \
+    python -m scripts.validate_memmap_instanceNorm \
         --input_path {memmap_path}\
         --config_path {config_path}
     """
@@ -224,13 +238,22 @@ def process_ssl_dataset(name, data):
     )
 
     # 2. Zarr -> Memmap
-    gwf.target_from_template(
+    memmap_target = gwf.target_from_template(
         name=f'{name}_to_memmap',
         template=memmap_conversion(
             zarr_path=zarr_target.outputs['out_file'],
             output_path=data['memmap'],
             config_path=CONFIG['config_path'],
             profile=True
+        )
+    )
+
+    # 3. produce valdidation logs
+    gwf.target_from_template(
+        name=f'{name}_validation',
+        template=validate_memmap(
+            memmap_path=memmap_target.outputs['out_file'],
+            config_path = CONFIG['config_path']
         )
     )
     
@@ -255,7 +278,7 @@ def process_ssl_dataset(name, data):
                 output_path='data/01_processed/ssl_sets/ob007_test.memmap',
                 config_path=CONFIG['config_path'],
                 shards=30,
-                seq_len = 4096,
+                context = 4096,
                 shard_size=16384,
                 fwd_features=['seq', 'fi', 'fp'],
                 rev_features=['seq', 'ri', 'rp'],
