@@ -1,259 +1,151 @@
 import torch
 import polars as pl
+import glob
+import os
 import numpy as np
 import pyarrow.parquet as pq
+from collections import OrderedDict
 from pathlib import Path
-from torch.utils.data import IterableDataset, Dataset
-from typing import Dict
-import torch.nn.functional as F
-from torch.nn.utils.rnn import pad_sequence
+
+from torch.utils.data import Dataset, IterableDataset
 
 
-REQUIRED_TAGS = {"fi", "ri", "fp", "rp"}
-PER_BASE_TAGS = {"fi", "ri", "fp", "rp", "sm", "sx"}
+class ShardedMemmapDataset(Dataset):
+    def __init__(self, data_dir, cache_size=100):
+        expanded_dir = os.path.expandvars(data_dir)
+        self.shard_paths = sorted(glob.glob(os.path.join(expanded_dir, "*.npy")))
+        first_shard = np.load(self.shard_paths[0], mmap_mode='r')
+        self.shard_size = first_shard.shape[0]
+        last_shard = np.load(self.shard_paths[-1], mmap_mode='r')
+        self.total_len = ((len(self.shard_paths) - 1) * self.shard_size) + last_shard.shape[0]
+        self.cache_size = cache_size
+        self.memmaps = OrderedDict()
 
-SCHEMA = {
-    "read_name": pl.String,
-    "read_pos": pl.UInt32, # Changed from cg_pos
-    "seq": pl.List(pl.UInt8),
-    "qual": pl.List(pl.UInt8),
-    "np": pl.UInt8,
-    "sm": pl.List(pl.UInt8),
-    "sx": pl.List(pl.UInt8),
-    "fi": pl.List(pl.UInt8),
-    "fp": pl.List(pl.UInt8),
-    "ri": pl.List(pl.UInt8),
-    "rp": pl.List(pl.UInt8),
-}
+    def __len__(self):
+        return self.total_len
 
+    def __getitem__(self, idx):
+        shard_idx = idx // self.shard_size
+        local_idx = idx % self.shard_size
+        if shard_idx not in self.memmaps:
+            if len(self.memmaps) >= self.cache_size:
+                self.memmaps.popitem(last=False)
+            self.memmaps[shard_idx] = np.load(self.shard_paths[shard_idx], mmap_mode='r')
+        else:
+            self.memmaps.move_to_end(shard_idx)
+        return torch.from_numpy(np.array(self.memmaps[shard_idx][local_idx])).bfloat16()
+    
 
 def compute_log_normalization_stats(df, features, epsilon=1):
     means = {col: (df[col].explode() + epsilon).log().mean() for col in features}
     stds = {col: (df[col].explode() + epsilon).log().explode().std() for col in features}
     return means, stds
 
-class SMRTSequenceDataset(Dataset):
-    """
-    loads a full context of SMRT data (seq, ipd, pw)
-    """
-    def __init__(self, parquet_path: str, columns: list):
-      
-        self.data_df = pl.read_parquet(parquet_path).head(100)
-        self.columns = columns
-        # always include seq
-        if 'seq' not in self.columns:
-            self.columns.insert(0, 'seq')
-        
-        # Select only kinetics columns that are actually present
-        self.kinetics_cols = [c for c in ['fi', 'fp', 'ri', 'rp'] if c in self.columns and c in self.data_df.columns]
-        self.data_df = self.data_df.select(['seq'] + self.kinetics_cols)
-        
+class LegacyMethylDataset(IterableDataset):
+    def __init__(self, data_path, means, stds, context, restrict_row_groups=0, single_strand=False, inference=False):
+        super().__init__()
+        self.data_path = Path(data_path)
+        self.means, self.stds = means, stds
+        self.context = context
+        self.single_strand = single_strand
+        self.inference = inference
+        self.restrict = restrict_row_groups
+
+        self.kin_feats = ['fi', 'fp', 'ri', 'rp']
+        self.vocab = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
+        self.comp_map = torch.tensor([3, 2, 1, 0, 4], dtype=torch.long)
+
+        try:
+            meta = pq.read_metadata(self.data_path)
+            self.n_groups = meta.num_row_groups
+            use_groups = min(self.restrict, self.n_groups) if self.restrict else self.n_groups
+
+            # fast row count
+            n_rows = sum(meta.row_group(i).num_rows for i in range(use_groups))
+            self.len = n_rows * (2 if single_strand else 1)
+        except Exception:
+            print(f'Failed to read parquet: {self.data_path}')
+            self.n_groups, self.len = 0, 0
+
     def __len__(self):
-        return len(self.data_df)
+        return self.len
 
-    def __getitem__(self, idx):
-        row_data = self.data_df.row(idx, named=True)
-        
-        seq_ids = torch.tensor(row_data['seq'], dtype=torch.long)
-        
-        kinetics = []
-        for col in self.kinetics_cols:
-            if col in row_data:
-                kinetics.append(torch.tensor(row_data[col], dtype=torch.float32))
-            
-        if kinetics:
-            kinetics_tensor = torch.stack(kinetics, dim=1) # L,4
-        else:
-            kinetics_tensor = torch.empty(len(seq_ids), 0, dtype=torch.float32) # L,0
-
-        return {
-            "seq_ids": seq_ids,       # L
-            "kinetics": kinetics_tensor # [L, 4] or [L, 0]
-        }
-    
-
-def cpc_collate_fn(batch, pad_idx):
-    """
-    pads sequences and kinetics to the max length in the batch
-    """
-    seqs = [item['seq_ids'] for item in batch]
-    kins = [item['kinetics'] for item in batch]
-
-    pad_seqs = pad_sequence(seqs, batch_first=True, padding_value=pad_idx)
-    
-    max_len = pad_seqs.shape[1]
-    batch_size = len(batch)
-    
-    # Check if we have kinetics data
-    has_kinetics = kins[0].shape[1] > 0
-    
-    if has_kinetics:
-        kinetics_dim = kins[0].shape[1]
-        pad_kins = torch.zeros(batch_size, max_len, kinetics_dim, dtype=torch.float32)
-        for i, k in enumerate(kins):
-            L = k.shape[0]
-            pad_kins[i, :L, :] = k
-    else:
-        # Create an empty tensor [B, L, 0]
-        pad_kins = torch.empty(batch_size, max_len, 0, dtype=torch.float32)
-
-    return {
-        "seq_ids": pad_seqs,
-        "kinetics": pad_kins
-    }
-
-
-# old dataset for methylcnn
-class MethylIterableDataset(IterableDataset):
-  '''
-  Iterable dataset for parquet format methylation samples.
-  Processes the parquet file in row_group's for memory efficiency.
-  Restrict row gruops == 0 implies use all. 
-  '''
-
-  def __init__(
-      self,
-      data_path: Path,
-      means: Dict,
-      stds: Dict,
-      context: int,
-      restrict_row_groups: int = 0,
-      single_strand: bool = False,
-      inference: bool = False,
-      ):
-    super().__init__()
-    self.data_path = data_path
-    self.restrict_row_groups = restrict_row_groups
-    self.single_strand = single_strand
-    self.inference = inference
-    self.means = means
-    self.stds = stds
-    self.context = context
-    self.kinetics_features = ['fi', 'fp', 'ri', 'rp']
-    self.vocab = {'A':0, 'T':1, 'C':2, 'G':3}
-    self.vocab_size = len(self.vocab)
-    self.complement_map = torch.tensor([1, 0, 3, 2], dtype=torch.long)
-    # self.batch_size = batch_size
-    try:
-      pq_metadata = pq.read_metadata(self.data_path)
-      self.num_row_groups = pq_metadata.num_row_groups
-      if not self.restrict_row_groups:
-        if self.single_strand:
-           self.len = pq_metadata.num_rows*2
-        else:
-          self.len = pq_metadata.num_rows
-      else: 
-        row_count = 0
-        for i in range(0, min(restrict_row_groups, self.num_row_groups)):
-          row_count += pq_metadata.row_group(i).num_rows
-        if self.single_strand:
-           self.len = row_count*2
-        else: 
-          self.len = row_count
-
-    except:
-      print('Failed to read given parquet file.')
-      self.num_row_groups = 0
-      self.len = 0
-
-  def __len__(self):
-    return self.len
-  
-  @staticmethod
-  def _reverse_complement(seq_tensor, complement_map):
-     comp_tensor = complement_map.to(seq_tensor.device)[seq_tensor]
-     return torch.flip(comp_tensor, dims=[1])
-
-  def _process_row_group(self, row_group_df):
-    # nucleotide sequence -> list(chars) -> numpy array
-    seq_int_array = np.stack(
-        row_group_df['seq']
-        .str.split("")
-        .list.eval(
-             pl.element().replace_strict(self.vocab)
+    def _process_batch(self, df):
+      # seq
+        seq_arr = np.stack(
+            df['seq'].str.split("")
+            .list.eval(pl.element().replace_strict(self.vocab, default=4))
+            .to_numpy()
         )
-        .to_numpy()
-        )
-    # convert to torch tensor
-    seq_tensor = torch.tensor((seq_int_array), dtype=torch.long) # (count(rows), len(row)) 
-    # convert to one-hot, permute to shape for cat with kinetics
-    seq_one_hot = F.one_hot(seq_tensor, num_classes=self.vocab_size).permute(0, 2, 1) # (count(rows), len(row), len(vocab)).permute(0,2,1)
-    # kinetics
-    kinetics_array = np.stack(
-      [(np.log(row_group_df[col].to_numpy()+1)-self.means[col])/self.stds[col] for col in self.kinetics_features], 
-      axis=1
-      )
-    kinetics_tensor = torch.tensor(kinetics_array, dtype=torch.float32)
-    
-    # labels, if not inference
-    if not self.inference:
-      label_tensor = torch.tensor(row_group_df['label'].to_numpy(), dtype=torch.long)
-    # read_name
-    read_names = row_group_df['read_name'].to_list()
-    positions = row_group_df['cg_pos'].to_list()
-    
-    if self.single_strand:
-      rev_comp_tensor = self._reverse_complement(seq_tensor, self.complement_map)
-      rev_comp_seq_one_hot = F.one_hot(rev_comp_tensor, num_classes=self.vocab_size).permute(0, 2, 1)
-      
-      # Slice the already-prepared kinetics tensor
-      fwd_kinetics = kinetics_tensor[:, 0:2, :]
-      rev_kinetics = torch.flip(kinetics_tensor[:, 2:4, :], dims=[2])
-      for i in range(len(row_group_df)):
-          fwd_item = {'seq': seq_one_hot[i], 
-                      'kinetics': fwd_kinetics[i], 
-                      'metadata': {'read_name': read_names[i], 'position': positions[i], 'strand': 'fwd'}}
-          if not self.inference:
-              fwd_item['label'] = label_tensor[i]
-          yield fwd_item
+        seq_t = torch.tensor(seq_arr, dtype=torch.long)
 
-          rev_item = {'seq': rev_comp_seq_one_hot[i], 
-                      'kinetics': rev_kinetics[i], 
-                      'metadata': {'read_name': read_names[i], 'position': positions[i], 'strand': 'rev'}}
-          if not self.inference:
-              rev_item['label'] = label_tensor[i]
-          yield rev_item
-    else:
-       for i in range(len(row_group_df)):
-            item = {
-                'seq': seq_one_hot[i],
-                'kinetics': kinetics_tensor[i],
-                'metadata': {'read_name': read_names[i], 'position': positions[i], 'strand': 'ds'}
+        # kinetics
+        kin_list = []
+        for k in self.kin_feats:
+            vals = df[k].to_numpy() # (N, L)
+            vals = (np.log(vals + 1) - self.means[k]) / self.stds[k]
+            kin_list.append(vals)
+        kin_t = torch.tensor(np.stack(kin_list, axis=1), dtype=torch.bfloat16)
+
+        # mask, labels, etc (note that there is no masked data in the downstream set, so it's all zeros here)
+        mask = torch.zeros((seq_t.shape[0], seq_t.shape[1], 1), dtype=torch.bfloat16)
+        labels = torch.tensor(df['label'].to_numpy(), dtype=torch.long) if not self.inference else None
+        r_names, pos = df['read_name'].to_list(), df['cg_pos'].to_list()
+
+        # construct forward sample
+        # Seq (N, L, 1) + Kin (N, 2, L)->(N, L, 2) + Mask (N, L, 1) = (N, L, 4)
+        fwd_data = torch.cat([
+            seq_t.unsqueeze(-1).to(torch.bfloat16),
+            kin_t[:, 0:2].permute(0, 2, 1),
+            mask
+        ], dim=2)
+
+        # construct reverse data
+        rev_data = None
+        if self.single_strand:
+            rev_seq_t = torch.flip(self.comp_map.to(seq_t.device)[seq_t], dims=[1])
+            # Kin: slice 2:4, flip time (dim 2), permute channels
+            rev_kin = torch.flip(kin_t[:, 2:4], dims=[2]).permute(0, 2, 1)
+            rev_data = torch.cat([
+                rev_seq_t.unsqueeze(-1).to(torch.bfloat16),
+                rev_kin,
+                mask
+            ], dim=2)
+
+        # yield
+        for i in range(len(df)):
+            # forward
+            strand_name = 'fwd' if self.single_strand else 'ds'
+            item_fwd = {
+                'data': fwd_data[i],
+                'metadata': {'read_name': r_names[i], 'position': pos[i], 'strand': strand_name}
             }
-            if not self.inference:
-                item['label'] = label_tensor[i]
-            yield item
-       
-        
-  def __iter__(self):
-    pq_file = pq.ParquetFile(self.data_path)
-    worker_info = torch.utils.data.get_worker_info()
-    if worker_info == None:
-      iter_start = 0
-      if not self.restrict_row_groups:
-         iter_end = self.num_row_groups
-      else:
-         safe_row_groups = min(self.restrict_row_groups, self.num_row_groups)
-         iter_end = safe_row_groups
-        
-    else:
-      if not self.restrict_row_groups:
-        per_worker = int(np.ceil(self.num_row_groups / float(worker_info.num_workers)))
-        worker_id = worker_info.id
-        iter_start = worker_id * per_worker
-        iter_end = min(iter_start + per_worker, self.num_row_groups)
-      else:
-        safe_row_groups = min(self.restrict_row_groups, self.num_row_groups)
-        per_worker = int(np.ceil(safe_row_groups / float(worker_info.num_workers)))
-        worker_id = worker_info.id
-        iter_start = worker_id * per_worker
-        iter_end = min(iter_start + per_worker, safe_row_groups)
-    row_group_indices = range(iter_start, iter_end)
-    
-    for i in row_group_indices:
-      row_group = pq_file.read_row_group(i, use_threads=False)
-      row_group_df = pl.from_arrow(row_group).with_columns([
-          pl.col(c).list.to_array(self.context) for c in self.kinetics_features
-          ])
-      yield from self._process_row_group(row_group_df)
+            if labels is not None: item_fwd['label'] = labels[i]
+            yield item_fwd
 
+            # reverse
+            if rev_data is not None:
+                item_rev = {
+                    'data': rev_data[i],
+                    'metadata': {'read_name': r_names[i], 'position': pos[i], 'strand': 'rev'}
+                }
+                if labels is not None: item_rev['label'] = labels[i]
+                yield item_rev
+            else:
+              continue
+
+    def __iter__(self):
+        worker = torch.utils.data.get_worker_info()
+        valid_groups = min(self.restrict, self.n_groups) if self.restrict else self.n_groups
+        indices = np.arange(valid_groups)
+
+        if worker:
+            indices = np.array_split(indices, worker.num_workers)[worker.id]
+
+        pqf = pq.ParquetFile(self.data_path)
+        for i in indices:
+            # array cast
+            df = pl.from_arrow(pqf.read_row_group(i)).with_columns([
+                pl.col(c).list.to_array(self.context) for c in self.kin_feats
+            ])
+            yield from self._process_batch(df)

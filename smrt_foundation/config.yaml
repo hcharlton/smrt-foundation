@@ -30,7 +30,7 @@ data:
 
 
 training:
-  epochs: 50
+  epochs: 3
   batch_size: 64
   optimizer: 
     name: 'AdamW'
