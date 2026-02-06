@@ -5,6 +5,7 @@ training_logs/
 *.memmap
 *.npy
 *.lprof
+*.bundle
 *.stdout
 *.stderr
 .gwf/
