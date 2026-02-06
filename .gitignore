@@ -1,5 +1,7 @@
 *.DS_Store
 data/
+training_logs/
+*.pt
 *.memmap
 *.npy
 *.lprof
