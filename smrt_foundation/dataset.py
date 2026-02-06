@@ -103,7 +103,8 @@ class LegacyMethylDataset(IterableDataset):
         # construct reverse data
         rev_data = None
         if self.single_strand:
-            rev_seq_t = torch.flip(self.comp_map.to(seq_t.device)[seq_t], dims=[1])
+            # rev_seq_t = torch.flip(self.comp_map.to(seq_t.device)[seq_t], dims=[1])
+            rev_seq_t = torch.flip(self.comp_map[seq_t], dims=[1])
             # Kin: slice 2:4, flip time (dim 2), permute channels
             rev_kin = torch.flip(kin_t[:, 2:4], dims=[2]).permute(0, 2, 1)
             rev_data = torch.cat([
