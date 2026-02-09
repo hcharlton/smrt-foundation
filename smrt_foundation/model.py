@@ -141,7 +141,7 @@ class ResBlock(nn.Module):
     self.padding = (kernel_size - 1) // 2
     self.kernel_size = kernel_size
 
-    self.bn1 = nn.BatchNorm1d(in_channels)
+    self.bn1 = nn.BatchNorm1d(in_channels) # switch to group/layer norm (after trying float32 switch)
     self.conv1 = nn.Conv1d(in_channels=in_channels,
                            out_channels=out_channels,
                            kernel_size=kernel_size,
@@ -334,4 +334,19 @@ class Smrt2Vec(nn.Module):
 
 
 
+# could this be part of the loss? during the pretraining 
+class DirectClassifier(nn.Module):
+  def __init__(self, d_model=128, n_layers=4, n_head=4, max_len=32):
+    super().__init__()
+    self.d_model = d_model
+    self.encoder = SmrtEncoder(d_model, n_layers, n_head, max_len)
+    self.head = nn.Sequential(
+      nn.Linear(d_model, d_model//2),
+      nn.GELU(),
+      nn.Linear(d_model//2, 1)
+    )
 
+  def forward(self, x):
+    c = self.encoder.forward(x)
+    logits = self.head(c[:, 4, :])
+    return logits
