@@ -42,7 +42,7 @@ def compute_log_normalization_stats(df, features, epsilon=1):
     return means, stds
 
 class LegacyMethylDataset(IterableDataset):
-    def __init__(self, data_path, means, stds, context, restrict_row_groups=0, single_strand=False, inference=False):
+    def __init__(self, data_path, means, stds, context, restrict_row_groups=100, single_strand=False, inference=False):
         super().__init__()
         self.data_path = Path(data_path)
         self.means, self.stds = means, stds
@@ -71,7 +71,7 @@ class LegacyMethylDataset(IterableDataset):
         return self.len
 
     def _process_batch(self, df):
-      # seq
+        # seq
         seq_arr = np.stack(
             df['seq'].str.split("")
             .list.eval(pl.element().replace_strict(self.vocab, default=4))
@@ -87,13 +87,14 @@ class LegacyMethylDataset(IterableDataset):
             kin_list.append(vals)
         kin_t = torch.tensor(np.stack(kin_list, axis=1), dtype=torch.bfloat16)
 
-        # mask, labels, etc (note that there is no masked data in the downstream set, so it's all zeros here)
+        # mask, labels, etc
         mask = torch.zeros((seq_t.shape[0], seq_t.shape[1], 1), dtype=torch.bfloat16)
         labels = torch.tensor(df['label'].to_numpy(), dtype=torch.long) if not self.inference else None
-        r_names, pos = df['read_name'].to_list(), df['cg_pos'].to_list()
+        
+        if self.inference:
+            r_names, pos = df['read_name'].to_list(), df['cg_pos'].to_list()
 
         # construct forward sample
-        # Seq (N, L, 1) + Kin (N, 2, L)->(N, L, 2) + Mask (N, L, 1) = (N, L, 4)
         fwd_data = torch.cat([
             seq_t.unsqueeze(-1).to(torch.bfloat16),
             kin_t[:, 0:2].permute(0, 2, 1),
@@ -103,9 +104,7 @@ class LegacyMethylDataset(IterableDataset):
         # construct reverse data
         rev_data = None
         if self.single_strand:
-            # rev_seq_t = torch.flip(self.comp_map.to(seq_t.device)[seq_t], dims=[1])
             rev_seq_t = torch.flip(self.comp_map[seq_t], dims=[1])
-            # Kin: slice 2:4, flip time (dim 2), permute channels
             rev_kin = torch.flip(kin_t[:, 2:4], dims=[2]).permute(0, 2, 1)
             rev_data = torch.cat([
                 rev_seq_t.unsqueeze(-1).to(torch.bfloat16),
@@ -116,24 +115,34 @@ class LegacyMethylDataset(IterableDataset):
         # yield
         for i in range(len(df)):
             # forward
-            strand_name = 'fwd' if self.single_strand else 'ds'
-            item_fwd = {
-                'data': fwd_data[i],
-                'metadata': {'read_name': r_names[i], 'position': pos[i], 'strand': strand_name}
-            }
+            # only tensors
+            item_fwd = {'data': fwd_data[i]}
             if labels is not None: item_fwd['label'] = labels[i]
+            
+            # Only add string metadata during inference for analysis
+            if self.inference:
+                strand_name = 'fwd' if self.single_strand else 'ds'
+                item_fwd['metadata'] = {
+                    'read_name': r_names[i], 
+                    'position': pos[i], 
+                    'strand': strand_name
+                }
             yield item_fwd
 
             # reverse
             if rev_data is not None:
-                item_rev = {
-                    'data': rev_data[i],
-                    'metadata': {'read_name': r_names[i], 'position': pos[i], 'strand': 'rev'}
-                }
+                # only tensors
+                item_rev = {'data': rev_data[i]}
                 if labels is not None: item_rev['label'] = labels[i]
+                
+                # add string metadata during inference
+                if self.inference:
+                    item_rev['metadata'] = {
+                        'read_name': r_names[i], 
+                        'position': pos[i], 
+                        'strand': 'rev'
+                    }
                 yield item_rev
-            else:
-              continue
 
     def __iter__(self):
         worker = torch.utils.data.get_worker_info()
