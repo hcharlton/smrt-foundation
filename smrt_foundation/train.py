@@ -16,22 +16,23 @@ from smrt_foundation.loss import InfoNCE
 
 def main():
     BATCH_SIZE = 64
-    EPOCHS = 10
-    LEARNING_RATE = 1e-3
+    EPOCHS = 12
+    LEARNING_RATE = 3e-4
     SEED = 42
     OUTPUT_DIR = "training_logs" 
 
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
 
     accelerator = Accelerator(
-        mixed_precision="bf16", 
+        # mixed_precision="bf16", 
+        mixed_precision='no',
         log_with="tensorboard",
         project_dir=OUTPUT_DIR,
         kwargs_handlers=[ddp_kwargs]
     )
 
     if accelerator.is_main_process:
-        accelerator.init_trackers("smrt_experiment_01", config={
+        accelerator.init_trackers("smrt_experiment_03", config={
             "batch_size": BATCH_SIZE,
             "lr": LEARNING_RATE,
             "epochs": EPOCHS,
@@ -40,8 +41,7 @@ def main():
 
     set_seed(SEED)
 
-    ds = ShardedMemmapDataset('/tmp') 
-    
+    ds = ShardedMemmapDataset('data/01_processed/ssl_sets/ob007.memmap', limit=2_000_000) 
     dl = DataLoader(
         ds,  
         batch_size=BATCH_SIZE, 
@@ -59,9 +59,11 @@ def main():
 
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
-        max_lr=6e-4,
+        max_lr=3e-4,
         total_steps=len(dl) * EPOCHS, 
-        pct_start=0.05
+        pct_start=0.1,
+        div_factor=100,
+        final_div_factor=100
     )
     scheduler = accelerator.prepare(scheduler)
 
@@ -69,6 +71,7 @@ def main():
     
     for epoch in range(EPOCHS):
         model.train()
+        epoch_loss = 0.0
         
         if accelerator.is_main_process:
             progress_bar = tqdm(dl, desc=f"Epoch {epoch+1}/{EPOCHS}")
@@ -87,6 +90,7 @@ def main():
             global_step += 1
 
             current_loss = loss.item()
+            epoch_loss += current_loss
             current_lr = scheduler.get_last_lr()[0]
 
             accelerator.log(
@@ -100,6 +104,12 @@ def main():
 
             if accelerator.is_main_process:
                  progress_bar.set_postfix(loss=f"{current_loss:.4f}")
+        avg_epoch_loss = epoch_loss / len(dl)
+        accelerator.log(
+            {"epoch_avg_loss": avg_epoch_loss},
+            step = global_step
+        )
+        accelerator.print(f"Epoch {epoch+1} Average Loss: {avg_epoch_loss:.4f}")
 
     accelerator.end_training()
 

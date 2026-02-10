@@ -4,6 +4,7 @@ import torch.nn as nn
 import math
 import torch.nn.functional as F
 
+
 class PositionalEncoding(nn.Module):
   """
   Generates positional encodings based on a given sequence length and
@@ -12,7 +13,7 @@ class PositionalEncoding(nn.Module):
   def __init__(self, d_model, max_len=4096):
         super().__init__()
         pe = torch.zeros(max_len, d_model) # initialize vector
-        position = torch.arange(0, max_len, dtype=torch.bfloat16).unsqueeze(1) # make an index vector
+        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1) # make an index vector
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)) #
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
@@ -54,7 +55,7 @@ class SmrtEmbedding(nn.Module):
   def __init__(self, d_model, n_nucleotides=5, n_continuous=2):
     super().__init__()
     self.nuc_embed = nn.Embedding(n_nucleotides, d_model//2)
-    self.kin_embed = nn.Linear(n_continuous, d_model//2, dtype=torch.bfloat16)
+    self.kin_embed = nn.Linear(n_continuous, d_model//2, dtype=torch.float32)
     self.layernorm = nn.LayerNorm(d_model)
     self.d_model = d_model
   def forward(self, x_nuc, x_kin, is_padding):
@@ -313,7 +314,7 @@ class Smrt2Vec(nn.Module):
     B, T, C = x_emb.shape
     mask_idx_centers = (torch.rand(B, T, device=x_emb.device) < prob) & ~(pad.bool())
     mask_idx_full = F.max_pool1d(
-        mask_idx_centers.bfloat16(),
+        mask_idx_centers.float(),
         kernel_size=size, stride=1, # hyperparameter here...
         padding=size//2
       ).bool()[:, :T] & (~pad.bool())

@@ -36,7 +36,8 @@ class ShardedMemmapDataset(Dataset):
             self.memmaps[shard_idx] = np.load(self.shard_paths[shard_idx], mmap_mode='r')
         else:
             self.memmaps.move_to_end(shard_idx)
-        return torch.from_numpy(np.array(self.memmaps[shard_idx][local_idx])).bfloat16()
+        # return torch.from_numpy(np.array(self.memmaps[shard_idx][local_idx])).bfloat16()
+        return torch.from_numpy(np.array(self.memmaps[shard_idx][local_idx])).float()
     
 
 def compute_log_normalization_stats(df, features, epsilon=1):
