@@ -141,15 +141,15 @@ class ResBlock(nn.Module):
 
     self.padding = (kernel_size - 1) // 2
     self.kernel_size = kernel_size
-
-    self.bn1 = nn.BatchNorm1d(in_channels) # switch to group/layer norm (after trying float32 switch)
+    groups = min(in_channels // 4, 32) 
+    self.gn1 = nn.GroupNorm(num_groups=groups, num_channels=in_channels)
     self.conv1 = nn.Conv1d(in_channels=in_channels,
                            out_channels=out_channels,
                            kernel_size=kernel_size,
                            stride=stride,
                            padding=self.padding,
                            bias=False)
-    self.bn2 = nn.BatchNorm1d(out_channels)
+    self.gn2 = nn.GroupNorm(num_groups=groups, num_channels=in_channels)
     self.conv2 = nn.Conv1d(in_channels=out_channels,
                            out_channels=out_channels,
                            kernel_size=kernel_size,
@@ -188,9 +188,9 @@ class ResBlock(nn.Module):
     return mask.bool()
 
   def forward(self, x, mask):
-    out = self.relu(self.bn1(x))
+    out = self.relu(self.gn1(x))
     out = self.conv1(out)
-    out = self.relu(self.bn2(out))
+    out = self.relu(self.gn2(out))
     out = self.conv2(out)
     out += self.residual(x)
     mask = self._resize_mask(mask)
