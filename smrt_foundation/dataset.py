@@ -11,20 +11,23 @@ from torch.utils.data import Dataset, IterableDataset
 
 
 class ShardedMemmapDataset(Dataset):
-    def __init__(self, data_dir, cache_size=100):
+    def __init__(self, data_dir, cache_size=100, limit=0):
         expanded_dir = os.path.expandvars(data_dir)
         self.shard_paths = sorted(glob.glob(os.path.join(expanded_dir, "*.npy")))
         first_shard = np.load(self.shard_paths[0], mmap_mode='r')
         self.shard_size = first_shard.shape[0]
         last_shard = np.load(self.shard_paths[-1], mmap_mode='r')
-        self.total_len = ((len(self.shard_paths) - 1) * self.shard_size) + last_shard.shape[0]
+        self.full_len = ((len(self.shard_paths) - 1) * self.shard_size) + last_shard.shape[0]
+        self.len = self.full_len if limit == 0 else min(self.full_len, limit)
         self.cache_size = cache_size
         self.memmaps = OrderedDict()
 
     def __len__(self):
-        return self.total_len
+        return self.len
 
     def __getitem__(self, idx):
+        if idx < 0 or idx >= self.len:
+            raise IndexError(f"Index {idx} out of range")
         shard_idx = idx // self.shard_size
         local_idx = idx % self.shard_size
         if shard_idx not in self.memmaps:
