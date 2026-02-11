@@ -18,16 +18,19 @@ def run(cmd):
         print("Command failed")
         sys.exit(1)
 
-if len(sys.argv) != 2 or sys.argv[1] not in ["gefion", "genomedk"]:
-    print("Usage: python sync.py [gefion | genomedk]")
+if len(sys.argv) != 2 or sys.argv[1] not in ["export", "import", 'refresh']:
+    print("Usage: python sync.py [export | import | refresh]")
     sys.exit(1)
 
 mode = sys.argv[1]
 
-### gefion: create bundle and move to outbox
-if mode == "gefion":
+### export mode -> gefion: create bundle and move to outbox
+if mode == "export":
     # sync with origin so the bundle is small
     run("git fetch origin")
+    
+    # update internal gitlab with changes
+    run(f'git push origin {DEV_BRANCH}')
     
     # create the bundle
     run(f"git bundle create {BUNDLE} {DEV_BRANCH} ^origin/main")
@@ -40,8 +43,8 @@ if mode == "gefion":
         os.remove(BUNDLE)
     print("Export complete.")
 
-### genomeDK mode: fetch the bundle and 
-elif mode == "genomedk":
+### import mode -> genomeDK: fetch the bundle and 
+elif mode == "import":
     print(f'Downloading bundle from {RCLONE_REMOTE}...')
     run(f"rclone copy {RCLONE_REMOTE}:{SFTP_FOLDER}/{BUNDLE} .")
     if not os.path.exists(BUNDLE):
@@ -70,4 +73,10 @@ elif mode == "genomedk":
         os.remove(BUNDLE)
     print("Import complete.")
 
-### todo: update mode (for gefion the next day)
+### refresh mode -> gefion: 
+elif mode == 'refresh':
+    print('Closing sync loop')
+    run(f'git checkout {MAIN_BRANCH}')
+    run(f'git pull origin {MAIN_BRANCH}')
+    run(f'git checkout {DEV_BRANCH}')
+    run(f'git merge {MAIN_BRANCH}')
