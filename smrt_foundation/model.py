@@ -95,7 +95,7 @@ class BidirectionalSelfAttention(nn.Module):
 
       # broadcast across the head and query dims
       # given alignment right to left, we need to reshape to match B,H,T,T
-      attn_mask = ~x_pad.view(B, 1, 1, T)
+      attn_mask = ~x_pad.bool().view(B, 1, 1, T)
       output = F.scaled_dot_product_attention(
           q, k, v,
           attn_mask=attn_mask,
@@ -141,15 +141,16 @@ class ResBlock(nn.Module):
 
     self.padding = (kernel_size - 1) // 2
     self.kernel_size = kernel_size
-    groups = min(in_channels // 4, 32) 
-    self.gn1 = nn.GroupNorm(num_groups=groups, num_channels=in_channels)
+    groups1 = min(in_channels // 4, 32) 
+    self.gn1 = nn.GroupNorm(num_groups=groups1, num_channels=in_channels)
     self.conv1 = nn.Conv1d(in_channels=in_channels,
                            out_channels=out_channels,
                            kernel_size=kernel_size,
                            stride=stride,
                            padding=self.padding,
                            bias=False)
-    self.gn2 = nn.GroupNorm(num_groups=groups, num_channels=in_channels)
+    groups2 = min(out_channels // 4, 32) 
+    self.gn2 = nn.GroupNorm(num_groups=groups2, num_channels=out_channels)
     self.conv2 = nn.Conv1d(in_channels=out_channels,
                            out_channels=out_channels,
                            kernel_size=kernel_size,
@@ -171,7 +172,7 @@ class ResBlock(nn.Module):
     else:
       self.residual = nn.Sequential()
   def _resize_mask(self, mask, pad_val=1):
-    if mask.dtype == torch.bool:
+    if mask.dtype != torch.float:
       mask = mask.float()
     if pad_val == 0:
       mask = F.max_pool1d(mask,
@@ -185,7 +186,7 @@ class ResBlock(nn.Module):
                               padding=self.padding)
     else:
       raise ValueError("Invalid pad value: Pad value must be 0 or 1")
-    return mask.bool()
+    return mask
 
   def forward(self, x, mask):
     out = self.relu(self.gn1(x))
@@ -213,11 +214,11 @@ class CNN(nn.Module):
           ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # (B, C, T)   -> (B, C, T)
           ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # (B, C, T)   -> (B, C, T)
 
-          ResBlock(self.in_channels, self.in_channels, kernel_size=3, stride=2),  # (B, C, T)   -> (B, C, T/2)
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3, stride=1),  # (B, C, T)   -> (B, C, T/2)
           ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # (B, C, T/2) -> (B, C, T/2)
           ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # (B, C, T/2) -> (B, C, T/2)
 
-          ResBlock(self.in_channels, self.in_channels, kernel_size=3, stride=2),  # (B, C, T/2) -> (B, C, T/4)
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3, stride=1),  # (B, C, T/2) -> (B, C, T/4)
           ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # (B, C, T/2) -> (B, C, T/4)
           ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # (B, C, T/2) -> (B, C, T/4)
           ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # (B, C, T/2) -> (B, C, T/4)
@@ -225,10 +226,21 @@ class CNN(nn.Module):
     self.dropout = nn.Dropout(p=dropout_p)
     # calculate fc layer input with dummy passthrough
     self.output_shapes = self._get_output_shape()
+    self.r0 = self._compute_r0()
+
+  def _compute_r0(self):
+    cum_rf = 1
+    cum_stride = 1
+    for block in self.extractor:
+      cum_rf += (block.kernel_size - 1) * cum_stride
+      cum_stride *= block.stride # only the first layer in each block can be != 1
+      cum_rf += (block.kernel_size - 1) * cum_stride 
+    return cum_rf
 
   def forward(self, x, mask):
     for block in self.extractor:
       x, mask= block(x,mask)
+    x = self.dropout(x)
     return x, mask
 
   def _get_output_shape(self):
@@ -251,7 +263,7 @@ class SmrtEncoder(nn.Module):
     self.d_model = d_model
     self.embed = SmrtEmbedding(d_model)
     self.pe = PositionalEncoding(d_model, max_len=max_len)
-    self.downsample = CNN(d_model, max_len=max_len, dropout_p=dropout_p)
+    self.cnn = CNN(d_model, max_len=max_len, dropout_p=dropout_p)
     self.layer_norm_target = nn.LayerNorm(d_model)
     self.blocks = nn.ModuleList([
         TransformerBlock(d_model=d_model, n_head=n_head, max_len=max_len) for _ in range(n_layers)
@@ -271,7 +283,7 @@ class SmrtEncoder(nn.Module):
     # generate hybrid embedding
     x = self.embed(x_nuc, x_kin, x_pad)
     # featurize the emmbeddings (cnn expect BCT)
-    z, z_pad = self.downsample(x.permute(0,2,1), x_pad)
+    z, z_pad = self.cnn(x.permute(0,2,1), x_pad)
     # permute back to BTC
     z = z.permute(0,2,1)
     targets = self.layer_norm_target(z.clone())
@@ -349,5 +361,5 @@ class DirectClassifier(nn.Module):
 
   def forward(self, x):
     c = self.encoder.forward(x)
-    logits = self.head(c[:, 4, :])
+    logits = self.head(c[:, c.shape[1]//2, :])
     return logits
