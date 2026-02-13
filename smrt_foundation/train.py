@@ -32,7 +32,7 @@ def main():
     )
 
     if accelerator.is_main_process:
-        accelerator.init_trackers("smrt_experiment_04", config={
+        accelerator.init_trackers("smrt_experiment_05_groupnorm_outchannels", config={
             "batch_size": BATCH_SIZE,
             "lr": LEARNING_RATE,
             "epochs": EPOCHS,
