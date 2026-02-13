@@ -89,10 +89,10 @@ class LegacyMethylDataset(IterableDataset):
             vals = df[k].to_numpy() # (N, L)
             vals = (np.log(vals + 1) - self.means[k]) / self.stds[k]
             kin_list.append(vals)
-        kin_t = torch.tensor(np.stack(kin_list, axis=1), dtype=torch.bfloat16)
+        kin_t = torch.tensor(np.stack(kin_list, axis=1), dtype=torch.float)
 
         # mask, labels, etc
-        mask = torch.zeros((seq_t.shape[0], seq_t.shape[1], 1), dtype=torch.bfloat16)
+        mask = torch.zeros((seq_t.shape[0], seq_t.shape[1], 1), dtype=torch.float)
         labels = torch.tensor(df['label'].to_numpy(), dtype=torch.long) if not self.inference else None
         
         if self.inference:
@@ -100,7 +100,7 @@ class LegacyMethylDataset(IterableDataset):
 
         # construct forward sample
         fwd_data = torch.cat([
-            seq_t.unsqueeze(-1).to(torch.bfloat16),
+            seq_t.unsqueeze(-1).to(torch.float),
             kin_t[:, 0:2].permute(0, 2, 1),
             mask
         ], dim=2)
@@ -111,7 +111,7 @@ class LegacyMethylDataset(IterableDataset):
             rev_seq_t = torch.flip(self.comp_map[seq_t], dims=[1])
             rev_kin = torch.flip(kin_t[:, 2:4], dims=[2]).permute(0, 2, 1)
             rev_data = torch.cat([
-                rev_seq_t.unsqueeze(-1).to(torch.bfloat16),
+                rev_seq_t.unsqueeze(-1).to(torch.float),
                 rev_kin,
                 mask
             ], dim=2)
