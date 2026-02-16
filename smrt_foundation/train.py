@@ -13,6 +13,7 @@ if module_path not in sys.path:
 from smrt_foundation.dataset import ShardedMemmapDataset
 from smrt_foundation.model import Smrt2Vec
 from smrt_foundation.loss import InfoNCE
+from smrt_foundation.optim import get_cosine_schedule_with_warmup
 
 def main():
     BATCH_SIZE = 64
@@ -32,7 +33,7 @@ def main():
     )
 
     if accelerator.is_main_process:
-        accelerator.init_trackers("smrt_experiment_05_groupnorm_outchannels", config={
+        accelerator.init_trackers("smrt_experiment_06_warmup_cosine", config={
             "batch_size": BATCH_SIZE,
             "lr": LEARNING_RATE,
             "epochs": EPOCHS,
@@ -57,14 +58,21 @@ def main():
 
     model, optimizer, dl = accelerator.prepare(model, optimizer, dl)
 
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #     optimizer,
+    #     max_lr=3e-4,
+    #     total_steps=len(dl) * EPOCHS, 
+    #     pct_start=0.1,
+    #     div_factor=100,
+    #     final_div_factor=100
+    # )
+
+    scheduler = get_cosine_schedule_with_warmup(
         optimizer,
-        max_lr=3e-4,
-        total_steps=len(dl) * EPOCHS, 
-        pct_start=0.1,
-        div_factor=100,
-        final_div_factor=100
+        total_steps = len(dl) * EPOCHS,
+        pct_start = 0.2
     )
+
     scheduler = accelerator.prepare(scheduler)
 
     global_step = 0
