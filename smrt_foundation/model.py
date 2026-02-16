@@ -214,11 +214,11 @@ class CNN(nn.Module):
           ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # (B, C, T)   -> (B, C, T)
           ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # (B, C, T)   -> (B, C, T)
 
-          ResBlock(self.in_channels, self.in_channels, kernel_size=3, stride=1),  # (B, C, T)   -> (B, C, T/2)
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3, stride=2),  # (B, C, T)   -> (B, C, T/2)
           ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # (B, C, T/2) -> (B, C, T/2)
           ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # (B, C, T/2) -> (B, C, T/2)
 
-          ResBlock(self.in_channels, self.in_channels, kernel_size=3, stride=1),  # (B, C, T/2) -> (B, C, T/4)
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3, stride=2),  # (B, C, T/2) -> (B, C, T/4)
           ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # (B, C, T/2) -> (B, C, T/4)
           ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # (B, C, T/2) -> (B, C, T/4)
           ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # (B, C, T/2) -> (B, C, T/4)
