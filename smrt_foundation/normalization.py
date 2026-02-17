@@ -21,20 +21,23 @@ def build_rc_lookup(config):
                 
     return lookup
     
-def normalize_read_mad(read_data, mask, eps=1e-6):
+### MAD normalization
+def normalize_read_mad(read_data, is_continuous_mask, eps=1e-6):
     """
     MAD normalization of a single read on the continous features
     
     read_data: array of data for one read
-    mask: boolean mask to index only the continuous features (masks out the categorical features)
+    is_continuous_mask: boolean mask to index only the continuous features 
+                        (masks out the categorical features)
     eps: Description
     """
-    x = read_data[:, mask]
+    np.log1p(read_data, out=read_data, where=is_continuous_mask)
+    x = read_data[:, is_continuous_mask]
     x_median = np.median(x, axis=0)
     mad = np.median(np.abs(x - x_median), axis=0)
     mad = np.where(mad < eps, 1.0, mad)
     x_norm = (x - x_median) / (mad * 1.4826)
-    read_data[:, mask] = x_norm
+    read_data[:, is_continuous_mask] = x_norm
 
     return read_data
 

@@ -62,19 +62,19 @@ def verify_output(data_dir, config_path):
         logging.info(f"Sample values: {valid_seq[:10]}")
 
     # --- TEST 2: Normalization logic reporting ---
-    logging.info("[TEST 2] Normalizationg Logic Check")
-    cont_data = data[:,:,1:3]
-    mask = ~np.bool(data[:,:,-1])
-    valid_cont_data = cont_data[mask]
-    medians = np.median(valid_cont_data, axis=0)
-    mins = np.min(valid_cont_data, axis=0)
-    maxs = np.max(valid_cont_data, axis=0)
-    if np.max(np.abs(medians))>0.5:
-        logging.error(f"IPD/PW medians deviate significantly from 0 ({medians[0]}, {medians[0]})")
-    else:
-        logging.info(f"IPD/PW medians are ({medians[0]}, {medians[0]})")
-    logging.info(f"min ipd,pw: {mins}")
-    logging.info(f"max ipd,pw: {maxs}")
+    # logging.info("[TEST 2] Normalizationg Logic Check")
+    # cont_data = data[:,:,1:3]
+    # mask = ~np.bool(data[:,:,-1])
+    # valid_cont_data = cont_data[mask]
+    # medians = np.median(valid_cont_data, axis=0)
+    # mins = np.min(valid_cont_data, axis=0)
+    # maxs = np.max(valid_cont_data, axis=0)
+    # if np.max(np.abs(medians))>0.5:
+    #     logging.error(f"IPD/PW medians deviate significantly from 0 ({medians[0]}, {medians[0]})")
+    # else:
+    #     logging.info(f"IPD/PW medians are ({medians[0]}, {medians[0]})")
+    # logging.info(f"min ipd,pw: {mins}")
+    # logging.info(f"max ipd,pw: {maxs}")
 
     
     # --- TEST 3: Reverse Complement Logic ---

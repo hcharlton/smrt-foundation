@@ -37,6 +37,7 @@ CONFIG = {
             'bam': 'data/00_raw/unlabeled/ob007_kinetics_diploid.bam',
             'zarr': 'data/01_processed/ssl_sets/ob007.zarr',
             'memmap': 'data/01_processed/ssl_sets/ob007.memmap',
+            'memmap_raw':  'data/01_processed/ssl_sets/ob007_raw.memmap',
             'optional_tags': ['sm', 'sx'],
             'n_reads': 0,
         },
@@ -44,15 +45,17 @@ CONFIG = {
             'bam': 'data/00_raw/labeled/methylated_hifi_reads.bam',
             'zarr': 'data/01_processed/ssl_sets/cpg_pos.zarr',
             'memmap': 'data/01_processed/ssl_sets/cpg_pos.memmap',
+            'memmap_raw': 'data/01_processed/ssl_sets/cpg_pos_raw.memmap',
             'optional_tags': [],
-            'n_reads': 10,
+            'n_reads': 0,
         },
         'cpg_neg':{
             'bam': 'data/00_raw/labeled/unmethylated_hifi_reads.bam',
             'zarr': 'data/01_processed/ssl_sets/cpg_neg.zarr',
             'memmap': 'data/01_processed/ssl_sets/cpg_neg.memmap',
+            'memmap_raw': 'data/01_processed/ssl_sets/cpg_neg_raw.memmap',
             'optional_tags': [],
-            'n_reads': 10,
+            'n_reads': 0,
         }
     }
 }
@@ -78,6 +81,7 @@ def mock_file(output_path):
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
+# bam -> zarr
 def zarr_conversion(bam_path, output_path, n_reads, optional_tags, config, profile=False):
     inputs = {'in_file': bam_path}
     outputs = {'out_file': output_path}
@@ -110,6 +114,7 @@ def zarr_conversion(bam_path, output_path, n_reads, optional_tags, config, profi
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
+# legacy (ignore)
 def create_ssl_dataset(bam_path, output_path, n_reads, context, optional_tags, denomination, config):
     inputs = {'in_file': bam_path}
     outputs = {'out_file': output_path}
@@ -132,6 +137,7 @@ def create_ssl_dataset(bam_path, output_path, n_reads, context, optional_tags, d
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
+# zarr -> zarr + normalization stats in json
 def inject_norm_stats(zarr_path, chunk_stride, idx_stride, num_threads):
     sentinel = f"{zarr_path}.stats_added"
     inputs = {'infile': zarr_path}
@@ -151,6 +157,7 @@ def inject_norm_stats(zarr_path, chunk_stride, idx_stride, num_threads):
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
+## zarr -> memmap (can be normalized or not dep on flag)
 def memmap_conversion(
     zarr_path,
     output_path,
@@ -161,6 +168,7 @@ def memmap_conversion(
     fwd_features=['seq', 'fi', 'fp'],
     rev_features=['seq', 'ri', 'rp'],
     reverse_complement=True,
+    normalize=False,
     profile=False
 ):
     inputs = {'in_file': zarr_path}
@@ -170,6 +178,7 @@ def memmap_conversion(
 
     profiler_env = "TimeLINE_PROFILE=1" if profile else ""
     rc_flag = "--reverse_complement" if reverse_complement else ""
+    norm_flag = "--normalize" if normalize else ""
     fwd_str = " ".join(fwd_features)
     rev_str = " ".join(rev_features)
 
@@ -187,9 +196,12 @@ def memmap_conversion(
         --context {context} \
         --fwd_features {fwd_str} \
         --rev_features {rev_str} \
-        {rc_flag}
+        {rc_flag} \
+        {norm_flag}
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+
 
 def validate_memmap(memmap_path, config_path):
     inputs = {'in_file': memmap_path}
@@ -244,10 +256,23 @@ def process_ssl_dataset(name, data):
             zarr_path=zarr_target.outputs['out_file'],
             output_path=data['memmap'],
             config_path=CONFIG['config_path'],
-            profile=True
+            profile=True,
+            normalize = True
         )
     )
 
+    memmap_target_raw = gwf.target_from_template(
+        name=f'{name}_to_memmap_raw',
+        template=memmap_conversion(
+            zarr_path=zarr_target.outputs['out_file'],
+            output_path=data['memmap_raw']+'',
+            config_path=CONFIG['config_path'],
+            profile=True,
+            normalize = False,
+            shards=50
+        )
+    )
+    
     # 3. produce valdidation logs
     gwf.target_from_template(
         name=f'{name}_validation',
