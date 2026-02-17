@@ -308,7 +308,8 @@ def process_ssl_dataset(name, data):
                 fwd_features=['seq', 'fi', 'fp'],
                 rev_features=['seq', 'ri', 'rp'],
                 reverse_complement=True,
-                profile=True
+                profile=True,
+                normalize=True
             )
         )
         
