@@ -13,7 +13,7 @@ class SingleIdxProbe(nn.Module):
 
         self.head = nn.Sequential(
             nn.Linear(encoder.d_model, encoder.d_model // 2),
-            nn.ReLU(),
+            nn.ReLU(), #gelu
             nn.Linear(encoder.d_model // 2, n_classes)
         )
 
