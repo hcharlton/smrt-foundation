@@ -1,7 +1,7 @@
 experiment_type: 'ssl'
-experiment_name: '08_even_bigger_pct_start'
-run_message: 'test out new yaml for experiments'
-ssl_dataset: 'ob007'
+experiment_name: '10_filter_q80'
+run_message: 'run with standard masking on q80 filtered dataset'
+ssl_dataset: 'ob007_filter_qual.memmap'
 
 smrt2vec:
   d_model: 128
