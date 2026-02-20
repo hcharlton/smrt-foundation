@@ -46,18 +46,18 @@ CONFIG = {
         'cpg_pos':{
             'bam': 'data/00_raw/labeled/methylated_hifi_reads.bam',
             'zarr': 'data/01_processed/ssl_sets/cpg_pos.zarr',
-            'memmap': 'data/01_processed/ssl_sets/cpg_pos.memmap',
-            'memmap_raw': 'data/01_processed/ssl_sets/cpg_pos_raw.memmap',
-            'memmap_filter_qual':  'data/01_processed/ssl_sets/cpg_pos_filter_qual.memmap',
+            'memmap': 'data/01_processed/val_sets/cpg_pos.memmap',
+            'memmap_raw': 'data/01_processed/val_sets/cpg_pos_raw.memmap',
+            'memmap_filter_qual':  'data/01_processed/val_sets/cpg_pos_filter_qual.memmap',
             'optional_tags': [],
             'n_reads': 0,
         },
         'cpg_neg':{
             'bam': 'data/00_raw/labeled/unmethylated_hifi_reads.bam',
             'zarr': 'data/01_processed/ssl_sets/cpg_neg.zarr',
-            'memmap': 'data/01_processed/ssl_sets/cpg_neg.memmap',
-            'memmap_raw': 'data/01_processed/ssl_sets/cpg_neg_raw.memmap',
-            'memmap_filter_qual':  'data/01_processed/ssl_sets/cpg_neg_filter_qual.memmap',
+            'memmap': 'data/01_processed/val_sets/cpg_neg.memmap',
+            'memmap_raw': 'data/01_processed/val_sets/cpg_neg_raw.memmap',
+            'memmap_filter_qual':  'data/01_processed/val_sets/cpg_neg_filter_qual.memmap',
             'optional_tags': [],
             'n_reads': 0,
         }
@@ -213,7 +213,7 @@ def memmap_cpg_conversion(
     zarr_path,
     output_path,
     config_path,
-    shard_size=16384,
+    shard_size=2**20,
     shards=0,
     context=128,
     fwd_features=['seq', 'fi', 'fp'],
@@ -240,7 +240,7 @@ def memmap_cpg_conversion(
     conda activate data_prep
     cd {p('')}
 
-    {profiler_env} python -m scripts.zarr_to_memmap_instanceNorm \
+    {profiler_env} python -m scripts.zarr_to_methyl_memmap \
         --input_path {zarr_path} \
         --output_path {output_path} \
         --config_path {config_path} \
@@ -278,19 +278,12 @@ def validate_memmap(memmap_path, config_path):
 # pipeline logic
 
 def process_ssl_dataset(name, data):
-    """
-    Generates the graph nodes for a single dataset.
-    """
-    
-    # fake bams on gefion
     if IS_GEFION:
         gwf.target_from_template(
             name=f"mock_bam_{name}",
             template=mock_file(output_path=data['bam'])
         )
 
-    # 1. BAM -> Zarr
-    # skipped on gefion (implicitly due to file mocking)
     zarr_target = gwf.target_from_template(
         name=f"{name}_to_zarr",
         template=zarr_conversion(
@@ -303,7 +296,20 @@ def process_ssl_dataset(name, data):
         )
     )
 
-    # 2. Zarr -> Memmap
+    if name.startswith('cpg'):
+        gwf.target_from_template(
+            name=f'{name}_to_val_memmap',
+            template=memmap_cpg_conversion(
+                zarr_path=zarr_target.outputs['out_file'],
+                output_path=data['memmap'],
+                config_path=CONFIG['config_path'],
+                profile=True,
+                normalize=True,
+                shards=10
+            )
+        )
+        return
+
     memmap_target = gwf.target_from_template(
         name=f'{name}_to_memmap',
         template=memmap_conversion(
@@ -311,7 +317,7 @@ def process_ssl_dataset(name, data):
             output_path=data['memmap'],
             config_path=CONFIG['config_path'],
             profile=True,
-            normalize = True
+            normalize=True
         )
     )
 
@@ -319,10 +325,10 @@ def process_ssl_dataset(name, data):
         name=f'{name}_to_memmap_raw',
         template=memmap_conversion(
             zarr_path=zarr_target.outputs['out_file'],
-            output_path=data['memmap_raw']+'',
+            output_path=data['memmap_raw'],
             config_path=CONFIG['config_path'],
             profile=True,
-            normalize = False,
+            normalize=False,
             shards=50
         )
     )
@@ -331,27 +337,25 @@ def process_ssl_dataset(name, data):
         name=f'{name}_to_memmap_filter_qual',
         template=memmap_conversion(
             zarr_path=zarr_target.outputs['out_file'],
-            output_path=data['memmap_filter_qual']+'',
+            output_path=data['memmap_filter_qual']+'_norm',
             config_path=CONFIG['config_path'],
             profile=True,
-            normalize = False,
-            filter_qual = True,
+            normalize=True,
+            filter_qual=True,
             shards=500
         )
     )
+
     
-    # 3. produce valdidation logs
     gwf.target_from_template(
         name=f'{name}_validation',
         template=validate_memmap(
             memmap_path=memmap_target.outputs['out_file'],
-            config_path = CONFIG['config_path']
+            config_path=CONFIG['config_path']
         )
     )
     
-    # 3. test targets for ob007 (small)
     if name == 'ob007':
-        # generate statistics
         gwf.target_from_template(
             name='stats_test',
             template=inject_norm_stats(
@@ -362,7 +366,6 @@ def process_ssl_dataset(name, data):
             )
         )
 
-        # Test Memmap Generation
         test_memmap_target = gwf.target_from_template(
             name='zarr_to_memmap_test',
             template=memmap_conversion(
@@ -370,7 +373,7 @@ def process_ssl_dataset(name, data):
                 output_path='data/01_processed/ssl_sets/ob007_test.memmap',
                 config_path=CONFIG['config_path'],
                 shards=30,
-                context = 4096,
+                context=4096,
                 shard_size=16384,
                 fwd_features=['seq', 'fi', 'fp'],
                 rev_features=['seq', 'ri', 'rp'],
@@ -380,21 +383,15 @@ def process_ssl_dataset(name, data):
             )
         )
         
-        # Test Memmap Validation
         gwf.target_from_template(
             name='validate_memmap_test',
             template=validate_memmap(
-                memmap_path = test_memmap_target.outputs['out_file'],
-                config_path = CONFIG['config_path'])
+                memmap_path=test_memmap_target.outputs['out_file'],
+                config_path=CONFIG['config_path']
+            )
         )
 
-def process_cpg_dataset(name, data):
-    """
-    Generates the graph nodes for the cpg dataset.
-    """
-
-
-# loop to create targets
+# loop to create ssl targets
 for name, data in CONFIG['ssl_datasets'].items():
     process_ssl_dataset(name, data)
 
@@ -428,13 +425,12 @@ with open(CONFIG['config_path'], 'r') as f:
     exp_config = yaml.safe_load(f)
 
 target_ds = exp_config.get('ssl_dataset', 'ob007')
-if target_ds in CONFIG['ssl_datasets']:
-    memmap_path = CONFIG['ssl_datasets'][target_ds]['memmap']
-    
-    gwf.target_from_template(
-        name=f"{exp_config.get('experiment_type', 'smrt_experiment')}_exp",
-        template=train_model(
-            config_path=CONFIG['config_path'],
-            input_memmap=memmap_path
-        )
+memmap_path = f'data/01_processed/ssl_sets/{target_ds}'
+
+gwf.target_from_template(
+    name=f"{exp_config.get('experiment_type', 'smrt_experiment')}_exp",
+    template=train_model(
+        config_path=CONFIG['config_path'],
+        input_memmap=memmap_path
     )
+)
