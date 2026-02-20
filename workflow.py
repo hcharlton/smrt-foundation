@@ -39,6 +39,7 @@ CONFIG = {
             'zarr': 'data/01_processed/ssl_sets/ob007.zarr',
             'memmap': 'data/01_processed/ssl_sets/ob007.memmap',
             'memmap_raw':  'data/01_processed/ssl_sets/ob007_raw.memmap',
+            'memmap_filter_qual':  'data/01_processed/ssl_sets/ob007_filter_qual.memmap',
             'optional_tags': ['sm', 'sx'],
             'n_reads': 0,
         },
@@ -47,6 +48,7 @@ CONFIG = {
             'zarr': 'data/01_processed/ssl_sets/cpg_pos.zarr',
             'memmap': 'data/01_processed/ssl_sets/cpg_pos.memmap',
             'memmap_raw': 'data/01_processed/ssl_sets/cpg_pos_raw.memmap',
+            'memmap_filter_qual':  'data/01_processed/ssl_sets/cpg_pos_filter_qual.memmap',
             'optional_tags': [],
             'n_reads': 0,
         },
@@ -55,6 +57,7 @@ CONFIG = {
             'zarr': 'data/01_processed/ssl_sets/cpg_neg.zarr',
             'memmap': 'data/01_processed/ssl_sets/cpg_neg.memmap',
             'memmap_raw': 'data/01_processed/ssl_sets/cpg_neg_raw.memmap',
+            'memmap_filter_qual':  'data/01_processed/ssl_sets/cpg_neg_filter_qual.memmap',
             'optional_tags': [],
             'n_reads': 0,
         }
@@ -170,6 +173,7 @@ def memmap_conversion(
     rev_features=['seq', 'ri', 'rp'],
     reverse_complement=True,
     normalize=False,
+    filter_qual=False,
     profile=False
 ):
     inputs = {'in_file': zarr_path}
@@ -180,6 +184,7 @@ def memmap_conversion(
     profiler_env = "TimeLINE_PROFILE=1" if profile else ""
     rc_flag = "--reverse_complement" if reverse_complement else ""
     norm_flag = "--normalize" if normalize else ""
+    filter_qual_flag = "--filter_qual" if filter_qual else ""
     fwd_str = " ".join(fwd_features)
     rev_str = " ".join(rev_features)
 
@@ -198,7 +203,55 @@ def memmap_conversion(
         --fwd_features {fwd_str} \
         --rev_features {rev_str} \
         {rc_flag} \
-        {norm_flag}
+        {norm_flag} \
+        {filter_qual_flag}
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+
+def memmap_cpg_conversion(
+    zarr_path,
+    output_path,
+    config_path,
+    shard_size=16384,
+    shards=0,
+    context=128,
+    fwd_features=['seq', 'fi', 'fp'],
+    rev_features=['seq', 'ri', 'rp'],
+    reverse_complement=True,
+    normalize=False,
+    filter_qual=False,
+    profile=False
+):
+    inputs = {'in_file': zarr_path}
+    outputs = {'out_file': output_path}
+
+    options = {'cores': 8, 'memory': '64gb', 'walltime': '18:00:00'}
+
+    profiler_env = "TimeLINE_PROFILE=1" if profile else ""
+    rc_flag = "--reverse_complement" if reverse_complement else ""
+    norm_flag = "--normalize" if normalize else ""
+    filter_qual_flag = "--filter_qual" if filter_qual else ""
+    fwd_str = " ".join(fwd_features)
+    rev_str = " ".join(rev_features)
+
+    spec = f"""
+    source $(conda info --base)/etc/profile.d/conda.sh
+    conda activate data_prep
+    cd {p('')}
+
+    {profiler_env} python -m scripts.zarr_to_memmap_instanceNorm \
+        --input_path {zarr_path} \
+        --output_path {output_path} \
+        --config_path {config_path} \
+        --shard_size {shard_size} \
+        --max_shards {shards} \
+        --context {context} \
+        --fwd_features {fwd_str} \
+        --rev_features {rev_str} \
+        {rc_flag} \
+        {norm_flag} \
+        {filter_qual_flag}
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
@@ -273,6 +326,19 @@ def process_ssl_dataset(name, data):
             shards=50
         )
     )
+
+    memmap_target_filtered = gwf.target_from_template(
+        name=f'{name}_to_memmap_filter_qual',
+        template=memmap_conversion(
+            zarr_path=zarr_target.outputs['out_file'],
+            output_path=data['memmap_filter_qual']+'',
+            config_path=CONFIG['config_path'],
+            profile=True,
+            normalize = False,
+            filter_qual = True,
+            shards=500
+        )
+    )
     
     # 3. produce valdidation logs
     gwf.target_from_template(
@@ -321,6 +387,11 @@ def process_ssl_dataset(name, data):
                 memmap_path = test_memmap_target.outputs['out_file'],
                 config_path = CONFIG['config_path'])
         )
+
+def process_cpg_dataset(name, data):
+    """
+    Generates the graph nodes for the cpg dataset.
+    """
 
 
 # loop to create targets

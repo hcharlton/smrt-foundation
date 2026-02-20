@@ -52,6 +52,7 @@ def zarr_to_sharded_memmap(
     context=4096, shard_size=16384, max_shards=0, 
     use_rc=False,
     normalize = False,
+    filter_qual = False,
 ):
     os.makedirs(output_dir, exist_ok=True)
     root = zarr.open(zarr_path, mode='r')
@@ -87,6 +88,8 @@ def zarr_to_sharded_memmap(
     all_feats = root.attrs['features']
     # find the col indices for the features we actually will use
     load_indices = list(set([all_feats.index(f) for f in fwd_features + rev_features]))
+    if filter_qual:
+        load_indices.append(all_feats.index('qual'))
     # make a new map
     idx_map = {orig: i for i, orig in enumerate(load_indices)}
     # get indices in the loaded array for the forward and reverse views
@@ -106,7 +109,10 @@ def zarr_to_sharded_memmap(
         # get a chunk from the zarr of b reads
         chunk = z_data[idx_start:idx_end, load_indices].astype(np.float32)
         # get the forward and reverse batches (each have b reads)
-        b_fwd, b_rev = chunk[:, fwd_local], chunk[:, rev_local]
+        if filter_qual:
+            b_fwd, b_rev, b_qual = chunk[:, fwd_local], chunk[:, rev_local], chunk[:, idx_map[all_feats.index('qual')]]
+        else: 
+            b_fwd, b_rev, = chunk[:, fwd_local], chunk[:, rev_local]
 
         # apply log1 and normalize (only cont. features)
         # np.log1p(b_fwd, out=b_fwd, where=is_continuous_fwd)
@@ -116,6 +122,11 @@ def zarr_to_sharded_memmap(
         local_ptr = 0
         for r in range(i, min(i + batch_size, total_reads)):
             r_len = indptr[r+1] - indptr[r] # read length
+            if filter_qual:
+                mean_qual = np.mean(b_qual[local_ptr : local_ptr + r_len])
+                if mean_qual < 80:
+                    local_ptr += r_len
+                    continue
             read_fwd = b_fwd[local_ptr : local_ptr + r_len] # a single fwd read
             read_rev = b_rev[local_ptr : local_ptr + r_len] # a single rev read
             local_ptr += r_len
@@ -166,13 +177,21 @@ if __name__ == "__main__":
     parser.add_argument("--rev_features", nargs='+', default=['seq', 'ri', 'rp'])
     parser.add_argument("--reverse_complement", action="store_true")
     parser.add_argument("--normalize", action="store_true")
+    parser.add_argument("--filter_qual", action="store_true")
 
     args = parser.parse_args()
     with open(args.config_path, 'r') as f: config = yaml.safe_load(f)
 
     zarr_to_sharded_memmap(
-        zarr_path=args.input_path, output_dir=args.output_path, config=config,
-        context=args.context, shard_size=args.shard_size, max_shards=args.max_shards,
-        fwd_features=args.fwd_features, rev_features=args.rev_features,
-        use_rc=args.reverse_complement, normalize=args.normalize,
+        zarr_path=args.input_path, 
+        output_dir=args.output_path, 
+        config=config,
+        context=args.context, 
+        shard_size=args.shard_size, 
+        max_shards=args.max_shards,
+        fwd_features=args.fwd_features, 
+        rev_features=args.rev_features,
+        use_rc=args.reverse_complement, 
+        normalize=args.normalize, 
+        filter_qual=args.filter_qual
     )
