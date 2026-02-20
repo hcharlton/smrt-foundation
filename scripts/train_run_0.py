@@ -17,7 +17,7 @@ from smrt_foundation.optim import get_cosine_schedule_with_warmup
 
 def main():
     BATCH_SIZE = 64
-    EPOCHS = 12
+    EPOCHS = 10
     LEARNING_RATE = 3e-4
     SEED = 42
     OUTPUT_DIR = "training_logs" 
@@ -33,7 +33,7 @@ def main():
     )
 
     if accelerator.is_main_process:
-        accelerator.init_trackers("smrt_experiment_06_warmup_cosine", config={
+        accelerator.init_trackers("smrt_experiment_08_stronger_masking", config={
             "batch_size": BATCH_SIZE,
             "lr": LEARNING_RATE,
             "epochs": EPOCHS,

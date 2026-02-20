@@ -1,4 +1,5 @@
 import os
+import yaml
 import gwf
 from gwf import Workflow, AnonymousTarget
 
@@ -328,4 +329,41 @@ for name, data in CONFIG['ssl_datasets'].items():
 
 
 
+############################### TRAINING #######################################
 
+def train_model(config_path, input_memmap):
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    
+    exp_type = config.get('experiment_type', 'ssl')
+    exp_name = config.get('experiment_name', 'smrt_experiment')
+    
+    sentinel_path = p(f"training_logs/{exp_type}/{exp_name}/run.sentinel")
+    inputs = {'config': config_path, 'memmap': input_memmap}
+    outputs = {'sentinel': sentinel_path}
+    
+    options = {'cores': 16, 'memory': '64gb', 'walltime': '3:00:00', 'gres': 'gpu:8'}
+        
+    spec = f"""
+    source .venv/bin/activate
+    cd {p('')}
+    accelerate launch --num_processes=8 --mixed_precision='no' smrt_foundation/train.py {config_path}
+    touch {sentinel_path}
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+# reusable training target
+with open(CONFIG['config_path'], 'r') as f:
+    exp_config = yaml.safe_load(f)
+
+target_ds = exp_config.get('ssl_dataset', 'ob007')
+if target_ds in CONFIG['ssl_datasets']:
+    memmap_path = CONFIG['ssl_datasets'][target_ds]['memmap']
+    
+    gwf.target_from_template(
+        name=f"{exp_config.get('experiment_type', 'smrt_experiment')}_exp",
+        template=train_model(
+            config_path=CONFIG['config_path'],
+            input_memmap=memmap_path
+        )
+    )
