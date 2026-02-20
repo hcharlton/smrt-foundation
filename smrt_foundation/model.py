@@ -310,9 +310,10 @@ class SmrtEncoder(nn.Module):
 
 ### Main Model
 class Smrt2Vec(nn.Module):
-  def __init__(self, d_model=128, n_layers=4, n_head=4, max_len=4096):
+  def __init__(self, d_model=128, n_layers=4, n_head=4, max_len=4096, p_mask=0.05):
     super().__init__()
     self.d_model = d_model
+    self.p_mask = p_mask
     self.encoder = SmrtEncoder(d_model, n_layers, n_head, max_len)
 
     # components specific to pretraining
@@ -322,9 +323,9 @@ class Smrt2Vec(nn.Module):
         nn.GELU(), # avoid negative values being ignored with ReLU
         nn.Linear(d_model, d_model)
         )
-  def apply_mask(self, x_emb, pad, prob=0.05, size=6):
+  def apply_mask(self, x_emb, pad, p_mask, size=6):
     B, T, C = x_emb.shape
-    mask_idx_centers = (torch.rand(B, T, device=x_emb.device) < prob) & ~(pad.bool())
+    mask_idx_centers = (torch.rand(B, T, device=x_emb.device) < p_mask) & ~(pad.bool())
     mask_idx_full = F.max_pool1d(
         mask_idx_centers.float(),
         kernel_size=size, stride=1, # hyperparameter here...
@@ -337,7 +338,7 @@ class Smrt2Vec(nn.Module):
     # dowsampled latents with pe (no transormer block yet)
     z, z_pad, targets = self.encoder.get_latents(x)
     # mask indices for loss
-    z_masked, z_masked_bool = self.apply_mask(z, z_pad)
+    z_masked, z_masked_bool = self.apply_mask(z, z_pad, self.p_mask)
     z_masked_pe = self.encoder.add_pe(z_masked)
     # run through transformer
     c = self.encoder.forward_transformer(z_masked_pe, z_pad)

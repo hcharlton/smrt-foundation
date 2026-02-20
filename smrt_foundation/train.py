@@ -37,7 +37,7 @@ def main():
         'epochs': 10,
         'max_lr': 3e-4,
         'temperature': 0.1,
-        'p_mask': 0.2,
+        'p_mask': 0.05,
         'weight_decay': 0.02,
         'pct_start': 0.25
     }
@@ -88,7 +88,8 @@ def main():
         d_model=config_updated['d_model'],
         n_layers=config_updated['n_layers'],
         n_head=config_updated['n_head'],
-        max_len=config_updated['context']
+        max_len=config_updated['context'],
+        p_mask=config_updated['p_mask']
     )
     optimizer = torch.optim.AdamW(
         model.parameters(),
