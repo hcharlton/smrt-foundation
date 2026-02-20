@@ -15,19 +15,13 @@ class ShardWriter:
         self.data_value = 0.0
         self.shape = (shard_size, context, num_features)
         self.buffer = np.zeros(self.shape, dtype=np.float16)
-        self.buffer[:,:,-1] = self.pad_value # padding channel set to padding value
-        self.ptr = 0 # tracks sample idx in shard
-        self.shard_idx = 0 # tracks
+        self.buffer[:,:,-1] = self.pad_value
+        self.ptr = 0
+        self.shard_idx = 0
 
     def add(self, data):
-        """Adds a single segment to the buffer. Flushes (writes) to a shard file if full."""
-        # Flush if full
         if self.ptr >= self.shard_size:
             self._flush()
-        
-        # write step
-        # data shape: (context, features)
-        # buffer shape: (shard, context, features)
         self.buffer[self.ptr, :data.shape[0], :] = data
         self.ptr += 1
 
@@ -35,15 +29,29 @@ class ShardWriter:
         save_path = os.path.join(self.output_dir, f"shard_{self.shard_idx:05d}.npy")
         data_to_save = self.buffer[:self.ptr] if self.ptr < self.shard_size else self.buffer
         np.save(save_path, data_to_save)
-        
         self.shard_idx += 1
         self.ptr = 0
-        self.buffer.fill(0.0) # Reset to null
-        self.buffer[:,:,-1] = self.pad_value # mask the entirety
+        self.buffer.fill(0.0)
+        self.buffer[:,:,-1] = self.pad_value
 
     def finalize(self):
         if self.ptr > 0:
             self._flush()
+
+def extract_pattern_windows_2d(read_data, channel_idx, window_size, pattern):
+    seq = read_data[:, channel_idx]
+    p_len = len(pattern)
+    if (window_size - p_len) % 2 != 0:
+        raise ValueError("Difference between window_size and pattern length must be even.")
+    pad = (window_size - p_len) // 2
+    p_view = np.lib.stride_tricks.sliding_window_view(seq, p_len)
+    matches = np.nonzero(np.all(p_view == pattern, axis=1))[0]
+    starts = matches - pad
+    valid = starts[(starts >= 0) & (starts + window_size <= len(seq))]
+    if not len(valid):
+        return np.empty((0, window_size, read_data.shape[1]), dtype=read_data.dtype)
+    full_view = np.lib.stride_tricks.sliding_window_view(read_data, window_size, axis=0)
+    return np.swapaxes(full_view, 1, 2)[valid]
 
 def zarr_to_sharded_memmap(
     zarr_path, output_dir, config, 
@@ -51,21 +59,21 @@ def zarr_to_sharded_memmap(
     rev_features=['seq', 'ri', 'rp'],
     context=4096, shard_size=16384, max_shards=0, 
     use_rc=False,
-    normalize = False,
+    normalize=False,
 ):
     os.makedirs(output_dir, exist_ok=True)
     root = zarr.open(zarr_path, mode='r')
     
     rc_lookup = build_rc_lookup(config)
     seq_map = config['data']['token_map']
-    print(rc_lookup)
-    create_group
+    cpg_pattern = [seq_map['C'], seq_map['G']]
     
-    # collect features
     output_feats = fwd_features + ['mask']
-    # make normalization mask (no normalization of the padding or seq)
     is_continuous_fwd = np.array([f != 'seq' for f in fwd_features])
     is_continuous_rev = np.array([f != 'seq' for f in rev_features])
+
+    try: seq_idx_fwd = fwd_features.index('seq')
+    except ValueError: seq_idx_fwd = None
 
     try: seq_idx_rev = rev_features.index('seq')
     except ValueError: seq_idx_rev = None
@@ -80,78 +88,55 @@ def zarr_to_sharded_memmap(
             "dtype": "float16"
         }, f, indent=4)
 
-    # 2. Setup IO
     writer = ShardWriter(output_dir, shard_size, context, len(output_feats))
     z_data = root['data']
     indptr = root['indptr'][:]
     
     # Prepare indices for loading
     all_feats = root.attrs['features']
-    # find the col indices for the features we actually will use
     load_indices = list(set([all_feats.index(f) for f in fwd_features + rev_features]))
-    # make a new map
     idx_map = {orig: i for i, orig in enumerate(load_indices)}
-    # get indices in the loaded array for the forward and reverse views
     fwd_local = [idx_map[all_feats.index(f)] for f in fwd_features]
     rev_local = [idx_map[all_feats.index(f)] for f in rev_features]
 
-    # write in batches
     batch_size = 1000
     total_reads = len(indptr) - 1
     
     for i in range(0, total_reads, batch_size):
         if max_shards and writer.shard_idx > max_shards: break
         
-        # define a the actual indices in the data for our batch of b reads
         idx_start, idx_end = indptr[i], indptr[min(i + batch_size, total_reads)]
-        
-        # get a chunk from the zarr of b reads
         chunk = z_data[idx_start:idx_end, load_indices].astype(np.float32)
-        # get the forward and reverse batches (each have b reads)
         b_fwd, b_rev = chunk[:, fwd_local], chunk[:, rev_local]
 
-        # apply log1 and normalize (only cont. features)
-        # np.log1p(b_fwd, out=b_fwd, where=is_continuous_fwd)
-        # np.log1p(b_rev, out=b_rev, where=is_continuous_rev)
-
-        # separate into reads
         local_ptr = 0
         for r in range(i, min(i + batch_size, total_reads)):
-            r_len = indptr[r+1] - indptr[r] # read length
-            read_fwd = b_fwd[local_ptr : local_ptr + r_len] # a single fwd read
-            read_rev = b_rev[local_ptr : local_ptr + r_len] # a single rev read
+            r_len = indptr[r+1] - indptr[r]
+            read_fwd = b_fwd[local_ptr : local_ptr + r_len]
+            read_rev = b_rev[local_ptr : local_ptr + r_len]
             local_ptr += r_len
 
-            # normalize per-read
             if normalize:
-                read_fwd = normalize_read_mad(
-                    read_fwd, is_continuous_mask=is_continuous_fwd
-                    ).astype(np.float16)
-                read_rev = normalize_read_mad(
-                    read_rev, is_continuous_mask=is_continuous_rev
-                    ).astype(np.float16)
+                read_fwd = normalize_read_mad(read_fwd, is_continuous_mask=is_continuous_fwd).astype(np.float16)
+                read_rev = normalize_read_mad(read_rev, is_continuous_mask=is_continuous_rev).astype(np.float16)
 
-            # pad and write into padded blocks
-            num_segs = math.ceil(r_len / context)
-            for s in range(num_segs):
-                start, end = s * context, min((s + 1) * context, r_len)
-                
-                # --- forward ---
-                seg = np.zeros((end-start, len(output_feats)), dtype=np.float16)
-                seg[:, :-1] = read_fwd[start:end]
-                seg[:, -1] = writer.data_value # overwrite mask to activate data segment
+            fwd_windows = extract_pattern_windows_2d(read_fwd, seq_idx_fwd, context, cpg_pattern)
+            for w in fwd_windows:
+                seg = np.zeros((context, len(output_feats)), dtype=np.float16)
+                seg[:, :-1] = w
+                seg[:, -1] = writer.data_value
                 writer.add(seg)
 
-                # --- reverse ---
-                seg_rev_data =np.flip(read_rev[start:end], axis=0)
-                if use_rc and (seq_idx_rev is not None):
-                    seq_floats = seg_rev_data[:, seq_idx_rev]
-                    seq_ints = seq_floats.astype(np.int8)
-                    seq_rc = rc_lookup[seq_ints]
-                    seg_rev_data[:,seq_idx_rev] = seq_rc.astype(np.float16)          
-                seg = np.zeros((end-start, len(output_feats)), dtype=np.float16)
-                seg[:, :-1] = seg_rev_data
-                seg[:, -1] = writer.data_value # overwrite mask to activate data segment
+            read_rev = np.flip(read_rev, axis=0)
+            if use_rc and (seq_idx_rev is not None):
+                seq_ints = read_rev[:, seq_idx_rev].astype(np.int8)
+                read_rev[:, seq_idx_rev] = rc_lookup[seq_ints].astype(np.float16)
+
+            rev_windows = extract_pattern_windows_2d(read_rev, seq_idx_rev, context, cpg_pattern)
+            for w in rev_windows:
+                seg = np.zeros((context, len(output_feats)), dtype=np.float16)
+                seg[:, :-1] = w
+                seg[:, -1] = writer.data_value
                 writer.add(seg)
 
     writer.finalize()
