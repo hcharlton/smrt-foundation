@@ -1,7 +1,7 @@
 experiment_type: 'ssl'
 experiment_name: '10_filter_q80'
 run_message: 'run with standard masking on q80 filtered dataset'
-ssl_dataset: 'ob007_filter_qual.memmap'
+ssl_dataset: 'ob007_filter_qual.memmap_norm'
 
 smrt2vec:
   d_model: 128

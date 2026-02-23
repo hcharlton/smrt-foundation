@@ -72,7 +72,7 @@ def main():
             tracker.writer.add_text("Full_Config", f"```yaml\n{yaml.dump(config, indent=2)}\n```", 0)
 
     dataset_name = config.get('ssl_dataset', 'ob007')
-    memmap_path = f"data/01_processed/ssl_sets/{dataset_name}.memmap"
+    memmap_path = f"data/01_processed/ssl_sets/{dataset_name}"
     
     ds = ShardedMemmapDataset(memmap_path, limit=2_000_000)
     dl = DataLoader(
