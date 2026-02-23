@@ -1,7 +1,7 @@
 experiment_type: 'ssl'
 experiment_name: '10_filter_q80'
 run_message: 'run with standard masking on q80 filtered dataset'
-ssl_dataset: 'ob007_filter_qual.memmap_norm'
+ssl_dataset: 'ob007_filter_qual_norm.memmap'
 
 smrt2vec:
   d_model: 128
@@ -10,7 +10,7 @@ smrt2vec:
   n_layers: 4
   vocab_size: 5
   weight_decay: 0.02
-  p_mask: 0.05
+  p_mask: 0.15
   epochs: 12
   batch_size: 64
   optimizer: 'AdamW'

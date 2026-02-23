@@ -38,8 +38,9 @@ def main():
         'max_lr': 3e-4,
         'temperature': 0.1,
         'p_mask': 0.05,
+        'mask_size': 6,
         'weight_decay': 0.02,
-        'pct_start': 0.25
+        'pct_start': 0.25,
     }
 
     config_updated = DEFAULT_SMRT2VEC | config.get('smrt2vec', {})

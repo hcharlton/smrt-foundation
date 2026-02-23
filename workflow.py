@@ -337,10 +337,10 @@ def process_ssl_dataset(name, data):
         name=f'{name}_to_memmap_filter_qual',
         template=memmap_conversion(
             zarr_path=zarr_target.outputs['out_file'],
-            output_path=data['memmap_filter_qual']+'_norm',
+            output_path=data['memmap_filter_qual'],
             config_path=CONFIG['config_path'],
             profile=True,
-            normalize=True,
+            normalize=False,
             filter_qual=True,
             shards=500
         )
