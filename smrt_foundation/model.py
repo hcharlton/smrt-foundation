@@ -329,8 +329,8 @@ class Smrt2Vec(nn.Module):
     mask_idx_centers = (torch.rand(B, T, device=x_emb.device) < p_mask) & ~(pad.bool())
     mask_idx_full = F.max_pool1d(
         mask_idx_centers.float(),
-        kernel_size=size, stride=1, # hyperparameter here...
-        padding=size//2
+        kernel_size=mask_size, stride=1, # hyperparameter here...
+        padding=mask_size//2
       ).bool()[:, :T] & (~pad.bool())
     x_masked = x_emb.clone()
     x_masked[mask_idx_full] = self.mask_vec.to(dtype=x_emb.dtype, device=x_emb.device)

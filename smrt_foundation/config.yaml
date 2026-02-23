@@ -1,6 +1,6 @@
 experiment_type: 'ssl'
-experiment_name: '10_filter_q80'
-run_message: 'run with standard masking on q80 filtered dataset'
+experiment_name: '11_big_mask_size'
+run_message: 'run on filtered dataset with larger mask blocks'
 ssl_dataset: 'ob007_filter_qual_norm.memmap'
 
 smrt2vec:
@@ -17,6 +17,7 @@ smrt2vec:
   max_lr: 3e-4
   temperature: 0.1
   pct_start: 0.4
+  mask_size: 16
 
 data:
   pad_idx: 4 
