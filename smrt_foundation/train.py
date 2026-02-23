@@ -35,6 +35,7 @@ def main():
         'context': 4096,
         'batch_size': 64,
         'epochs': 10,
+        'ds_limit': 2_000_000,
         'max_lr': 3e-4,
         'temperature': 0.1,
         'p_mask': 0.05,
@@ -46,6 +47,8 @@ def main():
     config_updated = DEFAULT_SMRT2VEC | config.get('smrt2vec', {})
     config['smrt2vec'] = config_updated
     config['git_hash'] = get_git_revision_hash()
+
+    print(config)
 
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
@@ -75,7 +78,7 @@ def main():
     dataset_name = config.get('ssl_dataset', 'ob007')
     memmap_path = f"data/01_processed/ssl_sets/{dataset_name}"
     
-    ds = ShardedMemmapDataset(memmap_path, limit=2_000_000)
+    ds = ShardedMemmapDataset(memmap_path, limit=config_updated['ds_limit'])
     dl = DataLoader(
         ds,
         batch_size=config_updated['batch_size'],
