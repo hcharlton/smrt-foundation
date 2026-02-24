@@ -25,7 +25,7 @@ class InfoNCE(nn.Module):
     loss = self.cross_entropy(logits, labels)
     return loss
 
-class InfoNCE3(nn.Module):
+class AgInfoNCE3(nn.Module):
     def __init__(self, temperature=0.1):
         super().__init__()
         self.cross_entropy = nn.CrossEntropyLoss()

@@ -1,0 +1,21 @@
+experiment_type: 'ssl'
+experiment_name: '14_all_gather_2'
+run_message: 'try out a simplmer all gather loss'
+ssl_dataset: 'ob007_filter_qual_norm.memmap'
+
+smrt2vec:
+  d_model: 128 #-> 256
+  n_head: 4 
+  context: 4096
+  n_layers: 4 # -> 8
+  vocab_size: 5
+  weight_decay: 0.02
+  p_mask: 0.05
+  epochs: 12
+  ds_limit: 2000000
+  batch_size: 64
+  optimizer: 'AdamW'
+  max_lr: 3e-4
+  temperature: 0.1 # consider increasing (0.2?)
+  pct_start: 0.4
+  mask_size: 6

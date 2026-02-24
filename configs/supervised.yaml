@@ -1,0 +1,18 @@
+experiment_type: 'supervised'
+experiment_name: '1_initial_run'
+run_message: 'test out probe on direct downstream cpg training'
+pos_data: 'cpg_pos.memmap'
+neg_data: 'cpg_neg.memmap'
+
+classifier:
+  d_model: 128 #-> 256
+  n_head: 4 
+  context: 128
+  n_layers: 4 # -> 8
+  vocab_size: 5
+  weight_decay: 0.02
+  epochs: 12
+  ds_limit: 1000000
+  batch_size: 64
+  optimizer: 'AdamW'
+  max_lr: 3e-4

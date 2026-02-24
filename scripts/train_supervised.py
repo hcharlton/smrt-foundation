@@ -12,10 +12,8 @@ module_path = os.path.abspath("/dcai/users/chache/smrt-foundation")
 if module_path not in sys.path:
     sys.path.append(module_path)
 
-from smrt_foundation.dataset import ShardedMemmapDataset
-from smrt_foundation.model import Smrt2Vec
-from smrt_foundation.loss import InfoNCE, AgInfoNCE
-from smrt_foundation.optim import get_cosine_schedule_with_warmup
+from smrt_foundation.dataset import LabeledMemmapDataset
+from smrt_foundation.model import DirectClassifier
 
 def get_git_revision_hash():
     try:
@@ -28,24 +26,23 @@ def main():
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
-    DEFAULT_SMRT2VEC = {
+    DEFAULT = {
         'd_model': 128,
         'n_layers': 4,
         'n_head': 4,
         'context': 4096,
         'batch_size': 64,
         'epochs': 10,
-        'ds_limit': 2_000_000,
-        'max_lr': 3e-4,
+        'ds_limit': 1_000_000,
+        'max_lr': 1e-3,
         'temperature': 0.1,
         'p_mask': 0.05,
-        'mask_size': 6,
         'weight_decay': 0.02,
         'pct_start': 0.25,
     }
 
-    config_updated = DEFAULT_SMRT2VEC | config.get('smrt2vec', {})
-    config['smrt2vec'] = config_updated
+    config_updated = DEFAULT | config.get('classifier', {})
+    config['classifier'] = config_updated
     config['git_hash'] = get_git_revision_hash()
 
     print(config)
@@ -60,8 +57,8 @@ def main():
 
     set_seed(42)
 
-    exp_type = config.get('experiment_type', 'ssl')
-    exp_name = config.get('experiment_name', 'smrt_experiment')
+    exp_type = config.get('experiment_type', 'supervised')
+    exp_name = config.get('experiment_name', 'supervised_experiment')
     project_namespace = f"{exp_type}/{exp_name}"
 
     if accelerator.is_main_process:
@@ -75,8 +72,10 @@ def main():
                 
             tracker.writer.add_text("Full_Config", f"```yaml\n{yaml.dump(config, indent=2)}\n```", 0)
 
-    dataset_name = config.get('ssl_dataset', 'ob007')
-    memmap_path = f"data/01_processed/ssl_sets/{dataset_name}"
+    pos_data = config.get('pos_data', 'cpg_pos.memmap')
+    neg_data = config.get('neg_data', 'cpg_neg.memmap')
+    pos_path = f"data/01_processed/val_sets/{pos_data}"
+    neg_path = f"data/01_processed/val_sets/{neg_data}"
     
     ds = ShardedMemmapDataset(memmap_path, limit=config_updated['ds_limit'])
     dl = DataLoader(
@@ -100,7 +99,7 @@ def main():
         lr=float(config_updated['max_lr']),
         weight_decay=config_updated['weight_decay']
     )
-    criterion = AgInfoNCE(temperature=float(config_updated['temperature']))
+    criterion = AgInfoNCE3(temperature=float(config_updated['temperature']))
 
     model, optimizer, dl = accelerator.prepare(model, optimizer, dl)
 

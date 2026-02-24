@@ -18,7 +18,9 @@ else:
 # and then they'll get processed. We only have to modify the config
 CONFIG = {
     'project_root': root_dir,
-    'config_path': 'smrt_foundation/config.yaml',
+    'ssl_config': 'configs/ssl.yaml',
+    'supervised_config': 'configs/supervised.yaml',
+    'data_config': 'configs/data.yaml',
     'stats': {
         'path': 'data/02_analysis/norm_stats.yaml',
         'num_threads': 12,
@@ -291,7 +293,7 @@ def process_ssl_dataset(name, data):
             output_path=data['zarr'],
             n_reads=data['n_reads'],
             optional_tags=data['optional_tags'],
-            config=CONFIG['config_path'],
+            config=CONFIG['data_config'],
             profile=True
         )
     )
@@ -302,7 +304,7 @@ def process_ssl_dataset(name, data):
             template=memmap_cpg_conversion(
                 zarr_path=zarr_target.outputs['out_file'],
                 output_path=data['memmap'],
-                config_path=CONFIG['config_path'],
+                config_path=CONFIG['data_config'],
                 profile=True,
                 normalize=True,
                 shards=10
@@ -315,7 +317,7 @@ def process_ssl_dataset(name, data):
         template=memmap_conversion(
             zarr_path=zarr_target.outputs['out_file'],
             output_path=data['memmap'],
-            config_path=CONFIG['config_path'],
+            config_path=CONFIG['data_config'],
             profile=True,
             normalize=True
         )
@@ -326,7 +328,7 @@ def process_ssl_dataset(name, data):
         template=memmap_conversion(
             zarr_path=zarr_target.outputs['out_file'],
             output_path=data['memmap_raw'],
-            config_path=CONFIG['config_path'],
+            config_path=CONFIG['data_config'],
             profile=True,
             normalize=False,
             shards=50
@@ -338,7 +340,7 @@ def process_ssl_dataset(name, data):
         template=memmap_conversion(
             zarr_path=zarr_target.outputs['out_file'],
             output_path=data['memmap_filter_qual'],
-            config_path=CONFIG['config_path'],
+            config_path=CONFIG['data_config'],
             profile=True,
             normalize=False,
             filter_qual=True,
@@ -351,7 +353,7 @@ def process_ssl_dataset(name, data):
         name=f'{name}_validation',
         template=validate_memmap(
             memmap_path=memmap_target.outputs['out_file'],
-            config_path=CONFIG['config_path']
+            config_path=CONFIG['data_config']
         )
     )
     
@@ -371,7 +373,7 @@ def process_ssl_dataset(name, data):
             template=memmap_conversion(
                 zarr_path=zarr_target.outputs['out_file'],
                 output_path='data/01_processed/ssl_sets/ob007_test.memmap',
-                config_path=CONFIG['config_path'],
+                config_path=CONFIG['data_config'],
                 shards=30,
                 context=4096,
                 shard_size=16384,
@@ -387,7 +389,7 @@ def process_ssl_dataset(name, data):
             name='validate_memmap_test',
             template=validate_memmap(
                 memmap_path=test_memmap_target.outputs['out_file'],
-                config_path=CONFIG['config_path']
+                config_path=CONFIG['data_config']
             )
         )
 
@@ -399,7 +401,7 @@ for name, data in CONFIG['ssl_datasets'].items():
 
 ############################### TRAINING #######################################
 
-def train_model(config_path, input_memmap):
+def train_ssl(config_path, input_memmap):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     
@@ -415,13 +417,13 @@ def train_model(config_path, input_memmap):
     spec = f"""
     source .venv/bin/activate
     cd {p('')}
-    accelerate launch --num_processes=8 --mixed_precision='no' smrt_foundation/train.py {config_path}
+    accelerate launch --num_processes=8 --mixed_precision='no' scripts/train_ssl.py {config_path}
     touch {sentinel_path}
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
 # reusable training target
-with open(CONFIG['config_path'], 'r') as f:
+with open(CONFIG['ssl_config'], 'r') as f:
     exp_config = yaml.safe_load(f)
 
 target_ds = exp_config.get('ssl_dataset', 'ob007')
@@ -429,8 +431,8 @@ memmap_path = f'data/01_processed/ssl_sets/{target_ds}'
 
 gwf.target_from_template(
     name=f"{exp_config.get('experiment_type', 'smrt_experiment')}_exp",
-    template=train_model(
-        config_path=CONFIG['config_path'],
+    template=train_ssl(
+        config_path=CONFIG['ssl_config'],
         input_memmap=memmap_path
     )
 )

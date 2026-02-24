@@ -1,0 +1,16 @@
+data:
+  pad_idx: 4 
+  token_map:
+    'A': 0
+    'C': 1
+    'G': 2
+    'T': 3
+    'N': 4
+  rc_map:
+    'A': 'T'
+    'C': 'G'
+    'G': 'C'
+    'T': 'A'
+    'N': 'N'
+  kinetics_features: ['fi', 'fp', 'ri', 'rp']
+  per_base_tags: ["fi", "ri", "fp", "rp", "sm", "sx", "sa", "fn", "rn"]
