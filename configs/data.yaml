@@ -1,5 +1,6 @@
 data:
   pad_idx: 4 
+  val_pct: 0.2
   token_map:
     'A': 0
     'C': 1

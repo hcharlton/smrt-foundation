@@ -4,6 +4,7 @@ import subprocess
 import yaml
 import torch
 from tqdm import tqdm
+import torch.nn as nn
 from torch.utils.data import DataLoader
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import set_seed
@@ -14,6 +15,7 @@ if module_path not in sys.path:
 
 from smrt_foundation.dataset import LabeledMemmapDataset
 from smrt_foundation.model import DirectClassifier
+from smrt_foundation.optim import get_cosine_schedule_with_warmup
 
 def get_git_revision_hash():
     try:
@@ -77,7 +79,7 @@ def main():
     pos_path = f"data/01_processed/val_sets/{pos_data}"
     neg_path = f"data/01_processed/val_sets/{neg_data}"
     
-    ds = ShardedMemmapDataset(memmap_path, limit=config_updated['ds_limit'])
+    ds = LabeledMemmapDataset(pos_path,neg_path, limit=config_updated['ds_limit'])
     dl = DataLoader(
         ds,
         batch_size=config_updated['batch_size'],
@@ -87,19 +89,18 @@ def main():
         shuffle=True
     )
 
-    model = Smrt2Vec(
+    model = DirectClassifier(
         d_model=config_updated['d_model'],
         n_layers=config_updated['n_layers'],
         n_head=config_updated['n_head'],
         max_len=config_updated['context'],
-        p_mask=config_updated['p_mask']
     )
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(config_updated['max_lr']),
         weight_decay=config_updated['weight_decay']
     )
-    criterion = AgInfoNCE3(temperature=float(config_updated['temperature']))
+    criterion = nn.BCEWithLogitsLoss()
 
     model, optimizer, dl = accelerator.prepare(model, optimizer, dl)
 
@@ -108,6 +109,7 @@ def main():
         total_steps=len(dl) * config_updated['epochs'],
         pct_start=config_updated['pct_start']
     )
+
     scheduler = accelerator.prepare(scheduler)
 
     global_step = 0
@@ -117,10 +119,14 @@ def main():
         epoch_loss = 0.0
         
         progress_bar = tqdm(dl, desc=f"Epoch {epoch+1}/{config_updated['epochs']}") if accelerator.is_main_process else dl
-            
+
+        # train loop
         for batch in progress_bar:
-            c_proj, targets, mask_idx = model(batch)
-            loss = criterion(c_proj, targets, mask_idx)
+            x = batch[0]
+            y = batch[1]
+
+            logits = model(x)
+            loss = criterion(logits, y.unsqueeze(1).to(torch.float32))
             
             optimizer.zero_grad()
             accelerator.backward(loss)
@@ -142,7 +148,23 @@ def main():
 
         avg_epoch_loss = epoch_loss / len(dl)
         accelerator.log({"epoch_avg_loss": avg_epoch_loss}, step=global_step)
-        accelerator.print(f"Epoch {epoch+1} Average Loss: {avg_epoch_loss:.4f}")
+
+        ## eval loop
+        model.eval()
+        total_count = 0
+        total_correct = 0
+        progress_bar = tqdm(val_dl, desc=f"Eval set run {epoch+1}/{EPOCHS}")
+        for batch in progress_bar:
+            x = batch[0]
+            y = batch[1]
+
+            logits = model(x)
+            y_hat = logits>0
+            correct = y == y_hat.squeeze(-1)
+            total_count += y_hat.shape[0]
+            total_correct += correct.sum()
+        epoch_top1 = total_correct/total_count
+        accelerator.log({"epoch_top1": epoch_top1}, step=global_step)
 
     accelerator.end_training()
 

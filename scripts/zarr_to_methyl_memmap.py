@@ -58,16 +58,18 @@ def zarr_to_sharded_memmap(
     fwd_features=['seq', 'fi', 'fp'], 
     rev_features=['seq', 'ri', 'rp'],
     context=4096, shard_size=16384, max_shards=0, 
-    use_rc=False,
-    normalize=False,
+    use_rc=False, normalize=False
 ):
-    os.makedirs(output_dir, exist_ok=True)
+    train_dir = os.path.join(output_dir, "train")
+    val_dir = os.path.join(output_dir, "val")
+    os.makedirs(train_dir, exist_ok=True)
+    os.makedirs(val_dir, exist_ok=True)
     root = zarr.open(zarr_path, mode='r')
-    
+
     rc_lookup = build_rc_lookup(config)
     seq_map = config['data']['token_map']
     cpg_pattern = [seq_map['C'], seq_map['G']]
-    
+
     output_feats = fwd_features + ['mask']
     is_continuous_fwd = np.array([f != 'seq' for f in fwd_features])
     is_continuous_rev = np.array([f != 'seq' for f in rev_features])
@@ -77,69 +79,70 @@ def zarr_to_sharded_memmap(
 
     try: seq_idx_rev = rev_features.index('seq')
     except ValueError: seq_idx_rev = None
+    schema = {
+        "output_shape": ["Batch", context, len(output_feats)],
+        "features": output_feats,
+        "normalization": 'per-read-MAD' if normalize else 'raw',
+        "reverse_complement": use_rc,
+        "dtype": "float16"
+    }
+    with open(os.path.join(train_dir, "schema.json"), "w") as f: json.dump(schema, f, indent=4)
+    with open(os.path.join(val_dir, "schema.json"), "w") as f: json.dump(schema, f, indent=4)
     
-    # save data schema
-    with open(os.path.join(output_dir, "schema.json"), "w") as f:
-        json.dump({
-            "output_shape": ["Batch", context, len(output_feats)],
-            "features": output_feats,
-            "normalization": 'per-read-MAD' if normalize else 'raw',
-            "reverse_complement": use_rc,
-            "dtype": "float16"
-        }, f, indent=4)
+    train_writer = ShardWriter(train_dir, shard_size, context, len(output_feats))
+    val_writer = ShardWriter(val_dir, shard_size, context, len(output_feats))
 
-    writer = ShardWriter(output_dir, shard_size, context, len(output_feats))
     z_data = root['data']
     indptr = root['indptr'][:]
-    
-    # Prepare indices for loading
+
     all_feats = root.attrs['features']
     load_indices = list(set([all_feats.index(f) for f in fwd_features + rev_features]))
     idx_map = {orig: i for i, orig in enumerate(load_indices)}
+
     fwd_local = [idx_map[all_feats.index(f)] for f in fwd_features]
     rev_local = [idx_map[all_feats.index(f)] for f in rev_features]
 
     batch_size = 1000
     total_reads = len(indptr) - 1
+
+    val_pct = config.get('val_pct', 0.1)
+    
+    is_val = np.zeros(total_reads, dtype=bool)
+    is_val[np.random.choice(total_reads, int(total_reads * val_pct), replace=False)] = True
     
     for i in range(0, total_reads, batch_size):
-        if max_shards and writer.shard_idx > max_shards: break
-        
+        if max_shards and train_writer.shard_idx > max_shards: break
         idx_start, idx_end = indptr[i], indptr[min(i + batch_size, total_reads)]
         chunk = z_data[idx_start:idx_end, load_indices].astype(np.float32)
         b_fwd, b_rev = chunk[:, fwd_local], chunk[:, rev_local]
-
         local_ptr = 0
         for r in range(i, min(i + batch_size, total_reads)):
             r_len = indptr[r+1] - indptr[r]
             read_fwd = b_fwd[local_ptr : local_ptr + r_len]
             read_rev = b_rev[local_ptr : local_ptr + r_len]
             local_ptr += r_len
-
+            writer = val_writer if is_val[r] else train_writer
             if normalize:
                 read_fwd = normalize_read_mad(read_fwd, is_continuous_mask=is_continuous_fwd).astype(np.float16)
                 read_rev = normalize_read_mad(read_rev, is_continuous_mask=is_continuous_rev).astype(np.float16)
-
             fwd_windows = extract_pattern_windows_2d(read_fwd, seq_idx_fwd, context, cpg_pattern)
             for w in fwd_windows:
                 seg = np.zeros((context, len(output_feats)), dtype=np.float16)
                 seg[:, :-1] = w
                 seg[:, -1] = writer.data_value
                 writer.add(seg)
-
             read_rev = np.flip(read_rev, axis=0)
             if use_rc and (seq_idx_rev is not None):
                 seq_ints = read_rev[:, seq_idx_rev].astype(np.int8)
                 read_rev[:, seq_idx_rev] = rc_lookup[seq_ints].astype(np.float16)
-
             rev_windows = extract_pattern_windows_2d(read_rev, seq_idx_rev, context, cpg_pattern)
             for w in rev_windows:
                 seg = np.zeros((context, len(output_feats)), dtype=np.float16)
                 seg[:, :-1] = w
                 seg[:, -1] = writer.data_value
                 writer.add(seg)
-
-    writer.finalize()
+    train_writer.finalize()
+    val_writer.finalize()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
