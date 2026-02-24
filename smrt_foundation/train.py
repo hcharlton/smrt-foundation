@@ -14,7 +14,7 @@ if module_path not in sys.path:
 
 from smrt_foundation.dataset import ShardedMemmapDataset
 from smrt_foundation.model import Smrt2Vec
-from smrt_foundation.loss import InfoNCE
+from smrt_foundation.loss import InfoNCE, AgInfoNCE
 from smrt_foundation.optim import get_cosine_schedule_with_warmup
 
 def get_git_revision_hash():
@@ -100,7 +100,7 @@ def main():
         lr=float(config_updated['max_lr']),
         weight_decay=config_updated['weight_decay']
     )
-    criterion = InfoNCE(temperature=float(config_updated['temperature']))
+    criterion = AgInfoNCE(temperature=float(config_updated['temperature']))
 
     model, optimizer, dl = accelerator.prepare(model, optimizer, dl)
 
