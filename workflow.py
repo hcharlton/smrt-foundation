@@ -1,5 +1,6 @@
 import os
 import yaml
+from pathlib import Path
 import gwf
 from gwf import Workflow, AnonymousTarget
 
@@ -468,3 +469,28 @@ gwf.target_from_template(
         config_path=CONFIG['supervised_config']
     )
 )
+
+
+############################### Plotting #######################################
+
+def make_plot(path):
+    inputs = {}
+    outputs = {'output': f'{os.path.dirname(path)}.svg'}
+    
+    options ={'cores': 16, 'memory': '64gb', 'walltime': '00:30:00'}
+        
+    spec = f"""
+    source .venv/bin/activate
+    cd {p('')}
+    python {path} {os.path.dirname(path)}.svg
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+
+target_directory = './report/eda'
+
+for path in Path(target_directory).rglob('plot.py'):
+    gwf.target_from_template(
+            name=f"plot_{path.parent.name}",
+            template=make_plot(str(path))
+        )
