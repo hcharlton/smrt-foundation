@@ -351,9 +351,8 @@ class Smrt2Vec(nn.Module):
 
 # could this be part of the loss? during the pretraining 
 class DirectClassifier(nn.Module):
-  def __init__(self, d_model=128, n_layers=4, n_head=4, max_len=32):
+  def __init__(self, d_model, n_layers, n_head, max_len):
     super().__init__()
-    self.d_model = d_model
     self.encoder = SmrtEncoder(d_model, n_layers, n_head, max_len)
     self.head = nn.Sequential(
       nn.Linear(d_model, d_model//2),
