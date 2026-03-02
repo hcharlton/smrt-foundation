@@ -14,7 +14,7 @@ if module_path not in sys.path:
 
 from smrt_foundation.dataset import ShardedMemmapDataset
 from smrt_foundation.model import Smrt2Vec
-from smrt_foundation.loss import InfoNCE, AgInfoNCE1, AgInfoNCE2, AgInfoNCE3 
+from smrt_foundation.loss import InfoNCE, AgInfoNCE
 from smrt_foundation.optim import get_cosine_schedule_with_warmup
 
 def get_git_revision_hash():

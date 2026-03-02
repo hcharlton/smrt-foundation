@@ -68,14 +68,14 @@ class LabeledMemmapDataset(Dataset):
         if not 0 <= idx < self.len: raise IndexError(idx)
         is_pos = idx < self.pos_len
         paths, sz = (self.pos_paths, self.pos_sz) if is_pos else (self.neg_paths, self.neg_sz)
-        shard_idx, shard_local_idx = divmod(idx if is_pos else idx - self.pos_len, sz)
+        shard_idx, local_idx = divmod(idx if is_pos else idx - self.pos_len, sz)
         cache_key = (is_pos, shard_idx)
         if cache_key not in self.memmaps:
             if len(self.memmaps) >= self.cache_size: self.memmaps.popitem(last=False)
             self.memmaps[cache_key] = np.load(paths[shard_idx], mmap_mode='r')
         else:
             self.memmaps.move_to_end(cache_key)
-        data = torch.from_numpy(np.array(self.memmaps[cache_key][shard_local_idx])).float()
+        data = torch.from_numpy(np.array(self.memmaps[cache_key][local_idx])).float()
         return data, torch.tensor(1.0 if is_pos else 0.0, dtype=torch.float32)
 
 def compute_log_normalization_stats(df, features, epsilon=1):

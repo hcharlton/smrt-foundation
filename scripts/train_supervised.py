@@ -31,9 +31,9 @@ def main():
 
     DEFAULT = {
         'd_model': 128, 'n_layers': 4, 'n_head': 4, 'context': 128,
-        'batch_size': 64, 'epochs': 10, 'ds_limit': 1_000_000,
+        'batch_size': 64, 'epochs': 10, 'ds_limit': 2_000_000,
         'max_lr': 1e-3, 'temperature': 0.1, 'p_mask': 0.05,
-        'weight_decay': 0.02, 'pct_start': 0.25,
+        'weight_decay': 0.02, 'pct_start': 0.4,
     }
 
     config_updated = DEFAULT | config.get('classifier', {})
@@ -72,19 +72,28 @@ def main():
     val_dl = DataLoader(val_ds, batch_size=config_updated['batch_size'], num_workers=4, pin_memory=True, prefetch_factor=4, shuffle=True)
 
     model = DirectClassifier(
-        d_model=config_updated['d_model'], n_layers=config_updated['n_layers'],
-        n_head=config_updated['n_head'], max_len=config_updated['context']
+        d_model=config_updated['d_model'], 
+        n_layers=config_updated['n_layers'],
+        n_head=config_updated['n_head'], 
+        max_len=config_updated['context']
     )
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(config_updated['max_lr']), weight_decay=config_updated['weight_decay'])
     criterion = nn.BCEWithLogitsLoss()
 
     model, optimizer, train_dl, val_dl = accelerator.prepare(model, optimizer, train_dl, val_dl)
-
+    total_steps = len(train_dl) * config_updated['epochs']
     scheduler = get_cosine_schedule_with_warmup(
-        optimizer, total_steps=len(train_dl) * config_updated['epochs'], pct_start=config_updated['pct_start']
+        optimizer, total_steps=total_steps, pct_start=config_updated['pct_start']
     )
     scheduler = accelerator.prepare(scheduler)
+
+    f1_metric, auroc_metric, auprc_metric, acc_metric = accelerator.prepare(
+    BinaryF1Score(),
+    BinaryAUROC(),
+    BinaryAveragePrecision(),
+    BinaryAccuracy()
+)
 
     global_step = 0
 
@@ -127,15 +136,29 @@ def main():
             with torch.no_grad():
                 logits = model(x)
                 
-            y_hat = logits > 0
-            y_hat, y = accelerator.gather_for_metrics((y_hat, y))
+            y_hat, y, logits = accelerator.gather_for_metrics((logits > 0, y, logits))
             
-            correct = y == y_hat.squeeze(-1)
-            total_count += y.shape[0]
-            total_correct += correct.sum().item()
-            
-        epoch_top1 = total_correct / total_count if total_count > 0 else 0.0
-        accelerator.log({"epoch_top1": epoch_top1}, step=global_step)
+            f1_metric.update(y_hat.squeeze(-1), y.long())
+            auroc_metric.update(logits.squeeze(-1), y.long())
+            auprc_metric.update(logits.squeeze(-1), y.long())
+            acc_metric.update(y_hat.squeeze(-1), y.long())
+
+        epoch_f1 = f1_metric.compute().item()
+        epoch_auroc = auroc_metric.compute().item()
+        epoch_auprc = auprc_metric.compute().item()
+        epoch_acc = acc_metric.compute().item()
+
+        f1_metric.reset()
+        auroc_metric.reset()
+        auprc_metric.reset()
+        acc_metric.reset()
+
+        accelerator.log({
+            "eval_f1": epoch_f1,
+            "eval_auroc": epoch_auroc,
+            "eval_auprc": epoch_auprc,
+            "eval_top1": epoch_acc
+        }, step=global_step)
 
     accelerator.end_training()
 
