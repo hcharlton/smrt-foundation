@@ -13,7 +13,7 @@ training_logs/
 __pycache__/
 *.py[codz]
 *$py.class
-
+*.svg
 # C extensions
 *.so
 
