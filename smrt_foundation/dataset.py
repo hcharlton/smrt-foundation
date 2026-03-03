@@ -112,80 +112,118 @@ class LegacyMethylDataset(IterableDataset):
     def __len__(self):
         return self.len
 
+    # def _process_batch(self, df):
+    #     # seq
+    #     seq_arr = np.stack(
+    #         df['seq'].str.split("")
+    #         .list.eval(pl.element().replace_strict(self.vocab, default=4))
+    #         .to_numpy()
+    #     )
+    #     seq_t = torch.tensor(seq_arr, dtype=torch.long)
+
+    #     # kinetics
+    #     kin_list = []
+    #     for k in self.kin_feats:
+    #         vals = df[k].to_numpy() # (N, L)
+    #         vals = (np.log(vals + 1) - self.means[k]) / self.stds[k]
+    #         kin_list.append(vals)
+    #     kin_t = torch.tensor(np.stack(kin_list, axis=1), dtype=torch.float)
+
+    #     # mask, labels, etc
+    #     mask = torch.zeros((seq_t.shape[0], seq_t.shape[1], 1), dtype=torch.float)
+    #     labels = torch.tensor(df['label'].to_numpy(), dtype=torch.long) if not self.inference else None
+        
+    #     if self.inference:
+    #         r_names, pos = df['read_name'].to_list(), df['cg_pos'].to_list()
+
+    #     # construct forward sample
+    #     fwd_data = torch.cat([
+    #         seq_t.unsqueeze(-1).to(torch.float),
+    #         kin_t[:, 0:2].permute(0, 2, 1),
+    #         mask
+    #     ], dim=2)
+
+    #     # construct reverse data
+    #     rev_data = None
+    #     if self.single_strand:
+    #         rev_seq_t = torch.flip(self.comp_map[seq_t], dims=[1])
+    #         rev_kin = torch.flip(kin_t[:, 2:4], dims=[2]).permute(0, 2, 1)
+    #         rev_data = torch.cat([
+    #             rev_seq_t.unsqueeze(-1).to(torch.float),
+    #             rev_kin,
+    #             mask
+    #         ], dim=2)
+
+    #     # yield
+    #     for i in range(len(df)):
+    #         # forward
+    #         # only tensors
+    #         item_fwd = {'data': fwd_data[i]}
+    #         if labels is not None: item_fwd['label'] = labels[i]
+            
+    #         # Only add string metadata during inference for analysis
+    #         if self.inference:
+    #             strand_name = 'fwd' if self.single_strand else 'ds'
+    #             item_fwd['metadata'] = {
+    #                 'read_name': r_names[i], 
+    #                 'position': pos[i], 
+    #                 'strand': strand_name
+    #             }
+    #         yield item_fwd
+
+    #         # reverse
+    #         if rev_data is not None:
+    #             # only tensors
+    #             item_rev = {'data': rev_data[i]}
+    #             if labels is not None: item_rev['label'] = labels[i]
+                
+    #             # add string metadata during inference
+    #             if self.inference:
+    #                 item_rev['metadata'] = {
+    #                     'read_name': r_names[i], 
+    #                     'position': pos[i], 
+    #                     'strand': 'rev'
+    #                 }
+    #             yield item_rev
     def _process_batch(self, df):
-        # seq
-        seq_arr = np.stack(
-            df['seq'].str.split("")
-            .list.eval(pl.element().replace_strict(self.vocab, default=4))
-            .to_numpy()
-        )
+        seq_arr = np.stack(df['seq'].str.split("").list.eval(pl.element().replace_strict(self.vocab, default=4)).to_numpy())
         seq_t = torch.tensor(seq_arr, dtype=torch.long)
 
-        # kinetics
         kin_list = []
         for k in self.kin_feats:
-            vals = df[k].to_numpy() # (N, L)
-            vals = (np.log(vals + 1) - self.means[k]) / self.stds[k]
+            vals = (np.log(df[k].to_numpy() + 1) - self.means[k]) / self.stds[k]
             kin_list.append(vals)
         kin_t = torch.tensor(np.stack(kin_list, axis=1), dtype=torch.float)
 
-        # mask, labels, etc
         mask = torch.zeros((seq_t.shape[0], seq_t.shape[1], 1), dtype=torch.float)
         labels = torch.tensor(df['label'].to_numpy(), dtype=torch.long) if not self.inference else None
-        
+
         if self.inference:
             r_names, pos = df['read_name'].to_list(), df['cg_pos'].to_list()
 
-        # construct forward sample
-        fwd_data = torch.cat([
-            seq_t.unsqueeze(-1).to(torch.float),
-            kin_t[:, 0:2].permute(0, 2, 1),
-            mask
-        ], dim=2)
+        fwd_data = torch.cat([seq_t.unsqueeze(-1).to(torch.float), kin_t[:, 0:2].permute(0, 2, 1), mask], dim=2)
 
-        # construct reverse data
         rev_data = None
         if self.single_strand:
             rev_seq_t = torch.flip(self.comp_map[seq_t], dims=[1])
             rev_kin = torch.flip(kin_t[:, 2:4], dims=[2]).permute(0, 2, 1)
-            rev_data = torch.cat([
-                rev_seq_t.unsqueeze(-1).to(torch.float),
-                rev_kin,
-                mask
-            ], dim=2)
+            rev_data = torch.cat([rev_seq_t.unsqueeze(-1).to(torch.float), rev_kin, mask], dim=2)
 
-        # yield
         for i in range(len(df)):
-            # forward
-            # only tensors
-            item_fwd = {'data': fwd_data[i]}
+            item_fwd = {'data': fwd_data[i].clone()}
             if labels is not None: item_fwd['label'] = labels[i]
             
-            # Only add string metadata during inference for analysis
             if self.inference:
-                strand_name = 'fwd' if self.single_strand else 'ds'
-                item_fwd['metadata'] = {
-                    'read_name': r_names[i], 
-                    'position': pos[i], 
-                    'strand': strand_name
-                }
+                item_fwd['metadata'] = {'read_name': r_names[i], 'position': pos[i], 'strand': 'fwd' if self.single_strand else 'ds'}
             yield item_fwd
 
-            # reverse
             if rev_data is not None:
-                # only tensors
-                item_rev = {'data': rev_data[i]}
+                item_rev = {'data': rev_data[i].clone()}
                 if labels is not None: item_rev['label'] = labels[i]
                 
-                # add string metadata during inference
                 if self.inference:
-                    item_rev['metadata'] = {
-                        'read_name': r_names[i], 
-                        'position': pos[i], 
-                        'strand': 'rev'
-                    }
+                    item_rev['metadata'] = {'read_name': r_names[i], 'position': pos[i], 'strand': 'rev'}
                 yield item_rev
-
     def __iter__(self):
         worker = torch.utils.data.get_worker_info()
         valid_groups = min(self.restrict, self.n_groups) if self.restrict else self.n_groups

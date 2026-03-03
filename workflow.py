@@ -216,9 +216,9 @@ def memmap_cpg_conversion(
     zarr_path,
     output_path,
     config_path,
-    shard_size=2**20,
+    shard_size=4*2**20,
     shards=0,
-    context=128,
+    context=32,
     fwd_features=['seq', 'fi', 'fp'],
     rev_features=['seq', 'ri', 'rp'],
     reverse_complement=True,
@@ -227,7 +227,7 @@ def memmap_cpg_conversion(
     profile=False
 ):
     inputs = {'in_file': zarr_path}
-    outputs = {'out_file': output_path}
+    outputs = {'out_file': f'{output_path}'}
 
     options = {'cores': 8, 'memory': '64gb', 'walltime': '18:00:00'}
 
@@ -249,7 +249,7 @@ def memmap_cpg_conversion(
         --config_path {config_path} \
         --shard_size {shard_size} \
         --max_shards {shards} \
-        --context {context} \
+        --context 32 \
         --fwd_features {fwd_str} \
         --rev_features {rev_str} \
         {rc_flag} \
@@ -439,7 +439,7 @@ def train_supervised(config_path):
     spec = f"""
     source .venv/bin/activate
     cd {p('')}
-    accelerate launch --num_processes=8 --mixed_precision='no' scripts/train_supervised.py {config_path}
+    accelerate launch --num_processes=1 --mixed_precision='no' scripts/train_supervised.py {config_path}
     touch {sentinel_path}
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
@@ -473,16 +473,17 @@ gwf.target_from_template(
 
 ############################### Plotting #######################################
 
-def make_plot(path):
+def make_plot(script_path):
     inputs = {}
-    outputs = {'output': f'{os.path.dirname(path)}.svg'}
+    output_path = f"{os.path.dirname(script_path)}/plot.svg"
+    outputs = {'output': output_path}
     
     options ={'cores': 16, 'memory': '64gb', 'walltime': '00:30:00'}
         
     spec = f"""
     source .venv/bin/activate
     cd {p('')}
-    python {path} {os.path.dirname(path)}.svg
+    python {script_path} --output_path {output_path}
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 

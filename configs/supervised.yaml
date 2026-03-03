@@ -1,10 +1,13 @@
 experiment_type: 'supervised'
-experiment_name: '6_epoch_incrase'
-run_message: 'x10 epoch length'
+experiment_name: '8_single_gpu_new'
+run_message: 'test new dataset with a single gpu'
 pos_data_train: 'data/01_processed/val_sets/cpg_pos.memmap/train'
 neg_data_train: 'data/01_processed/val_sets/cpg_neg.memmap/train'
 pos_data_val: 'data/01_processed/val_sets/cpg_pos.memmap/val'
 neg_data_val: 'data/01_processed/val_sets/cpg_neg.memmap/val'
+
+# legacy_train: 'data/01_processed/val_sets/pacbio_standard_train.parquet'
+# legacy_val: 'data/01_processed/val_sets/pacbio_standard_test.parquet'
 
 
 classifier:
@@ -15,8 +18,8 @@ classifier:
   vocab_size: 5
   weight_decay: 0.02
   epochs: 12
-  ds_limit: 100000000
-  batch_size: 4096
+  ds_limit: 3000000
+  batch_size: 256
   optimizer: 'AdamW'
   max_lr: 3e-4
   pct_start: 0.5

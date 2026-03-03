@@ -2,6 +2,7 @@ import yaml, os, sys
 import polars as pl
 import altair as alt
 from torch.utils.data import DataLoader
+import argparse
 
 module_path = os.path.abspath("/dcai/users/chache/smrt-foundation")
 if module_path not in sys.path:
@@ -59,13 +60,14 @@ print(df.head())
 print(df.unpivot())
 
 chart = alt.Chart(df.unpivot()).mark_bar().encode(
-    alt.X('value:Q').bin(),
+    alt.X('value:Q').bin(maxbins=100),
     alt.Y('count()')
 ).properties(
     width=500,
     height=500,
 ).facet(
-    facet=alt.Facet('variable:N'),
+    'variable:N',
+    columns=2
 ).resolve_scale(
     x='independent',
     y='independent'
@@ -75,8 +77,8 @@ chart = alt.Chart(df.unpivot()).mark_bar().encode(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('output_path', type=str, required=True)
+    parser.add_argument("--output_path", type=str)
     
-    parser.parse_args()
+    args = parser.parse_args()
 
-    chart.save(parser.output_path)
+    chart.save(args.output_path)
