@@ -28,14 +28,16 @@ def profile_cache(dataset, sampler=None, shuffle=False, num_batches=1_000, num_w
     
     print(f"Shuffle: {shuffle:<5}, Sampler: {True if sampler else False} | Time: {t1-t0:.2f}s | Hit Rate: {hit_rate:.2%} | Hits: {dataset.cache_hits} | Misses: {dataset.cache_misses}")
 
-
 with open('./configs/supervised.yaml', 'r') as f:
         config = yaml.safe_load(f)
 
 limit=256*10_000
-ds = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_train'))
+tmp_ds = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_train'))
+norm_fn = ZNorm(tmp_ds)
+ds = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_train'), norm_fn = norm_fn)
 
 sampler = ChunkedRandomSampler(ds, 2048, shuffle_within=True)
+
 profile_cache(ds, shuffle=False)
 profile_cache(ds, shuffle=True)
 profile_cache(ds, sampler=sampler)

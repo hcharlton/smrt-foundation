@@ -1,5 +1,15 @@
 # smrt_foundation/normalization.py
 import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+import os
+import sys
+
+module_path = os.path.abspath("/dcai/users/chache/smrt-foundation")
+if module_path not in sys.path:
+    sys.path.append(module_path)
+
+from smrt_foundation.dataset import ChunkedRandomSampler
 
 def build_rc_lookup(config):
     """
@@ -44,9 +54,11 @@ def normalize_read_mad(read_data, is_continuous_mask, eps=1e-6):
 ########### Normalization Classes #############
 
 class ZNorm:
-    def __init__(self, means, stds, eps=1e-8):
-        self.means = torch.tensor(means, dtype=torch.float32)
-        self.stds = torch.tensor(stds, dtype=torch.float32)
+    def __init__(self, ds, eps=1e-8):
+        self.sampler = ChunkedRandomSampler(ds, 2048, shuffle_within=True)
+        x, _ = next(iter(DataLoader(ds, batch_size=32_768, sampler = self.sampler)))
+        self.means = torch.mean(x, dim=(0,1))
+        self.stds = torch.std(x, dim=(0,1))
         self.eps = eps
 
     def __call__(self, x):
