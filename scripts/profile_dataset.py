@@ -12,7 +12,7 @@ if module_path not in sys.path:
 from smrt_foundation.dataset import LabeledMemmapDataset, ChunkedRandomSampler
 from smrt_foundation.normalization import ZNorm
 
-def profile_cache(dataset, sampler=None, shuffle=False, num_batches=1_000, num_workers=0):
+def profile_cache(dataset, sampler=None, shuffle=False, num_batches=10_000, num_workers=0):
     dataset.cache_hits = 0
     dataset.cache_misses = 0
     loader = DataLoader(dataset, batch_size=256, shuffle=shuffle, sampler=sampler, num_workers=num_workers)
@@ -39,5 +39,5 @@ ds = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_tra
 sampler = ChunkedRandomSampler(ds, 2048, shuffle_within=True)
 
 profile_cache(ds, shuffle=False)
-profile_cache(ds, shuffle=True)
+# profile_cache(ds, shuffle=True)
 profile_cache(ds, sampler=sampler)
