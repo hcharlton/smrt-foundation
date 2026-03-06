@@ -6,8 +6,28 @@ import numpy as np
 import pyarrow.parquet as pq
 from collections import OrderedDict
 from pathlib import Path
+from torch.utils.data import Dataset, IterableDataset, Sampler
 
-from torch.utils.data import Dataset, IterableDataset
+class ChunkedRandomSampler(Sampler):
+    def __init__(self, data_source, chunk_size, shuffle_within=True):
+        self.num_samples = len(data_source)
+        self.chunk_size = chunk_size
+        self.shuffle_within = shuffle_within
+
+    def __iter__(self):
+        chunks = [range(i, min(i + self.chunk_size, self.num_samples)) 
+                  for i in range(0, self.num_samples, self.chunk_size)]
+        
+        for chunk_idx in torch.randperm(len(chunks)).tolist():
+            chunk = chunks[chunk_idx]
+            if self.shuffle_within:
+                for idx in torch.randperm(len(chunk)).tolist():
+                    yield chunk[idx]
+            else:
+                yield from chunk
+
+    def __len__(self):
+        return self.num_samples
 
 
 class ShardedMemmapDataset(Dataset):
@@ -39,44 +59,106 @@ class ShardedMemmapDataset(Dataset):
         # return torch.from_numpy(np.array(self.memmaps[shard_idx][local_idx])).bfloat16()
         return torch.from_numpy(np.array(self.memmaps[shard_idx][local_idx])).float()
 
+# class LabeledMemmapDataset(Dataset):
+#     def __init__(self, pos_dir, neg_dir, norm_fn = None, cache_size=100, limit=0):
+#         self.pos_paths = sorted(glob.glob(os.path.join(os.path.expandvars(pos_dir), "*.npy")))
+#         self.neg_paths = sorted(glob.glob(os.path.join(os.path.expandvars(neg_dir), "*.npy")))
+#         def get_stats(p):
+#             if not p: return 0, 0
+#             sz = np.load(p[0], mmap_mode='r').shape[0]
+#             # assume that only the last shard has non-standard length
+#             # total = (count(shards) - 1) x len(first) + len(last) 
+#             return (len(p) - 1) * sz + np.load(p[-1], mmap_mode='r').shape[0], sz
+#         pos_full, self.pos_sz = get_stats(self.pos_paths)
+#         neg_full, self.neg_sz = get_stats(self.neg_paths)
+#         if limit > 0:
+#             self.pos_len = min(pos_full, limit // 2 + max(0, limit - (limit // 2) - neg_full))
+#             self.neg_len = min(neg_full, limit - self.pos_len)
+#             self.pos_len = min(pos_full, limit - self.neg_len)
+#         else:
+#             self.pos_len, self.neg_len = pos_full, neg_full
+#         self.len = self.pos_len + self.neg_len
+#         self.cache_size = cache_size
+#         self.memmaps = OrderedDict()
+#         self.norm_fn = norm_fn
+
+#     def __len__(self):
+#         return self.len
+
+#     def __getitem__(self, idx):
+#         if not 0 <= idx < self.len: raise IndexError(idx)
+#         is_pos = idx < self.pos_len
+#         paths, sz = (self.pos_paths, self.pos_sz) if is_pos else (self.neg_paths, self.neg_sz)
+#         shard_idx, local_idx = divmod(idx if is_pos else idx - self.pos_len, sz)
+#         cache_key = (is_pos, shard_idx)
+#         if cache_key not in self.memmaps:
+#             if len(self.memmaps) >= self.cache_size: self.memmaps.popitem(last=False)
+#             self.memmaps[cache_key] = np.load(paths[shard_idx], mmap_mode='r')
+#         else:
+#             self.memmaps.move_to_end(cache_key)
+#         x = torch.from_numpy(np.array(self.memmaps[cache_key][local_idx])).float()
+#         y = torch.tensor(1.0 if is_pos else 0.0, dtype=torch.float32)
+#         if self.norm_fn:
+#             x = self.norm_fn(x)
+#         return x, y
+
 class LabeledMemmapDataset(Dataset):
-    def __init__(self, pos_dir, neg_dir, cache_size=100, limit=0):
+    def __init__(self, pos_dir, neg_dir, norm_fn=None, cache_size=100, limit=0):
         self.pos_paths = sorted(glob.glob(os.path.join(os.path.expandvars(pos_dir), "*.npy")))
         self.neg_paths = sorted(glob.glob(os.path.join(os.path.expandvars(neg_dir), "*.npy")))
+        
         def get_stats(p):
             if not p: return 0, 0
             sz = np.load(p[0], mmap_mode='r').shape[0]
-            # assume that only the last shard has non-standard length
-            # total = (count(shards) - 1) x len(first) + len(last) 
             return (len(p) - 1) * sz + np.load(p[-1], mmap_mode='r').shape[0], sz
+            
         pos_full, self.pos_sz = get_stats(self.pos_paths)
         neg_full, self.neg_sz = get_stats(self.neg_paths)
+        
         if limit > 0:
-            self.pos_len = min(pos_full, limit // 2 + max(0, limit - (limit // 2) - neg_full))
+            self.pos_len = min(pos_full, limit // 2 + max(0, limit - limit // 2 - neg_full))
             self.neg_len = min(neg_full, limit - self.pos_len)
             self.pos_len = min(pos_full, limit - self.neg_len)
         else:
             self.pos_len, self.neg_len = pos_full, neg_full
+            
         self.len = self.pos_len + self.neg_len
         self.cache_size = cache_size
-        self.memmaps = OrderedDict()
+        self.norm_fn = norm_fn
+        self.memmaps = None 
+        self.cache_hits = 0
+        self.cache_misses = 0
 
     def __len__(self):
         return self.len
 
     def __getitem__(self, idx):
-        if not 0 <= idx < self.len: raise IndexError(idx)
+        if not 0 <= idx < self.len: 
+            raise IndexError(idx)
+            
+        if self.memmaps is None:
+            self.memmaps = OrderedDict()
+
         is_pos = idx < self.pos_len
         paths, sz = (self.pos_paths, self.pos_sz) if is_pos else (self.neg_paths, self.neg_sz)
         shard_idx, local_idx = divmod(idx if is_pos else idx - self.pos_len, sz)
         cache_key = (is_pos, shard_idx)
+        
         if cache_key not in self.memmaps:
-            if len(self.memmaps) >= self.cache_size: self.memmaps.popitem(last=False)
+            self.cache_misses += 1
+            if len(self.memmaps) >= self.cache_size: 
+                self.memmaps.popitem(last=False)
             self.memmaps[cache_key] = np.load(paths[shard_idx], mmap_mode='r')
         else:
+            self.cache_hits += 1
             self.memmaps.move_to_end(cache_key)
-        data = torch.from_numpy(np.array(self.memmaps[cache_key][local_idx])).float()
-        return data, torch.tensor(1.0 if is_pos else 0.0, dtype=torch.float32)
+            
+        x = torch.from_numpy(np.array(self.memmaps[cache_key][local_idx])).float()
+        y = torch.tensor(1.0 if is_pos else 0.0, dtype=torch.float32)
+        
+        if self.norm_fn:
+            x = self.norm_fn(x)
+        return x, y
 
 def compute_log_normalization_stats(df, features, epsilon=1):
     means = {col: (df[col].explode() + epsilon).log().mean() for col in features}

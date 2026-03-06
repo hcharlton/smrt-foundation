@@ -41,3 +41,13 @@ def normalize_read_mad(read_data, is_continuous_mask, eps=1e-6):
 
     return read_data
 
+########### Normalization Classes #############
+
+class ZNorm:
+    def __init__(self, means, stds, eps=1e-8):
+        self.means = torch.tensor(means, dtype=torch.float32)
+        self.stds = torch.tensor(stds, dtype=torch.float32)
+        self.eps = eps
+
+    def __call__(self, x):
+        return (x - self.means) / (self.stds + self.eps)
