@@ -9,7 +9,7 @@ module_path = os.path.abspath("/dcai/users/chache/smrt-foundation")
 if module_path not in sys.path:
     sys.path.append(module_path)
 
-from smrt_foundation.dataset import LegacyMethylDataset, LabeledMemmapDataset, compute_log_normalization_stats
+from smrt_foundation.dataset import LegacyMethylDataset, LabeledMemmapDataset, compute_log_normalization_stats, ChunkedRandomSampler
 alt.data_transformers.enable('vegafusion')
 
 config_path = './configs/supervised.yaml'
@@ -38,8 +38,8 @@ print('calculating lengths')
 print(len(ds_new))
 print(len(ds_legacy))
 
-
-batch_new =  next(iter(DataLoader(ds_new, batch_size=1_000_000, shuffle=True)))
+sampler = ChunkedRandomSampler(ds_new, 2048, shuffle_within=True)
+batch_new =  next(iter(DataLoader(ds_new, batch_size=1_000_000, sampler = sampler)))
 batch_legacy = next(iter(DataLoader(ds_legacy, batch_size=1_000_000)))
 
 print(batch_new[0].shape)

@@ -307,7 +307,7 @@ def process_ssl_dataset(name, data):
                 output_path=data['memmap'],
                 config_path=CONFIG['data_config'],
                 profile=True,
-                normalize=True,
+                normalize=False,
                 shards=0
             )
         )
@@ -487,10 +487,9 @@ def make_plot(script_path):
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
+ploting_dir = './report/eda'
 
-target_directory = './report/eda'
-
-for path in Path(target_directory).rglob('plot.py'):
+for path in Path(ploting_dir).rglob('plot.py'):
     gwf.target_from_template(
             name=f"plot_{path.parent.name}",
             template=make_plot(str(path))
