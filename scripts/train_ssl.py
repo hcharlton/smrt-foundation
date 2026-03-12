@@ -100,7 +100,7 @@ def main():
         lr=float(config_updated['max_lr']),
         weight_decay=config_updated['weight_decay']
     )
-    criterion = AgInfoNCE3(temperature=float(config_updated['temperature']))
+    criterion = AgInfoNCE(temperature=float(config_updated['temperature']))
 
     model, optimizer, dl = accelerator.prepare(model, optimizer, dl)
 
