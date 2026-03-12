@@ -20,3 +20,4 @@ polars
 pyyaml
 wheel
 zarr
+pytest

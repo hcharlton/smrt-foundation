@@ -2,7 +2,7 @@ import pytest
 import pysam
 import zarr
 import numpy as np
-from smrt_foundation import bam_to_zarr, _process_read
+from scripts.bam_to_zarr import bam_to_zarr, _process_read
 
 @pytest.fixture
 def mock_config():
@@ -63,3 +63,6 @@ def test_bam_to_zarr_fidelity(tmp_path, mock_config):
             assert np.array_equal(tag_zarr, np.array(read.get_tag(tag)))
 
 
+if __name__ == "__main__":
+    test_process_read()
+    test_bam_to_zarr_fidelity(tmp_path='/tmp', mock_config=mock_config())

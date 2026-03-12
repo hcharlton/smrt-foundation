@@ -3,8 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "smrt-foundation"
+name = "smrt_foundation"
 version = "0.1.0"
 
-[tool.setuptools]
-packages = ["smrt_foundation"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["smrt_foundation*", "scripts*"]
