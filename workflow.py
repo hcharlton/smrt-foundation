@@ -9,7 +9,7 @@ curr_dir = os.getcwd()
 IS_GEFION = curr_dir.startswith('/dcai')
 
 if IS_GEFION:
-    root_dir = '/dcai/users/chache/smrt-foundation'
+    root_dir = '/dcai/projects/cu_0030/smrt-foundation'
     # gefion does not require account specification
     gwf_defaults = {} 
 else:

@@ -8,6 +8,7 @@ training_logs/
 *.bundle
 *.stdout
 *.stderr
+*.out
 .gwf/
 # Byte-compiled / optimized / DLL files
 __pycache__/

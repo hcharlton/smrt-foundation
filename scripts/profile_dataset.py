@@ -5,7 +5,7 @@ import os
 import sys
 from tqdm import tqdm
 
-module_path = os.path.abspath("/dcai/users/chache/smrt-foundation")
+module_path = os.path.abspath("/dcai/projects/cu_0030/smrt-foundation")
 if module_path not in sys.path:
     sys.path.append(module_path)
 

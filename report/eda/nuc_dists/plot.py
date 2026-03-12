@@ -5,7 +5,7 @@
 # import argparse
 # import torch
 
-# module_path = os.path.abspath("/dcai/users/chache/smrt-foundation")
+# module_path = os.path.abspath("/dcai/projects/cu_0030/smrt-foundation")
 # if module_path not in sys.path:
 #     sys.path.append(module_path)
 
@@ -86,7 +86,7 @@ import polars as pl
 import altair as alt
 from torch.utils.data import DataLoader
 
-module_path = os.path.abspath("/dcai/users/chache/smrt-foundation")
+module_path = os.path.abspath("/dcai/projects/cu_0030/smrt-foundation")
 if module_path not in sys.path:
     sys.path.append(module_path)
 
