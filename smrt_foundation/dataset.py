@@ -60,7 +60,7 @@ class ShardedMemmapDataset(Dataset):
         return torch.from_numpy(np.array(self.memmaps[shard_idx][local_idx])).float()
 
 class LabeledMemmapDataset(Dataset):
-    def __init__(self, pos_dir, neg_dir, norm_fn=None, cache_size=100, limit=0):
+    def __init__(self, pos_dir, neg_dir, norm_fn=None, cache_size=100, limit=0, balance=True):
         self.pos_paths = sorted(glob.glob(os.path.join(os.path.expandvars(pos_dir), "*.npy")))
         self.neg_paths = sorted(glob.glob(os.path.join(os.path.expandvars(neg_dir), "*.npy")))
         
@@ -68,6 +68,10 @@ class LabeledMemmapDataset(Dataset):
             if not p: return 0, 0
             sz = np.load(p[0], mmap_mode='r').shape[0]
             return (len(p) - 1) * sz + np.load(p[-1], mmap_mode='r').shape[0], sz
+        if balance:
+            n_pos_shards, n_neg_shards = len(self.pos_paths), len(self.neg_paths)
+            self.pos_paths = self.pos_paths[:min(n_pos_shards, n_neg_shards)]
+            self.neg_paths = self.neg_paths[:min(n_pos_shards, n_neg_shards)]
             
         pos_full, self.pos_sz = get_stats(self.pos_paths)
         neg_full, self.neg_sz = get_stats(self.neg_paths)

@@ -28,8 +28,8 @@ train_df = q.collect()
 legacy_train_means, legacy_train_stds = compute_log_normalization_stats(train_df, KINETICS_FEATURES)
 
 tmp_ds = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_train'), limit=int(2626190))
-norm_fn = ZNorm(tmp_ds)
-ds_new = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_train'), norm_fn=norm_fn, limit=int(2626190))
+# norm_fn = ZNorm(tmp_ds)
+ds_new = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_train'), norm_fn=None, limit=int(2626190))
 
 ds_legacy = LegacyMethylDataset('data/01_processed/val_sets/pacbio_standard_train.parquet',
                                 means=legacy_train_means,
@@ -62,9 +62,9 @@ print(new_means_neg.shape)
 
 df = pl.DataFrame({
     'ipd_new_pos': new_means_pos[:,1],
-    'ipd_legacy_pos': legacy_means_pos[:,1],
+    # 'ipd_legacy_pos': legacy_means_pos[:,1],
     'ipd_new_neg': new_means_neg[:,1],
-    'ipd_legacy_neg': legacy_means_neg[:,1]
+    # 'ipd_legacy_neg': legacy_means_neg[:,1]
 }).with_row_index("idx")
 
 print(df.head())
@@ -84,10 +84,11 @@ domain = ['ipd_new_pos', 'ipd_new_neg', 'ipd_legacy_pos', 'ipd_legacy_neg']
 range_ = [[5, 5], [5, 5], [1, 0], [1, 0]]
 
 chart = alt.Chart(df.unpivot(index='idx')).mark_line().encode(
-    alt.X('idx:O'),
-    alt.Y('value:Q').scale(zero=False),
-    alt.Color('variable:N'),
-    strokeDash=alt.StrokeDash('variable:N', scale=alt.Scale(domain=domain, range=range_))
+    x=alt.X('idx:O'),
+    y=alt.Y('value:Q'),
+    color=alt.Color('variable:N'),
+    scale=alt.Scale(zero=False)
+    # strokeDash=alt.StrokeDash('variable:N', scale=alt.Scale(domain=domain, range=range_))
 ).properties(width=800, height=500)
 
 
