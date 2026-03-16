@@ -127,7 +127,7 @@ def compute_log_normalization_stats(df, features, epsilon=1):
     return means, stds
 
 class LegacyMethylDataset(IterableDataset):
-    def __init__(self, data_path, means, stds, context, restrict_row_groups=100, single_strand=False, inference=False):
+    def __init__(self, data_path, means, stds, context, restrict_row_groups=100, single_strand=False, inference=False, norm=True):
         super().__init__()
         self.data_path = Path(data_path)
         self.means, self.stds = means, stds
@@ -135,6 +135,7 @@ class LegacyMethylDataset(IterableDataset):
         self.single_strand = single_strand
         self.inference = inference
         self.restrict = restrict_row_groups
+        self.norm = norm
 
         self.kin_feats = ['fi', 'fp', 'ri', 'rp']
         self.vocab = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
@@ -161,7 +162,10 @@ class LegacyMethylDataset(IterableDataset):
 
         kin_list = []
         for k in self.kin_feats:
-            vals = (np.log(df[k].to_numpy() + 1) - self.means[k]) / self.stds[k]
+            if self.norm:
+                vals = (np.log(df[k].to_numpy() + 1) - self.means[k]) / self.stds[k]
+            else: 
+                vals = df[k].to_numpy()
             kin_list.append(vals)
         kin_t = torch.tensor(np.stack(kin_list, axis=1), dtype=torch.float)
 
