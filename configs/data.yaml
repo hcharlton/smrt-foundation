@@ -15,3 +15,9 @@ data:
     'N': 'N'
   kinetics_features: ['fi', 'fp', 'ri', 'rp']
   per_base_tags: ["fi", "ri", "fp", "rp", "sm", "sx", "sa", "fn", "rn"]
+
+cpg_pipeline:
+  context: 32
+  fwd_features: ['seq', 'fi', 'fp']
+  rev_features: ['seq', 'ri', 'rp']
+  shard_size: 4194304  # 4 * 2**20

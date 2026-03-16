@@ -249,7 +249,7 @@ def memmap_cpg_conversion(
         --config_path {config_path} \
         --shard_size {shard_size} \
         --max_shards {shards} \
-        --context 32 \
+        --context {context} \
         --fwd_features {fwd_str} \
         --rev_features {rev_str} \
         {rc_flag} \
@@ -494,3 +494,27 @@ for path in Path(ploting_dir).rglob('plot.py'):
             name=f"plot_{path.parent.name}",
             template=make_plot(str(path))
         )
+
+
+############################### Testing ########################################
+
+def run_test(test_module_path):
+    module_name = Path(test_module_path).stem
+    sentinel = p(f"tests/{module_name}.sentinel")
+    inputs = {}
+    outputs = {'sentinel': sentinel}
+    options = {'cores': 4, 'memory': '32gb', 'walltime': '01:00:00'}
+
+    spec = f"""
+    source .venv/bin/activate
+    cd {p('')}
+    python -m pytest {test_module_path} -v --tb=short
+    touch {sentinel}
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+for path in Path('./tests').glob('test_*.py'):
+    gwf.target_from_template(
+        name=f"test_{path.stem}",
+        template=run_test(str(path))
+    )
