@@ -9,6 +9,7 @@ training_logs/
 *.stdout
 *.stderr
 *.out
+CLAUDE.md
 .gwf/
 # Byte-compiled / optimized / DLL files
 __pycache__/
