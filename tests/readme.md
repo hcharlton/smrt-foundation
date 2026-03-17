@@ -122,6 +122,75 @@ Runs the entire pipeline end-to-end for both the methylated (positive) and unmet
 
 ---
 
+### `test_legacy_vs_new_pipeline.py`
+
+Direct comparison tests between the legacy parquet pipeline (`archive/make_legacy_labeled_dataset.py` &rarr; `LegacyMethylDataset`) and the new zarr-to-memmap pipeline (`bam_to_zarr` &rarr; `zarr_to_methyl_memmap` &rarr; `LabeledMemmapDataset`). Traces the same BAM reads through both paths and compares what the model actually receives as input tensors.
+
+#### Session fixtures
+
+| Fixture | What it does |
+|---|---|
+| `legacy_pos_parquet` / `legacy_neg_parquet` | Runs `bam_to_legacy_parquet` on the first 20 reads &rarr; temp parquet files |
+| `zarr_pos` / `zarr_neg` | Runs `bam_to_zarr` on the first 20 reads &rarr; temp Zarr stores |
+| `memmap_pos_raw` / `memmap_neg_raw` | New pipeline shards (raw, with RC) |
+| `memmap_pos_norm` | New pipeline shards (MAD-normalized, with RC) |
+
+#### Test classes
+
+**`TestSingleSampleProvenance`** &mdash; Traces a single CpG site from one BAM read through both pipelines
+
+| Test | Verifies |
+|---|---|
+| `test_forward_strand_raw_values_match` | Raw kinetics at the same CpG site match between legacy parquet and BAM source |
+| `test_reverse_strand_sequence_handling` | Legacy reverse windows have correctly reverse-complemented sequence |
+
+**`TestNormalizationComparison`** &mdash; Compares the three normalization strategies
+
+| Test | Verifies |
+|---|---|
+| `test_raw_kinetics_distribution` | Raw pipeline values are in uint8 range (0&ndash;255) |
+| `test_mad_normalized_distribution` | MAD-normalized values are centered near 0 |
+| `test_legacy_log_z_normalization` | Legacy log-Z values are approximately standard-normal |
+| `test_normalization_strategy_changes_discrimination` | Prints class separation metrics for each normalization (diagnostic) |
+
+**`TestFeatureColumnAlignment`** &mdash; How features map to model input positions
+
+| Test | Verifies |
+|---|---|
+| `test_new_pipeline_mixes_fwd_rev_kinetics` | New pipeline puts fwd/rev kinetics in the same columns |
+| `test_legacy_separates_fwd_rev_kinetics` | Legacy parquet stores all four kinetics columns (fi, fp, ri, rp) separately |
+
+**`TestModelInputTensorComparison`** &mdash; Actual tensors the model receives
+
+| Test | Verifies |
+|---|---|
+| `test_new_pipeline_tensor_shape` | Shape, dtype, and feature layout from `LabeledMemmapDataset` |
+| `test_legacy_tensor_shape` | Shape and dtype from `LegacyMethylDataset` |
+| `test_kinetics_scale_comparison` | Prints and asserts the dramatic scale difference between raw (0&ndash;255) and legacy log-Z (~standard normal) kinetics |
+
+**`TestReverseStrandConsistency`** &mdash; Reverse strand handling
+
+| Test | Verifies |
+|---|---|
+| `test_legacy_reverse_has_rc_sequence` | Legacy reverse windows have CG at center after RC |
+| `test_new_pipeline_reverse_with_rc` | New pipeline (use_rc=True) also has CG at center for all windows |
+| `test_new_pipeline_reverse_kinetics_are_flipped` | Reverse kinetics are correctly flipped |
+
+**`TestWindowCountComparison`** &mdash; Window extraction consistency
+
+| Test | Verifies |
+|---|---|
+| `test_same_total_cpg_windows` | Both pipelines produce the same number of CpG windows |
+| `test_same_reads_contribute` | Same set of reads contribute windows in both pipelines |
+
+**`TestDiagnosticSummary`** &mdash; Prints a full diagnostic comparison (always passes)
+
+| Test | What it prints |
+|---|---|
+| `test_print_pipeline_comparison` | Sample counts, feature layouts, kinetics distributions, normalization strategies, and reverse-strand handling for all three paths (raw, MAD-norm, legacy log-Z) |
+
+---
+
 ## Adding new tests
 
 - Place new test modules in this directory, named `test_*.py`. They are automatically picked up by the gwf workflow &mdash; no changes to `workflow.py` needed.
