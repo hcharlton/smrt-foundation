@@ -31,8 +31,8 @@ def check_leakage(train_path, test_path):
         print(f"SKIP: {test_path} not found")
         return None
 
-    train_df = pl.read_parquet(train_path, columns=['read_name', 'strand', 'cg_pos'])
-    test_df = pl.read_parquet(test_path, columns=['read_name', 'strand', 'cg_pos'])
+    train_df = pl.read_parquet(train_path, columns=['read_name', 'cg_pos'])
+    test_df = pl.read_parquet(test_path, columns=['read_name', 'cg_pos'])
 
     train_reads = set(train_df['read_name'].unique().to_list())
     test_reads = set(test_df['read_name'].unique().to_list())
@@ -63,12 +63,13 @@ def check_leakage(train_path, test_path):
     print(f"  Train windows: {len(train_df)}")
     print(f"  Test windows:  {len(test_df)}")
 
-    train_fwd = train_df.filter(pl.col('strand') == 'fwd')
-    train_rev = train_df.filter(pl.col('strand') == 'rev')
-    test_fwd = test_df.filter(pl.col('strand') == 'fwd')
-    test_rev = test_df.filter(pl.col('strand') == 'rev')
-    print(f"  Train fwd/rev:  {len(train_fwd)} / {len(train_rev)}")
-    print(f"  Test fwd/rev:   {len(test_fwd)} / {len(test_rev)}")
+    # Windows per read (how many CpG windows does each read contribute?)
+    train_per_read = train_df.group_by('read_name').len().sort('len', descending=True)
+    test_per_read = test_df.group_by('read_name').len().sort('len', descending=True)
+    print(f"  Train windows/read: median={train_per_read['len'].median():.0f}  "
+          f"max={train_per_read['len'].max()}")
+    print(f"  Test windows/read:  median={test_per_read['len'].median():.0f}  "
+          f"max={test_per_read['len'].max()}")
 
     return len(overlap)
 

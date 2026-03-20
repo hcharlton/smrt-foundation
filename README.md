@@ -42,3 +42,11 @@ To launch a new experimental iteration:
 ## TODO + Problems
 ### Debug new labeled dataset
 The legacy dataset class (script at archive/make_legacy_labeled_dataset, dataset at data/01_processed/legacy*.parquet) is performing much better with direct downstream training (using all the model components) than the new dataset class (script at scripts/zarr_to_methyl_memmap.py). I have not been able to figure out why. The reason that I originally made the new dataset class was to upgrade the datset to online normalization to run experiments, since the contrastively pretrained encoder (the bulk of the project) was not generalizing to the downstraem methylation classification task
+
+#### What's been tried
+1. **Experiment 16 (log1p ZNorm + matched hyperparameters)**: Added log1p transform to ZNorm to match legacy's log(x+1) z-score normalization. Also aligned max_lr (3e-3) and ds_limit (2M) with legacy config. Result: same ~70% top1. Normalization and hyperparameters are not the cause.
+
+#### Remaining hypotheses
+1. **Train/val leakage in legacy parquets.** The legacy parquet is created as a single combined file (workflow.py legacy_parquet_conversion), then split into train/test by an unknown process outside this repo. If that split was at the window level rather than the read level, CpG windows from the same read leak across splits, inflating legacy eval metrics. The new pipeline splits at the read level (zarr_to_methyl_memmap.py), which is correct but produces a harder evaluation. Test at `tests/test_legacy_leakage.py`.
+2. **Kinetics mixing in new pipeline.** Legacy always feeds fi/fp into model columns 1-2 regardless of strand. New pipeline feeds fi/fp for forward windows but ri/rp for reverse windows into the same columns. The kin_embed linear layer has to handle mixed distributions. Experiment 17 tests this by regenerating memmaps with rev_features=['seq', 'fi', 'fp'] (forward kinetics for both strands, matching legacy). Workflow target + experiment at `scripts/experiments/supervised_17_fwd_kin_only/`.
+3. **fi vs ri distribution mismatch.** If fi and ri have meaningfully different distributions at CpG sites, mixing them in the same input columns is a problem for the model. Diagnostic test at `tests/test_kinetics_distributions.py`.
