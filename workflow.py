@@ -273,6 +273,34 @@ def memmap_cpg_conversion(
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
 
+def memmap_cpg_conversion_v2(
+    zarr_path, output_path, config_path,
+    shard_size=4*2**20, shards=0, context=32,
+    val_pct=0.2, seed=42, profile=False
+):
+    inputs = {'in_file': zarr_path}
+    outputs = {'out_file': f'{output_path}'}
+    options = {'cores': 8, 'memory': '64gb', 'walltime': '18:00:00'}
+
+    profiler_env = "TimeLINE_PROFILE=1" if profile else ""
+    spec = f"""
+    source $(conda info --base)/etc/profile.d/conda.sh
+    conda activate data_prep
+    cd {p('')}
+
+    {profiler_env} python -m scripts.zarr_to_methyl_memmap_v2 \
+        --input_path {zarr_path} \
+        --output_path {output_path} \
+        --config_path {config_path} \
+        --shard_size {shard_size} \
+        --max_shards {shards} \
+        --context {context} \
+        --val_pct {val_pct} \
+        --seed {seed}
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+
 def legacy_parquet_conversion(pos_bam, neg_bam, output_path, context=32):
     inputs = {'pos_bam': pos_bam, 'neg_bam': neg_bam}
     outputs = {'out_file': output_path}
@@ -325,7 +353,7 @@ def validate_memmap(memmap_path, config_path):
 
 # pipeline logic
 
-def process_ssl_dataset(name, data):
+def process_dataset(name, data):
     if IS_GEFION:
         gwf.target_from_template(
             name=f"mock_bam_{name}",
@@ -356,6 +384,31 @@ def process_ssl_dataset(name, data):
                 shards=0
             )
         )
+        # v1 with fwd kinetics only (experiment 17)
+        if name in ('cpg_pos', 'cpg_neg'):
+            gwf.target_from_template(
+                name=f'{name}_fwd_kin_memmap',
+                template=memmap_cpg_conversion(
+                    zarr_path=zarr_target.outputs['out_file'],
+                    output_path=f'data/01_processed/val_sets/{name}_fwd_kin.memmap',
+                    config_path=CONFIG['data_config'],
+                    profile=True,
+                    normalize=False,
+                    shards=0,
+                    fwd_features=['seq', 'fi', 'fp'],
+                    rev_features=['seq', 'fi', 'fp'],
+                )
+            )
+            # v2 clean rewrite (experiment 18)
+            gwf.target_from_template(
+                name=f'{name}_v2_memmap',
+                template=memmap_cpg_conversion_v2(
+                    zarr_path=zarr_target.outputs['out_file'],
+                    output_path=f'data/01_processed/val_sets/{name}_v2.memmap',
+                    config_path=CONFIG['data_config'],
+                    profile=True,
+                )
+            )
         return
 
     memmap_target = gwf.target_from_template(
@@ -441,23 +494,7 @@ def process_ssl_dataset(name, data):
 
 # loop to create ssl targets
 for name, data in CONFIG['ssl_datasets'].items():
-    process_ssl_dataset(name, data)
-
-# --- fwd-kinetics-only CpG memmaps (experiment 17: use fi/fp for both strands) ---
-for suffix in ('pos', 'neg'):
-    gwf.target_from_template(
-        name=f'cpg_{suffix}_fwd_kin_memmap',
-        template=memmap_cpg_conversion(
-            zarr_path=CONFIG['ssl_datasets'][f'cpg_{suffix}']['zarr'],
-            output_path=f'data/01_processed/val_sets/cpg_{suffix}_fwd_kin.memmap',
-            config_path=CONFIG['data_config'],
-            profile=True,
-            normalize=False,
-            shards=0,
-            fwd_features=['seq', 'fi', 'fp'],
-            rev_features=['seq', 'fi', 'fp'],  # use forward kinetics for reverse strand too
-        )
-    )
+    process_dataset(name, data)
 
 gwf.target_from_template(
     name='legacy_parquet_subset',
