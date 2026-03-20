@@ -27,7 +27,7 @@ from smrt_foundation.normalization import normalize_read_mad
 from smrt_foundation.dataset import LabeledMemmapDataset, compute_log_normalization_stats
 
 
-def load_all_shards(directory, max_samples=200_000):
+def load_all_shards(directory, max_samples=50_000):
     paths = sorted(glob.glob(os.path.join(directory, "shard_*.npy")))
     if not paths:
         return np.empty((0,))
@@ -44,12 +44,15 @@ def load_all_shards(directory, max_samples=200_000):
 
 
 def main(output_path):
-    alt.data_transformers.enable('vegafusion')
-
     with open('./configs/data.yaml', 'r') as f:
         data_config = yaml.safe_load(f)
     with open('./configs/supervised.yaml', 'r') as f:
         sup_config = yaml.safe_load(f)
+
+    # Fallback to subset data if full dataset not available
+    if not os.path.isdir(os.path.expandvars(sup_config.get('pos_data_train', ''))):
+        sup_config['pos_data_train'] = 'data/01_processed/val_sets/cpg_pos_subset.memmap/train'
+        sup_config['neg_data_train'] = 'data/01_processed/val_sets/cpg_neg_subset.memmap/train'
 
     context = data_config['cpg_pipeline']['context']
     center = context // 2
@@ -64,14 +67,14 @@ def main(output_path):
 
     # subsample for plotting
     rng = np.random.default_rng(42)
-    n_plot = min(500_000, len(ipd_raw))
+    n_plot = min(50_000, len(ipd_raw))
     idx = rng.choice(len(ipd_raw), n_plot, replace=False)
     ipd_raw, pw_raw = ipd_raw[idx], pw_raw[idx]
 
     # ---- New pipeline: per-read MAD ----
     # Apply MAD normalization to the raw data sample-by-sample
     is_continuous = np.array([False, True, True, False])  # [seq, ipd, pw, mask]
-    sample_idx = rng.choice(len(all_raw), min(20_000, len(all_raw)), replace=False)
+    sample_idx = rng.choice(len(all_raw), min(10_000, len(all_raw)), replace=False)
     ipd_mad_list, pw_mad_list = [], []
     for i in sample_idx:
         window = all_raw[i].astype(np.float32).copy()
@@ -86,12 +89,18 @@ def main(output_path):
 
     # ---- Legacy pipeline: log-Z ----
     legacy_path = 'data/01_processed/val_sets/pacbio_standard_train.parquet'
+    if not os.path.exists(legacy_path):
+        legacy_path = 'data/01_processed/val_sets/legacy_subset_train.parquet'
     if os.path.exists(legacy_path):
-        q = pl.scan_parquet(legacy_path).head(200_000)
-        train_df = q.collect()
+        train_df = pl.read_parquet(legacy_path)
+        if len(train_df) > 50_000:
+            train_df = train_df.sample(n=50_000, seed=42)
         kin_feats = ['fi', 'fp', 'ri', 'rp']
         train_df = train_df.with_columns([
             pl.col(c).list.to_array(context) for c in kin_feats
+        ])
+        train_df = train_df.with_columns([
+            pl.col(c).cast(pl.Array(pl.Float64, context)) for c in kin_feats
         ])
         means, stds = compute_log_normalization_stats(train_df, kin_feats)
         fi_norm = (np.log(train_df['fi'].to_numpy().astype(np.float64) + 1) - float(means['fi'])) / float(stds['fi'])
@@ -127,20 +136,24 @@ def main(output_path):
         ),
     })
 
-    chart = alt.Chart(df).mark_bar(opacity=0.8).encode(
-        alt.X('value:Q').bin(maxbins=80).title(None),
-        alt.Y('count():Q').title('Count'),
-        alt.Color('normalization:N', legend=None),
-    ).properties(
-        width=350,
-        height=200,
-    ).facet(
-        row=alt.Row('normalization:N').title('Normalization'),
-        column=alt.Column('feature:N').title('Kinetics Feature'),
-    ).resolve_scale(
-        x='independent',
-        y='independent',
-    ).properties(
+    norms = ['1. Raw (uint8)', '2. Per-read MAD', '3. Legacy log-Z']
+    rows = []
+    for norm in norms:
+        row_df = df.filter(pl.col('normalization') == norm)
+        row_chart = alt.Chart(row_df).mark_bar(opacity=0.8).encode(
+            alt.X('value:Q').bin(maxbins=80).title(None),
+            alt.Y('count():Q').title('Count'),
+        ).properties(
+            width=350,
+            height=200,
+        ).facet(
+            column=alt.Column('feature:N').title(None),
+        ).properties(
+            title=norm
+        )
+        rows.append(row_chart)
+
+    chart = alt.vconcat(*rows).properties(
         title='Kinetics distribution: raw vs MAD vs legacy log-Z'
     )
 

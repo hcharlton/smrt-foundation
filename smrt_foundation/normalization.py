@@ -54,14 +54,20 @@ def normalize_read_mad(read_data, is_continuous_mask, eps=1e-6):
 ########### Normalization Classes #############
 
 class ZNorm:
-    def __init__(self, ds, eps=1e-8):
+    def __init__(self, ds, eps=1e-8, log_transform=True):
+        self.log_transform = log_transform
         self.sampler = ChunkedRandomSampler(ds, 2048, shuffle_within=True)
         x, _ = next(iter(DataLoader(ds, batch_size=1048576, sampler = self.sampler)))
+        if self.log_transform:
+            x = x.clone()
+            x[..., [1, 2]] = torch.log1p(x[..., [1, 2]])
         self.means = torch.mean(x, dim=(0,1))
         self.stds = torch.std(x, dim=(0,1))
         self.eps = eps
 
     def __call__(self, x):
+        if self.log_transform:
+            x[..., [1, 2]] = torch.log1p(x[..., [1, 2]])
         x[..., [1, 2]] -= self.means[[1, 2]]
         x[..., [1, 2]] /= (self.stds[[1, 2]] + self.eps)
         return x

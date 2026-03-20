@@ -24,7 +24,7 @@ from smrt_foundation.normalization import normalize_read_mad
 from smrt_foundation.dataset import compute_log_normalization_stats
 
 
-def load_all_shards(directory, max_samples=200_000):
+def load_all_shards(directory, max_samples=50_000):
     paths = sorted(glob.glob(os.path.join(directory, "shard_*.npy")))
     if not paths:
         return np.empty((0,))
@@ -41,12 +41,15 @@ def load_all_shards(directory, max_samples=200_000):
 
 
 def main(output_path):
-    alt.data_transformers.enable('vegafusion')
-
     with open('./configs/data.yaml', 'r') as f:
         data_config = yaml.safe_load(f)
     with open('./configs/supervised.yaml', 'r') as f:
         sup_config = yaml.safe_load(f)
+
+    # Fallback to subset data if full dataset not available
+    if not os.path.isdir(os.path.expandvars(sup_config.get('pos_data_train', ''))):
+        sup_config['pos_data_train'] = 'data/01_processed/val_sets/cpg_pos_subset.memmap/train'
+        sup_config['neg_data_train'] = 'data/01_processed/val_sets/cpg_neg_subset.memmap/train'
 
     context = data_config['cpg_pipeline']['context']
     center = context // 2
@@ -63,7 +66,7 @@ def main(output_path):
     def mad_normalize_centers(data):
         vals = []
         rng = np.random.default_rng(42)
-        idx = rng.choice(len(data), min(50_000, len(data)), replace=False)
+        idx = rng.choice(len(data), min(10_000, len(data)), replace=False)
         for i in idx:
             window = data[i].astype(np.float32).copy()
             if window[center, -1] != 0.0:
@@ -77,11 +80,15 @@ def main(output_path):
 
     # ---- Legacy log-Z ----
     legacy_path = 'data/01_processed/val_sets/pacbio_standard_train.parquet'
+    if not os.path.exists(legacy_path):
+        legacy_path = 'data/01_processed/val_sets/legacy_subset_train.parquet'
     kin_feats = ['fi', 'fp', 'ri', 'rp']
     if os.path.exists(legacy_path):
-        q = pl.scan_parquet(legacy_path).head(400_000)
-        df = q.collect()
+        df = pl.read_parquet(legacy_path)
+        if len(df) > 50_000:
+            df = df.sample(n=50_000, seed=42)
         df = df.with_columns([pl.col(c).list.to_array(context) for c in kin_feats])
+        df = df.with_columns([pl.col(c).cast(pl.Array(pl.Float64, context)) for c in kin_feats])
         means, stds = compute_log_normalization_stats(df, kin_feats)
         fi_all = df['fi'].to_numpy().astype(np.float64)
         labels = df['label'].to_numpy()
@@ -97,7 +104,7 @@ def main(output_path):
 
     # ---- subsample to equal size ----
     rng = np.random.default_rng(42)
-    n = min(100_000, len(pos_ipd_raw), len(neg_ipd_raw),
+    n = min(50_000, len(pos_ipd_raw), len(neg_ipd_raw),
             len(pos_ipd_mad), len(neg_ipd_mad),
             len(pos_ipd_legacy), len(neg_ipd_legacy))
 
@@ -120,25 +127,28 @@ def main(output_path):
         ),
     })
 
-    chart = alt.Chart(df).mark_area(
-        opacity=0.5,
-        interpolate='step'
-    ).encode(
-        alt.X('value:Q').bin(maxbins=60).title('IPD at CpG center'),
-        alt.Y('count():Q').stack(None).title('Count'),
-        alt.Color('class:N', scale=alt.Scale(
-            domain=['methylated', 'unmethylated'],
-            range=['#e45756', '#4c78a8']
-        )),
-    ).properties(
-        width=400,
-        height=200,
-    ).facet(
-        row=alt.Row('normalization:N').title('Normalization'),
-    ).resolve_scale(
-        x='independent',
-        y='independent',
-    ).properties(
+    norms = ['1. Raw (uint8)', '2. Per-read MAD', '3. Legacy log-Z']
+    rows = []
+    for norm in norms:
+        row_df = df.filter(pl.col('normalization') == norm)
+        row_chart = alt.Chart(row_df).mark_area(
+            opacity=0.5,
+            interpolate='step'
+        ).encode(
+            alt.X('value:Q').bin(maxbins=60).title('IPD at CpG center'),
+            alt.Y('count():Q').stack(None).title('Count'),
+            alt.Color('class:N', scale=alt.Scale(
+                domain=['methylated', 'unmethylated'],
+                range=['#e45756', '#4c78a8']
+            )),
+        ).properties(
+            width=400,
+            height=200,
+            title=norm,
+        )
+        rows.append(row_chart)
+
+    chart = alt.vconcat(*rows).properties(
         title='Class separation at CpG center: IPD under each normalization'
     )
 
