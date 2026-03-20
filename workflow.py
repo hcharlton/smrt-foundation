@@ -353,7 +353,7 @@ def validate_memmap(memmap_path, config_path):
 
 # pipeline logic
 
-def process_ssl_dataset(name, data):
+def process_dataset(name, data):
     if IS_GEFION:
         gwf.target_from_template(
             name=f"mock_bam_{name}",
@@ -384,6 +384,31 @@ def process_ssl_dataset(name, data):
                 shards=0
             )
         )
+        # v1 with fwd kinetics only (experiment 17)
+        if name in ('cpg_pos', 'cpg_neg'):
+            gwf.target_from_template(
+                name=f'{name}_fwd_kin_memmap',
+                template=memmap_cpg_conversion(
+                    zarr_path=zarr_target.outputs['out_file'],
+                    output_path=f'data/01_processed/val_sets/{name}_fwd_kin.memmap',
+                    config_path=CONFIG['data_config'],
+                    profile=True,
+                    normalize=False,
+                    shards=0,
+                    fwd_features=['seq', 'fi', 'fp'],
+                    rev_features=['seq', 'fi', 'fp'],
+                )
+            )
+            # v2 clean rewrite (experiment 18)
+            gwf.target_from_template(
+                name=f'{name}_v2_memmap',
+                template=memmap_cpg_conversion_v2(
+                    zarr_path=zarr_target.outputs['out_file'],
+                    output_path=f'data/01_processed/val_sets/{name}_v2.memmap',
+                    config_path=CONFIG['data_config'],
+                    profile=True,
+                )
+            )
         return
 
     memmap_target = gwf.target_from_template(
@@ -469,35 +494,7 @@ def process_ssl_dataset(name, data):
 
 # loop to create ssl targets
 for name, data in CONFIG['ssl_datasets'].items():
-    process_ssl_dataset(name, data)
-
-# --- v2 CpG memmaps (experiment 18: clean rewrite mirroring legacy extraction) ---
-for suffix in ('pos', 'neg'):
-    gwf.target_from_template(
-        name=f'cpg_{suffix}_v2_memmap',
-        template=memmap_cpg_conversion_v2(
-            zarr_path=CONFIG['ssl_datasets'][f'cpg_{suffix}']['zarr'],
-            output_path=f'data/01_processed/val_sets/cpg_{suffix}_v2.memmap',
-            config_path=CONFIG['data_config'],
-            profile=True,
-        )
-    )
-
-# --- fwd-kinetics-only CpG memmaps (experiment 17: use fi/fp for both strands) ---
-for suffix in ('pos', 'neg'):
-    gwf.target_from_template(
-        name=f'cpg_{suffix}_fwd_kin_memmap',
-        template=memmap_cpg_conversion(
-            zarr_path=CONFIG['ssl_datasets'][f'cpg_{suffix}']['zarr'],
-            output_path=f'data/01_processed/val_sets/cpg_{suffix}_fwd_kin.memmap',
-            config_path=CONFIG['data_config'],
-            profile=True,
-            normalize=False,
-            shards=0,
-            fwd_features=['seq', 'fi', 'fp'],
-            rev_features=['seq', 'fi', 'fp'],  # use forward kinetics for reverse strand too
-        )
-    )
+    process_dataset(name, data)
 
 gwf.target_from_template(
     name='legacy_parquet_subset',
