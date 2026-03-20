@@ -73,12 +73,16 @@ def main():
     # val_ds = LabeledMemmapDataset(config.get('pos_data_val'), config.get('neg_data_val'), limit=config_updated['ds_limit'])
     # val_dl = DataLoader(val_ds, batch_size=config_updated['batch_size'], num_workers=4, pin_memory=True, prefetch_factor=4, shuffle=True)
     print('insantiating stats df')
-    df = pl.read_parquet(config.get('legacy_train')).head(1_000_000)
+    q = (
+        pl.scan_parquet(config.get('legacy_train'))
+        .head(1_000_000)
+    )
+    df = q.collect()
     print('calculating statistics)')
     KINETICS_FEATURES = ['fi', 'fp', 'ri', 'rp']
     train_means, train_stds = compute_log_normalization_stats(df, KINETICS_FEATURES)
     print('init train ds')
-    train_ds = LegacyMethylDataset(config.get('legacy_train'), train_means, train_stds, context=32, restrict_row_groups=10)
+    train_ds = LegacyMethylDataset(config.get('legacy_train'), train_means, train_stds, context=32, restrict_row_groups=10, single_strand=True)
     print(len(train_ds))
     print('init train dl')
     train_dl = DataLoader(train_ds,
@@ -94,7 +98,8 @@ def main():
                                 means=train_means,
                                 stds=train_stds,
                                 context=32,
-                                restrict_row_groups=10)
+                                restrict_row_groups=10,
+                                single_strand=True)
     val_dl = DataLoader(val_ds,
                         batch_size=256,
                         drop_last=True,
