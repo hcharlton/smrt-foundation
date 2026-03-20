@@ -4,19 +4,23 @@ from pathlib import Path
 import gwf
 from gwf import Workflow, AnonymousTarget
 
-# determine whether we're on gefion or genomedk
+
+############################# ENVIRONMENT ######################################
+
 curr_dir = os.getcwd()
 IS_GEFION = curr_dir.startswith('/dcai')
 
 if IS_GEFION:
     root_dir = '/dcai/projects/cu_0030/smrt-foundation'
-    # gefion does not require account specification
-    gwf_defaults = {} 
+    gwf_defaults = {}
 else:
     root_dir = '/home/chcharlton/mutationalscanning/Workspaces/chcharlton/smrt-foundation'
     gwf_defaults = {'account': 'mutationalscanning'}
-# idea here is that we can just add more dataset parameters,
-# and then they'll get processed. We only have to modify the config
+
+
+############################# CONFIG ###########################################
+
+# Add more dataset entries here and they'll get processed automatically.
 CONFIG = {
     'project_root': root_dir,
     'ssl_config': 'configs/ssl.yaml',
@@ -28,7 +32,7 @@ CONFIG = {
         'chunk_stride': 5,
         'idx_stride': 20,
     },
-    'ssl_datasets': {
+    'datasets': {
         # not on gefion yet
         # 'da1': {
         #     'bam': 'data/00_raw/unlabeled/da1_kinetics_diploid.bam',
@@ -80,13 +84,18 @@ CONFIG = {
         }
     }
 }
-# worklflow initaliazation
+
+# workflow initialization
 gwf = Workflow(defaults=gwf_defaults)
 
 def p(path):
     return os.path.join(CONFIG['project_root'], path)
 
-# templates
+
+############################# TEMPLATES ########################################
+
+# --- utility ---
+
 def mock_file(output_path):
     """
     Creates an empty file with an old timestamp (Year 2000).
@@ -95,14 +104,16 @@ def mock_file(output_path):
     inputs = {}
     outputs = {'out_file': output_path}
     options = {'cores': 1, 'memory': '1gb', 'walltime': '00:10:00'}
-    
+
     spec = f"""
     mkdir -p $(dirname {output_path})
     touch -t 200001010000 {output_path}
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
-# bam -> zarr
+
+# --- data pipeline ---
+
 def zarr_conversion(bam_path, output_path, n_reads, optional_tags, config, profile=False):
     inputs = {'in_file': bam_path}
     outputs = {'out_file': output_path}
@@ -135,50 +146,7 @@ def zarr_conversion(bam_path, output_path, n_reads, optional_tags, config, profi
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
-# legacy (ignore)
-def create_ssl_dataset(bam_path, output_path, n_reads, context, optional_tags, denomination, config):
-    inputs = {'in_file': bam_path}
-    outputs = {'out_file': output_path}
 
-    tags_str = ' '.join(optional_tags)
-
-    options = {'cores': 16, 'memory': '128gb', 'walltime': '01:00:00'}
-    spec = f"""
-    source $(conda info --base)/etc/profile.d/conda.sh
-    conda activate data_prep
-    cd {p('')}
-    python -m scripts.make_ssl_dataset \
-        --input {bam_path} \
-        --n_reads {n_reads} \
-        --context {context} \
-        --output_path {output_path} \
-        --optional_tags {tags_str} \
-        --config {config} \
-        --denomination {denomination}
-    """
-    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
-
-# zarr -> zarr + normalization stats in json
-def inject_norm_stats(zarr_path, chunk_stride, idx_stride, num_threads):
-    sentinel = f"{zarr_path}.stats_added"
-    inputs = {'infile': zarr_path}
-    outputs = {'sentinel': sentinel}
-    options = {'cores': num_threads, 'memory': '256gb', 'walltime': '02:00:00'}
-
-    spec = f"""
-    source $(conda info --base)/etc/profile.d/conda.sh
-    conda activate data_prep
-    cd {p('')}
-    python -m scripts.inject_norm_stats \
-        --input_path {zarr_path} \
-        --chunk_stride {chunk_stride} \
-        --idx_stride {idx_stride} \
-        --num_threads {num_threads}
-    touch {sentinel}
-    """
-    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
-
-## zarr -> memmap (can be normalized or not dep on flag)
 def memmap_conversion(
     zarr_path,
     output_path,
@@ -333,6 +301,8 @@ import os; os.remove('{output_path}.pos.tmp'); os.remove('{output_path}.neg.tmp'
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
 
+# --- validation ---
+
 def validate_memmap(memmap_path, config_path):
     inputs = {'in_file': memmap_path}
     outputs = {'out_file': os.path.join(memmap_path, 'validation.log')}
@@ -351,7 +321,109 @@ def validate_memmap(memmap_path, config_path):
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
 
-# pipeline logic
+def inject_norm_stats(zarr_path, chunk_stride, idx_stride, num_threads):
+    sentinel = f"{zarr_path}.stats_added"
+    inputs = {'infile': zarr_path}
+    outputs = {'sentinel': sentinel}
+    options = {'cores': num_threads, 'memory': '256gb', 'walltime': '02:00:00'}
+
+    spec = f"""
+    source $(conda info --base)/etc/profile.d/conda.sh
+    conda activate data_prep
+    cd {p('')}
+    python -m scripts.inject_norm_stats \
+        --input_path {zarr_path} \
+        --chunk_stride {chunk_stride} \
+        --idx_stride {idx_stride} \
+        --num_threads {num_threads}
+    touch {sentinel}
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+
+# --- training ---
+
+def train_ssl(config_path, input_memmap):
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+
+    exp_type = config.get('experiment_type', 'ssl')
+    exp_name = config.get('experiment_name', 'smrt_experiment')
+
+    sentinel_path = p(f"training_logs/{exp_type}/{exp_name}/run.sentinel")
+    inputs = {'config': config_path, 'memmap': input_memmap}
+    outputs = {'sentinel': sentinel_path}
+
+    options = {'cores': 16, 'memory': '64gb', 'walltime': '3:00:00', 'gres': 'gpu:8'}
+
+    spec = f"""
+    source .venv/bin/activate
+    cd {p('')}
+    accelerate launch --num_processes=8 --mixed_precision='no' scripts/train_ssl.py {config_path}
+    touch {sentinel_path}
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+
+def train_supervised(config_path, script_path):
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+
+    exp_type = config.get('experiment_type', 'supervised')
+    exp_name = config.get('experiment_name', 'supervised_experiment')
+
+    sentinel_path = p(f"training_logs/{exp_type}/{exp_name}/run.sentinel")
+    sentinel_path = p(f"{Path(script_path).parent}/run.sentinel")
+    inputs = {'config': config_path}
+    outputs = {'sentinel': sentinel_path}
+
+    options = {'cores': 16, 'memory': '64gb', 'walltime': '3:00:00', 'gres': 'gpu:8'}
+
+    spec = f"""
+    source .venv/bin/activate
+    cd {p('')}
+    accelerate launch --num_processes=8 --mixed_precision='no' {script_path} {config_path}
+    touch {sentinel_path}
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+
+# --- plotting ---
+
+def make_plot(script_path):
+    inputs = {}
+    output_path = f"{os.path.dirname(script_path)}/plot.svg"
+    outputs = {'output': output_path}
+
+    options ={'cores': 16, 'memory': '64gb', 'walltime': '00:30:00'}
+
+    spec = f"""
+    source .venv/bin/activate
+    cd {p('')}
+    python {script_path} --output_path {output_path}
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+
+# --- testing ---
+
+def run_test(test_module_path):
+    module_name = Path(test_module_path).stem
+    sentinel = p(f"tests/{module_name}.sentinel")
+    inputs = {}
+    outputs = {'sentinel': sentinel}
+    options = {'cores': 4, 'memory': '32gb', 'walltime': '01:00:00'}
+
+    spec = f"""
+    source .venv/bin/activate
+    cd {p('')}
+    python -m pytest {test_module_path} -v --tb=short
+    touch {sentinel}
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+
+############################# PIPELINE LOGIC ###################################
 
 def process_dataset(name, data):
     if IS_GEFION:
@@ -447,7 +519,7 @@ def process_dataset(name, data):
         )
     )
 
-    
+
     gwf.target_from_template(
         name=f'{name}_validation',
         template=validate_memmap(
@@ -455,7 +527,7 @@ def process_dataset(name, data):
             config_path=CONFIG['data_config']
         )
     )
-    
+
     if name == 'ob007':
         gwf.target_from_template(
             name='stats_test',
@@ -483,7 +555,7 @@ def process_dataset(name, data):
                 normalize=True
             )
         )
-        
+
         gwf.target_from_template(
             name='validate_memmap_test',
             template=validate_memmap(
@@ -492,8 +564,11 @@ def process_dataset(name, data):
             )
         )
 
-# loop to create ssl targets
-for name, data in CONFIG['ssl_datasets'].items():
+
+############################# TARGETS ##########################################
+
+# --- data pipeline ---
+for name, data in CONFIG['datasets'].items():
     process_dataset(name, data)
 
 gwf.target_from_template(
@@ -505,78 +580,7 @@ gwf.target_from_template(
     )
 )
 
-
-############################### TRAINING #######################################
-
-def train_ssl(config_path, input_memmap):
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    exp_type = config.get('experiment_type', 'ssl')
-    exp_name = config.get('experiment_name', 'smrt_experiment')
-    
-    sentinel_path = p(f"training_logs/{exp_type}/{exp_name}/run.sentinel")
-    inputs = {'config': config_path, 'memmap': input_memmap}
-    outputs = {'sentinel': sentinel_path}
-    
-    options = {'cores': 16, 'memory': '64gb', 'walltime': '3:00:00', 'gres': 'gpu:8'}
-        
-    spec = f"""
-    source .venv/bin/activate
-    cd {p('')}
-    accelerate launch --num_processes=8 --mixed_precision='no' scripts/train_ssl.py {config_path}
-    touch {sentinel_path}
-    """
-    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
-
-def train_supervised(config_path, script_path):
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    exp_type = config.get('experiment_type', 'supervised')
-    exp_name = config.get('experiment_name', 'supervised_experiment')
-    
-    sentinel_path = p(f"training_logs/{exp_type}/{exp_name}/run.sentinel")
-    sentinel_path = p(f"{Path(script_path).parent}/run.sentinel")
-    inputs = {'config': config_path}
-    outputs = {'sentinel': sentinel_path}
-    
-    options = {'cores': 16, 'memory': '64gb', 'walltime': '3:00:00', 'gres': 'gpu:8'}
-        
-    spec = f"""
-    source .venv/bin/activate
-    cd {p('')}
-    accelerate launch --num_processes=8 --mixed_precision='no' {script_path} {config_path}
-    touch {sentinel_path}
-    """
-    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
-
-# reusable training target
-# with open(CONFIG['ssl_config'], 'r') as f:
-#     exp_config = yaml.safe_load(f)
-
-# target_ds = exp_config.get('ssl_dataset', 'ob007')
-# memmap_path = f'data/01_processed/ssl_sets/{target_ds}'
-
-# gwf.target_from_template(
-#     name=f"{exp_config.get('experiment_type', 'smrt_experiment')}_exp",
-#     template=train_ssl(
-#         config_path=CONFIG['ssl_config'],
-#         input_memmap=memmap_path
-#     )
-# )
-
-
-# with open(CONFIG['supervised_config'], 'r') as f:
-#     supervised_config = yaml.safe_load(f)
-
-# gwf.target_from_template(
-#     name=f"{supervised_config.get('experiment_type', 'supervised_experiment')}_exp",
-#     template=train_supervised(
-#         config_path=CONFIG['supervised_config']
-#     )
-# )
-
+# --- training (auto-discovers scripts/experiments/*/train.py) ---
 for path in Path('./scripts/experiments').rglob('train.py'):
     gwf.target_from_template(
         name=f"exp_{path.parent.name}",
@@ -586,49 +590,14 @@ for path in Path('./scripts/experiments').rglob('train.py'):
         )
     )
 
-
-############################### Plotting #######################################
-
-def make_plot(script_path):
-    inputs = {}
-    output_path = f"{os.path.dirname(script_path)}/plot.svg"
-    outputs = {'output': output_path}
-    
-    options ={'cores': 16, 'memory': '64gb', 'walltime': '00:30:00'}
-        
-    spec = f"""
-    source .venv/bin/activate
-    cd {p('')}
-    python {script_path} --output_path {output_path}
-    """
-    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
-
-ploting_dir = './report/eda'
-
-for path in Path(ploting_dir).rglob('plot.py'):
+# --- plotting (auto-discovers report/eda/*/plot.py) ---
+for path in Path('./report/eda').rglob('plot.py'):
     gwf.target_from_template(
             name=f"plot_{path.parent.name}",
             template=make_plot(str(path))
         )
 
-
-############################### Testing ########################################
-
-def run_test(test_module_path):
-    module_name = Path(test_module_path).stem
-    sentinel = p(f"tests/{module_name}.sentinel")
-    inputs = {}
-    outputs = {'sentinel': sentinel}
-    options = {'cores': 4, 'memory': '32gb', 'walltime': '01:00:00'}
-
-    spec = f"""
-    source .venv/bin/activate
-    cd {p('')}
-    python -m pytest {test_module_path} -v --tb=short
-    touch {sentinel}
-    """
-    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
-
+# --- testing (auto-discovers tests/test_*.py) ---
 for path in Path('./tests').glob('test_*.py'):
     gwf.target_from_template(
         name=f"{path.stem}",
