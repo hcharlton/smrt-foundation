@@ -12,7 +12,7 @@ Contrastive encoder learns, but does not generalize to downstream task.
 ### Strategy
 1. Add online normalization.
     1.1 Use the new dataset class (numpy shards) to do this.
-    1.2. ISSUE: now the direct training is significantly worse (max around 70 percent top1 wheras the legacy version was 81/82). Need to identify the bug (this is a priority)
+    1.2. ISSUE: now the direct training is significantly worse (max around 70 percent top1 wheras the legacy version was 81). Need to identify the bug (this is a priority)
 2. Switch to input masking instead of latent masking (For pretraining)
 
 ### Exploratory analysis of problem
