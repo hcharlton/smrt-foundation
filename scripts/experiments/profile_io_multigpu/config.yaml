@@ -1,0 +1,18 @@
+experiment_type: 'profile'
+experiment_name: 'io_profiling_multigpu'
+run_message: 'isolate IO vs compute bottleneck under real multi-GPU DDP conditions'
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg.memmap/train'
+
+classifier:
+  d_model: 128
+  n_head: 4
+  context: 32
+  n_layers: 4
+  batch_size: 2048
+  ds_limit: 8000000
+
+profile:
+  num_batches: 500
+  num_workers: 4

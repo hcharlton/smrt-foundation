@@ -8,6 +8,9 @@ training_logs/
 *.bundle
 *.stdout
 *.stderr
+*.sentinel
+*.csv
+*.out
 CLAUDE.md
 .gwf/
 # Byte-compiled / optimized / DLL files

@@ -4,15 +4,16 @@ import yaml
 import os
 import sys
 from tqdm import tqdm
+import torch
 
-module_path = os.path.abspath("/dcai/users/chache/smrt-foundation")
+module_path = os.path.abspath("/dcai/projects/cu_0030/smrt-foundation")
 if module_path not in sys.path:
     sys.path.append(module_path)
 
 from smrt_foundation.dataset import LabeledMemmapDataset, ChunkedRandomSampler
 from smrt_foundation.normalization import ZNorm
 
-def profile_cache(dataset, sampler=None, shuffle=False, num_batches=10_000, num_workers=0):
+def profile_cache(dataset, sampler=None, shuffle=False, num_batches=1_000, num_workers=0):
     dataset.cache_hits = 0
     dataset.cache_misses = 0
     loader = DataLoader(dataset, batch_size=256, shuffle=shuffle, sampler=sampler, num_workers=num_workers)
@@ -31,13 +32,17 @@ def profile_cache(dataset, sampler=None, shuffle=False, num_batches=10_000, num_
 with open('./configs/supervised.yaml', 'r') as f:
         config = yaml.safe_load(f)
 
-limit=256*10_000
+limit=64*10_000
 tmp_ds = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_train'))
 norm_fn = ZNorm(tmp_ds)
-ds = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_train'), norm_fn = norm_fn)
+ds = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_train'), norm_fn = norm_fn, balance=True)
 
-sampler = ChunkedRandomSampler(ds, 2048, shuffle_within=True)
+sampler = ChunkedRandomSampler(ds, 2048, shuffle_within=False)
 
-profile_cache(ds, shuffle=False)
+batch = next(iter(DataLoader(ds, batch_size=10_000, shuffle=True)))
+print(batch[0].shape)
+print(torch.mean(batch[1].float()))
+
+# profile_cache(ds, shuffle=False)
 # profile_cache(ds, shuffle=True)
-profile_cache(ds, sampler=sampler)
+# profile_cache(ds, sampler=sampler)

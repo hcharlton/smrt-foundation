@@ -9,7 +9,7 @@ curr_dir = os.getcwd()
 IS_GEFION = curr_dir.startswith('/dcai')
 
 if IS_GEFION:
-    root_dir = '/dcai/users/chache/smrt-foundation'
+    root_dir = '/dcai/projects/cu_0030/smrt-foundation'
     # gefion does not require account specification
     gwf_defaults = {} 
 else:
@@ -423,7 +423,7 @@ def train_ssl(config_path, input_memmap):
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
-def train_supervised(config_path):
+def train_supervised(config_path, script_path):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     
@@ -431,6 +431,7 @@ def train_supervised(config_path):
     exp_name = config.get('experiment_name', 'supervised_experiment')
     
     sentinel_path = p(f"training_logs/{exp_type}/{exp_name}/run.sentinel")
+    sentinel_path = p(f"{Path(script_path).parent}/run.sentinel")
     inputs = {'config': config_path}
     outputs = {'sentinel': sentinel_path}
     
@@ -439,36 +440,45 @@ def train_supervised(config_path):
     spec = f"""
     source .venv/bin/activate
     cd {p('')}
-    accelerate launch --num_processes=1 --mixed_precision='no' scripts/train_supervised.py {config_path}
+    accelerate launch --num_processes=8 --mixed_precision='no' {script_path} {config_path}
     touch {sentinel_path}
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
 # reusable training target
-with open(CONFIG['ssl_config'], 'r') as f:
-    exp_config = yaml.safe_load(f)
+# with open(CONFIG['ssl_config'], 'r') as f:
+#     exp_config = yaml.safe_load(f)
 
-target_ds = exp_config.get('ssl_dataset', 'ob007')
-memmap_path = f'data/01_processed/ssl_sets/{target_ds}'
+# target_ds = exp_config.get('ssl_dataset', 'ob007')
+# memmap_path = f'data/01_processed/ssl_sets/{target_ds}'
 
-gwf.target_from_template(
-    name=f"{exp_config.get('experiment_type', 'smrt_experiment')}_exp",
-    template=train_ssl(
-        config_path=CONFIG['ssl_config'],
-        input_memmap=memmap_path
+# gwf.target_from_template(
+#     name=f"{exp_config.get('experiment_type', 'smrt_experiment')}_exp",
+#     template=train_ssl(
+#         config_path=CONFIG['ssl_config'],
+#         input_memmap=memmap_path
+#     )
+# )
+
+
+# with open(CONFIG['supervised_config'], 'r') as f:
+#     supervised_config = yaml.safe_load(f)
+
+# gwf.target_from_template(
+#     name=f"{supervised_config.get('experiment_type', 'supervised_experiment')}_exp",
+#     template=train_supervised(
+#         config_path=CONFIG['supervised_config']
+#     )
+# )
+
+for path in Path('./scripts/experiments').rglob('train.py'):
+    gwf.target_from_template(
+        name=f"exp_{path.parent.name}",
+        template=train_supervised(
+            config_path=str(path.parent / 'config.yaml'),
+            script_path=str(path)
+        )
     )
-)
-
-
-with open(CONFIG['supervised_config'], 'r') as f:
-    supervised_config = yaml.safe_load(f)
-
-gwf.target_from_template(
-    name=f"{supervised_config.get('experiment_type', 'supervised_experiment')}_exp",
-    template=train_supervised(
-        config_path=CONFIG['supervised_config']
-    )
-)
 
 
 ############################### Plotting #######################################
@@ -515,6 +525,6 @@ def run_test(test_module_path):
 
 for path in Path('./tests').glob('test_*.py'):
     gwf.target_from_template(
-        name=f"test_{path.stem}",
+        name=f"{path.stem}",
         template=run_test(str(path))
     )

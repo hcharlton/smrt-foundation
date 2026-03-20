@@ -29,14 +29,15 @@ legacy_train_means, legacy_train_stds = compute_log_normalization_stats(train_df
 
 tmp_ds = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_train'), limit=int(2626190))
 norm_fn = ZNorm(tmp_ds)
-ds_new = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_train'), norm_fn=norm_fn, limit=int(2626190))
+ds_new = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_train'), norm_fn=None, limit=int(2626190))
 
 ds_legacy = LegacyMethylDataset('data/01_processed/val_sets/pacbio_standard_train.parquet',
                                 means=legacy_train_means,
                                 stds=legacy_train_stds,
                                 context=32,
                                 single_strand=True,
-                                restrict_row_groups=5)
+                                restrict_row_groups=5,
+                                norm=False)
 print('calculating lengths')
 print(len(ds_new))
 print(len(ds_legacy))

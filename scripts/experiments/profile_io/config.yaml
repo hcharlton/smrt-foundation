@@ -1,0 +1,18 @@
+experiment_type: 'profile'
+experiment_name: 'io_profiling'
+run_message: 'isolate IO vs compute bottleneck in supervised dataloader'
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg.memmap/train'
+
+classifier:
+  d_model: 128
+  n_head: 4
+  context: 32
+  n_layers: 4
+  batch_size: 2048
+  ds_limit: 2000000
+
+profile:
+  num_batches: 500
+  num_workers_sweep: [0, 2, 4, 8]

@@ -1,5 +1,16 @@
-import sys
+"""
+Supervised CpG methylation classifier training.
+
+Usage:
+    accelerate launch experiments/<experiment_name>/train.py
+    accelerate launch --num_processes=1 experiments/<experiment_name>/train.py
+
+Config is loaded from config.yaml in the same directory as this script.
+Tensorboard logs go to training_logs/ at the project root.
+"""
+
 import os
+import sys
 import subprocess
 import yaml
 import torch
@@ -10,6 +21,8 @@ from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import set_seed
 from torchmetrics.classification import BinaryF1Score, BinaryAUROC, BinaryAveragePrecision, BinaryAccuracy
 
+
+import sys 
 module_path = os.path.abspath("/dcai/projects/cu_0030/smrt-foundation")
 if module_path not in sys.path:
     sys.path.append(module_path)
@@ -19,27 +32,24 @@ from smrt_foundation.model import DirectClassifier
 from smrt_foundation.optim import get_cosine_schedule_with_warmup
 from smrt_foundation.normalization import ZNorm
 
-def get_git_revision_hash():
-    try:
-        return subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
-    except Exception:
-        return "unknown"
+EXP_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(EXP_DIR, 'config.yaml')
+
+DEFAULT = {
+    'd_model': 128, 'n_layers': 4, 'n_head': 4, 'context': 128,
+    'batch_size': 64, 'epochs': 10, 'ds_limit': 2_000_000,
+    'max_lr': 1e-3, 'temperature': 0.1, 'p_mask': 0.05,
+    'weight_decay': 0.02, 'pct_start': 0.4,
+}
+
+
 
 def main():
-    config_path = sys.argv[1]
-    with open(config_path, 'r') as f:
+    with open(CONFIG_PATH, 'r') as f:
         config = yaml.safe_load(f)
-
-    DEFAULT = {
-        'd_model': 128, 'n_layers': 4, 'n_head': 4, 'context': 128,
-        'batch_size': 64, 'epochs': 10, 'ds_limit': 2_000_000,
-        'max_lr': 1e-3, 'temperature': 0.1, 'p_mask': 0.05,
-        'weight_decay': 0.02, 'pct_start': 0.4,
-    }
 
     config_updated = DEFAULT | config.get('classifier', {})
     config['classifier'] = config_updated
-    config['git_hash'] = get_git_revision_hash()
 
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
@@ -65,25 +75,25 @@ def main():
         with open(os.path.join(run_dir, "hparams.yaml"), "w") as f:
             yaml.dump(config, f)
         tracker.writer.add_text("Full_Config", f"```yaml\n{yaml.dump(config, indent=2)}\n```", 0)
-    
+
     tmp_ds = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_train'), limit=config_updated['ds_limit'])
     train_norm_fn = ZNorm(tmp_ds)
 
     train_ds = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_train'), limit=config_updated['ds_limit'], norm_fn=train_norm_fn, balance=True)
     print(len(train_ds))
     train_sampler = ChunkedRandomSampler(train_ds, 2048, shuffle_within=False) 
-    train_dl = DataLoader(train_ds, batch_size=config_updated['batch_size'], num_workers=4, pin_memory=True, prefetch_factor=4, shuffle=True)
+    train_dl = DataLoader(train_ds, batch_size=config_updated['batch_size'], num_workers=4, pin_memory=True, prefetch_factor=4, sampler=train_sampler)
 
     val_ds = LabeledMemmapDataset(config.get('pos_data_val'), config.get('neg_data_val'), limit=config_updated['ds_limit'], norm_fn=train_norm_fn)
     val_dl = DataLoader(val_ds, batch_size=config_updated['batch_size'], num_workers=4, pin_memory=True, prefetch_factor=4, shuffle=False)
 
     model = DirectClassifier(
-        d_model=config_updated['d_model'], 
+        d_model=config_updated['d_model'],
         n_layers=config_updated['n_layers'],
-        n_head=config_updated['n_head'], 
+        n_head=config_updated['n_head'],
         max_len=config_updated['context']
     )
-    
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(config_updated['max_lr']), weight_decay=config_updated['weight_decay'])
     criterion = nn.BCEWithLogitsLoss()
 
@@ -95,11 +105,11 @@ def main():
     scheduler = accelerator.prepare(scheduler)
 
     f1_metric, auroc_metric, auprc_metric, acc_metric = accelerator.prepare(
-    BinaryF1Score(),
-    BinaryAUROC(),
-    BinaryAveragePrecision(),
-    BinaryAccuracy()
-)
+        BinaryF1Score(),
+        BinaryAUROC(),
+        BinaryAveragePrecision(),
+        BinaryAccuracy()
+    )
 
     global_step = 0
 
@@ -111,12 +121,12 @@ def main():
         for x, y in progress_bar:
             logits = model(x)
             loss = criterion(logits, y.unsqueeze(1).to(torch.float32))
-            
+
             optimizer.zero_grad()
             accelerator.backward(loss)
             optimizer.step()
             scheduler.step()
-            
+
             global_step += 1
             loss_reduced = accelerator.reduce(loss, reduction="mean").item()
             epoch_loss += loss_reduced
@@ -134,16 +144,14 @@ def main():
         accelerator.log({"epoch_avg_loss": avg_epoch_loss}, step=global_step)
 
         model.eval()
-        total_count = 0
-        total_correct = 0
-        eval_progress = tqdm(val_dl, desc=f"Eval set run {epoch+1}/{config_updated['epochs']}", disable=not accelerator.is_main_process)
-        
+        eval_progress = tqdm(val_dl, desc=f"Eval {epoch+1}/{config_updated['epochs']}", disable=not accelerator.is_main_process)
+
         for x, y in eval_progress:
             with torch.no_grad():
                 logits = model(x)
-                
+
             y_hat, y, logits = accelerator.gather_for_metrics((logits > 0, y, logits))
-            
+
             f1_metric.update(y_hat.squeeze(-1), y.long())
             auroc_metric.update(logits.squeeze(-1), y.long())
             auprc_metric.update(logits.squeeze(-1), y.long())
@@ -167,6 +175,7 @@ def main():
         }, step=global_step)
 
     accelerator.end_training()
+
 
 if __name__ == "__main__":
     main()
