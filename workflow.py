@@ -443,6 +443,22 @@ def process_ssl_dataset(name, data):
 for name, data in CONFIG['ssl_datasets'].items():
     process_ssl_dataset(name, data)
 
+# --- fwd-kinetics-only CpG memmaps (experiment 17: use fi/fp for both strands) ---
+for suffix in ('pos', 'neg'):
+    gwf.target_from_template(
+        name=f'cpg_{suffix}_fwd_kin_memmap',
+        template=memmap_cpg_conversion(
+            zarr_path=CONFIG['ssl_datasets'][f'cpg_{suffix}']['zarr'],
+            output_path=f'data/01_processed/val_sets/cpg_{suffix}_fwd_kin.memmap',
+            config_path=CONFIG['data_config'],
+            profile=True,
+            normalize=False,
+            shards=0,
+            fwd_features=['seq', 'fi', 'fp'],
+            rev_features=['seq', 'fi', 'fp'],  # use forward kinetics for reverse strand too
+        )
+    )
+
 gwf.target_from_template(
     name='legacy_parquet_subset',
     template=legacy_parquet_conversion(

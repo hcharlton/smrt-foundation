@@ -1,0 +1,21 @@
+experiment_type: 'supervised'
+experiment_name: '17_fwd_kin_only'
+run_message: 'Test H-B: use fi/fp for both forward and reverse strand windows (matching legacy behavior). Isolates kinetics mixing as a variable.'
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_fwd_kin.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_fwd_kin.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_fwd_kin.memmap/val'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_fwd_kin.memmap/val'
+
+classifier:
+  d_model: 128
+  n_head: 4
+  context: 32
+  n_layers: 4
+  vocab_size: 5
+  weight_decay: 0.02
+  epochs: 12
+  ds_limit: 2000000
+  batch_size: 256
+  optimizer: 'AdamW'
+  max_lr: 3e-3
+  pct_start: 0.5
