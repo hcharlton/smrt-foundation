@@ -28,7 +28,7 @@ from smrt_foundation.normalization import normalize_read_mad
 from smrt_foundation.dataset import compute_log_normalization_stats
 
 
-def load_all_shards(directory, max_samples=100_000):
+def load_all_shards(directory, max_samples=50_000):
     paths = sorted(glob.glob(os.path.join(directory, "shard_*.npy")))
     if not paths:
         return np.empty((0,))
@@ -45,12 +45,15 @@ def load_all_shards(directory, max_samples=100_000):
 
 
 def main(output_path):
-    alt.data_transformers.enable('vegafusion')
-
     with open('./configs/data.yaml', 'r') as f:
         data_config = yaml.safe_load(f)
     with open('./configs/supervised.yaml', 'r') as f:
         sup_config = yaml.safe_load(f)
+
+    # Fallback to subset data if full dataset not available
+    if not os.path.isdir(os.path.expandvars(sup_config.get('pos_data_train', ''))):
+        sup_config['pos_data_train'] = 'data/01_processed/val_sets/cpg_pos_subset.memmap/train'
+        sup_config['neg_data_train'] = 'data/01_processed/val_sets/cpg_neg_subset.memmap/train'
 
     context = data_config['cpg_pipeline']['context']
 
@@ -72,7 +75,7 @@ def main(output_path):
     is_continuous = np.array([False, True, True, False])
     rng = np.random.default_rng(42)
 
-    def mad_normalize_all(data, n_samples=20_000):
+    def mad_normalize_all(data, n_samples=10_000):
         idx = rng.choice(len(data), min(n_samples, len(data)), replace=False)
         out = np.full((len(idx), context), np.nan, dtype=np.float64)
         for j, i in enumerate(idx):
@@ -91,11 +94,15 @@ def main(output_path):
 
     # ---- Legacy log-Z ----
     legacy_path = 'data/01_processed/val_sets/pacbio_standard_train.parquet'
+    if not os.path.exists(legacy_path):
+        legacy_path = 'data/01_processed/val_sets/legacy_subset_train.parquet'
     kin_feats = ['fi', 'fp', 'ri', 'rp']
     if os.path.exists(legacy_path):
-        q = pl.scan_parquet(legacy_path).head(200_000)
-        df = q.collect()
+        df = pl.read_parquet(legacy_path)
+        if len(df) > 50_000:
+            df = df.sample(n=50_000, seed=42)
         df = df.with_columns([pl.col(c).list.to_array(context) for c in kin_feats])
+        df = df.with_columns([pl.col(c).cast(pl.Array(pl.Float64, context)) for c in kin_feats])
         means, stds = compute_log_normalization_stats(df, kin_feats)
         fi_all = df['fi'].to_numpy().astype(np.float64)
         labels = df['label'].to_numpy()
@@ -131,31 +138,31 @@ def main(output_path):
     # CpG center annotation
     cpg_center = (context - 2) // 2
 
-    base = alt.Chart(df).mark_line(strokeWidth=2).encode(
-        alt.X('position:Q').title('Position in window'),
-        alt.Y('value:Q').title('Mean IPD'),
-        alt.Color('class:N', scale=alt.Scale(
-            domain=['methylated', 'unmethylated'],
-            range=['#e45756', '#4c78a8']
-        )),
-        alt.StrokeDash('class:N', scale=alt.Scale(
-            domain=['methylated', 'unmethylated'],
-            range=[[1, 0], [5, 5]]
-        )),
-    ).properties(
-        width=500,
-        height=180,
-    )
+    norms = ['1. Raw (uint8)', '2. Per-read MAD', '3. Legacy log-Z']
+    rows = []
+    for norm in norms:
+        row_df = df.filter(pl.col('normalization') == norm)
+        lines = alt.Chart(row_df).mark_line(strokeWidth=2).encode(
+            alt.X('position:Q').title('Position in window'),
+            alt.Y('value:Q').title('Mean IPD'),
+            alt.Color('class:N', scale=alt.Scale(
+                domain=['methylated', 'unmethylated'],
+                range=['#e45756', '#4c78a8']
+            )),
+            alt.StrokeDash('class:N', scale=alt.Scale(
+                domain=['methylated', 'unmethylated'],
+                range=[[1, 0], [5, 5]]
+            )),
+        )
+        rule = alt.Chart(row_df).mark_rule(
+            color='gray', strokeDash=[3, 3], opacity=0.6
+        ).encode(x=alt.datum(cpg_center))
+        row_chart = alt.layer(lines, rule).properties(
+            width=500, height=180, title=norm,
+        )
+        rows.append(row_chart)
 
-    rule = alt.Chart(pl.DataFrame({'x': [cpg_center]})).mark_rule(
-        color='gray', strokeDash=[3, 3], opacity=0.6
-    ).encode(x='x:Q')
-
-    chart = alt.layer(base, rule).facet(
-        row=alt.Row('normalization:N').title('Normalization'),
-    ).resolve_scale(
-        y='independent',
-    ).properties(
+    chart = alt.vconcat(*rows).properties(
         title='Mean IPD profile across CpG window: methylated vs unmethylated'
     )
 

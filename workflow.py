@@ -63,6 +63,20 @@ CONFIG = {
             'memmap_filter_qual':  'data/01_processed/val_sets/cpg_neg_filter_qual.memmap',
             'optional_tags': [],
             'n_reads': 0,
+        },
+        'cpg_pos_subset':{
+            'bam': 'data/00_raw/labeled/methylated_subset.bam',
+            'zarr': 'data/01_processed/ssl_sets/cpg_pos_subset.zarr',
+            'memmap': 'data/01_processed/val_sets/cpg_pos_subset.memmap',
+            'optional_tags': [],
+            'n_reads': 0,
+        },
+        'cpg_neg_subset':{
+            'bam': 'data/00_raw/labeled/unmethylated_subset.bam',
+            'zarr': 'data/01_processed/ssl_sets/cpg_neg_subset.zarr',
+            'memmap': 'data/01_processed/val_sets/cpg_neg_subset.memmap',
+            'optional_tags': [],
+            'n_reads': 0,
         }
     }
 }
@@ -259,6 +273,37 @@ def memmap_cpg_conversion(
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
 
+def legacy_parquet_conversion(pos_bam, neg_bam, output_path, context=32):
+    inputs = {'pos_bam': pos_bam, 'neg_bam': neg_bam}
+    outputs = {'out_file': output_path}
+
+    options = {'cores': 4, 'memory': '32gb', 'walltime': '01:00:00'}
+
+    spec = f"""
+    source $(conda info --base)/etc/profile.d/conda.sh
+    conda activate data_prep
+    cd {p('')}
+
+    python -m archive.make_legacy_labeled_dataset \
+        --input_path {pos_bam} \
+        --output_path {output_path}.pos.tmp \
+        --context {context} \
+        --label 1
+    python -m archive.make_legacy_labeled_dataset \
+        --input_path {neg_bam} \
+        --output_path {output_path}.neg.tmp \
+        --context {context} \
+        --label 0
+    python -c "
+import pyarrow.parquet as pq, pyarrow as pa
+t1 = pq.read_table('{output_path}.pos.tmp')
+t2 = pq.read_table('{output_path}.neg.tmp')
+pq.write_table(pa.concat_tables([t1, t2]), '{output_path}')
+import os; os.remove('{output_path}.pos.tmp'); os.remove('{output_path}.neg.tmp')
+"
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
 
 def validate_memmap(memmap_path, config_path):
     inputs = {'in_file': memmap_path}
@@ -398,6 +443,14 @@ def process_ssl_dataset(name, data):
 for name, data in CONFIG['ssl_datasets'].items():
     process_ssl_dataset(name, data)
 
+gwf.target_from_template(
+    name='legacy_parquet_subset',
+    template=legacy_parquet_conversion(
+        pos_bam='data/00_raw/labeled/methylated_subset.bam',
+        neg_bam='data/00_raw/labeled/unmethylated_subset.bam',
+        output_path='data/01_processed/val_sets/legacy_subset_train.parquet',
+    )
+)
 
 
 ############################### TRAINING #######################################
