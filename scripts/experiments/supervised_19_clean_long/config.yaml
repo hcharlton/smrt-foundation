@@ -1,6 +1,6 @@
 experiment_type: 'supervised'
 experiment_name: '19_v2_clean_shards_long'
-run_message: 'Train on shards from zarr_to_methyl_memmap_v2 with a 4x epoch"
+run_message: 'Train on shards from zarr_to_methyl_memmap_v2 with a 4x epoch'
 neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
 pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
 neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
