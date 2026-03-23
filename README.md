@@ -8,16 +8,30 @@ Use an info-NCE loss on masked latents in a 4096 sequence of SMRT. This involves
 Binary classification task of a fixed context window around CpG sites for a single strand of the sequence. So we take say 32 base pairs of data and feed that into the encoder and then attach a shallow classification head to make a logit for classification. 
 
 ## Status
-Contrastive encoder learns, but does not generalize to downstream task.
-### Strategy
-1. Add online normalization.
-    1.1 Use the new dataset class (numpy shards) to do this.
-    1.2. ISSUE: now the direct training is significantly worse (max around 70 percent top1 wheras the legacy version was 81). Need to identify the bug (this is a priority)
-2. Switch to input masking instead of latent masking (For pretraining)
 
-### Exploratory analysis of problem
-- analyze the encoder outputs (histogram of activations?) for both the legacy and new datasets
-- plot by-index means of the two datast
+### Supervised baseline: RESOLVED
+Direct supervised training on v2 memmap shards reaches ~80% top1 (experiment 20 running on full dataset). The 70% regression from the original memmap pipeline was caused by a reverse kinetics misalignment bug in `zarr_to_methyl_memmap.py` — see "Debug new labeled dataset" below.
+
+### Self-supervised pretraining: IN PROGRESS
+Contrastive encoder learns (InfoNCE loss converges), but does not generalize to downstream CpG classification. Analysis identified four blockers:
+1. **Information leakage through CNN receptive field.** The CNN has a 107-base receptive field. With latent masking (masking AFTER the CNN), adjacent unmasked latents share 96% of their input bases with masked positions. The transformer can trivially reconstruct masked positions by interpolating from neighbors — the pretraining task is too easy and doesn't force learning meaningful representations.
+2. **Normalization mismatch**: SSL trains on raw uint8 kinetics (0-255), supervised uses log1p + z-score (~-3 to +3). The `kin_embed` linear layer learns weights calibrated for the wrong input scale, making weight transfer fail.
+3. **No fine-tuning infrastructure**: No code existed to load pretrained weights, freeze/unfreeze layers, or use differential learning rates.
+4. **Sparse masking**: p_mask=0.05 is too easy for the same reason as #1.
+
+### Pretraining strategy
+Experiment 21 (`scripts/experiments/ssl_21_pretrain/`): SSL pretraining with:
+- **Input masking** via `Smrt2VecInputMask` (`model.py`): masks raw kinetics BEFORE the CNN (wav2vec 2.0 style), forcing the encoder to learn without information at masked positions. CNN runs twice per step (masked input for context, unmasked for targets). Replaces the old `Smrt2Vec` latent masking approach (which remains available for comparison).
+- ZNorm log1p normalization matching the supervised pipeline
+- Higher masking: p_mask=0.15, mask_size=10
+- Linear probe evaluation after each epoch (frozen encoder + linear head on labeled data) to track whether representations are becoming useful for classification
+- Model checkpointing for downstream transfer
+
+Experiment 22 (`scripts/experiments/supervised_22_finetune/`): Fine-tune pretrained encoder:
+- Load encoder weights from experiment 21 checkpoint
+- Stage 1: frozen encoder, train classification head only (5 epochs)
+- Stage 2: unfreeze all, differential LR (encoder 3e-4, head 3e-3, 15 epochs)
+- Compare against experiment 20 direct training baseline
 
 ## Process
 ### 1. Infrastructure Registry (`workflow.py`)
