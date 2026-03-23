@@ -23,10 +23,10 @@ if module_path not in sys.path:
     sys.path.insert(0, module_path)
 
 from smrt_foundation.dataset import ShardedMemmapDataset, LabeledMemmapDataset
-from smrt_foundation.model import Smrt2Vec
+from smrt_foundation.model import Smrt2VecInputMask
 from smrt_foundation.loss import AgInfoNCE
 from smrt_foundation.optim import get_cosine_schedule_with_warmup
-from smrt_foundation.normalization import ZNorm
+from smrt_foundation.normalization import KineticsNorm
 
 
 def get_git_revision_hash():
@@ -34,35 +34,6 @@ def get_git_revision_hash():
         return subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
     except Exception:
         return "unknown"
-
-
-class SSLNorm:
-    """ZNorm-style normalization for SSL data (full reads, not CpG windows).
-    Applies log1p + z-score to kinetics channels [1, 2], matching the
-    supervised pipeline's normalization."""
-
-    def __init__(self, ds, eps=1e-8):
-        # Sample a batch to compute statistics
-        dl = DataLoader(ds, batch_size=min(65536, len(ds)), shuffle=True)
-        x = next(iter(dl))
-        x_log = x.clone()
-        x_log[..., [1, 2]] = torch.log1p(x_log[..., [1, 2]])
-        # Only compute from non-padded positions
-        mask = x[..., -1] == 0.0  # mask channel: 0=real, 1=pad
-        self.means = torch.zeros(x.shape[-1])
-        self.stds = torch.ones(x.shape[-1])
-        for c in [1, 2]:
-            vals = x_log[..., c][mask]
-            self.means[c] = vals.mean()
-            self.stds[c] = vals.std()
-        self.eps = eps
-
-    def __call__(self, x):
-        x[..., [1, 2]] = torch.log1p(x[..., [1, 2]])
-        x[..., [1, 2]] -= self.means[[1, 2]]
-        x[..., [1, 2]] /= (self.stds[[1, 2]] + self.eps)
-        return x
-
 
 @torch.no_grad()
 def linear_probe_eval(encoder, probe_config, config, accelerator):
@@ -78,7 +49,7 @@ def linear_probe_eval(encoder, probe_config, config, accelerator):
         config.get('probe_pos_train'), config.get('probe_neg_train'),
         limit=min(probe_limit, 2_000_000)
     )
-    probe_norm = ZNorm(tmp_ds, log_transform=True)
+    probe_norm = KineticsNorm(tmp_ds, log_transform=True)
     del tmp_ds
 
     train_ds = LabeledMemmapDataset(
@@ -187,7 +158,7 @@ def main():
         print(f"SSL dataset: {len(ds)} samples from {memmap_path}")
 
     # Compute normalization stats from SSL data
-    ssl_norm = SSLNorm(ds)
+    ssl_norm = KineticsNorm(ds)
     if accelerator.is_main_process:
         print(f"SSL norm — means: {ssl_norm.means}, stds: {ssl_norm.stds}")
 
@@ -206,7 +177,7 @@ def main():
     dl = DataLoader(normed_ds, batch_size=c['batch_size'], num_workers=2,
                     pin_memory=True, prefetch_factor=4, shuffle=True)
 
-    model = Smrt2Vec(
+    model = Smrt2VecInputMask(
         d_model=c['d_model'], n_layers=c['n_layers'], n_head=c['n_head'],
         max_len=c['context'], p_mask=c['p_mask'], mask_size=c['mask_size']
     )

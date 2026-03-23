@@ -26,7 +26,7 @@ if module_path not in sys.path:
 from smrt_foundation.dataset import LabeledMemmapDataset
 from smrt_foundation.model import DirectClassifier
 from smrt_foundation.optim import get_cosine_schedule_with_warmup
-from smrt_foundation.normalization import ZNorm
+from smrt_foundation.normalization import KineticsNorm
 
 
 def get_git_revision_hash():
@@ -109,9 +109,9 @@ def main():
         tracker.writer.add_text("Full_Config", f"```yaml\n{yaml.dump(config, indent=2)}\n```", 0)
 
     # --- Data ---
-    znorm_limit = min(c.get('ds_limit', 0), 2_000_000) if c.get('ds_limit', 0) > 0 else 2_000_000
-    tmp_ds = LabeledMemmapDataset(config['pos_data_train'], config['neg_data_train'], limit=znorm_limit)
-    train_norm_fn = ZNorm(tmp_ds, log_transform=True)
+    norm_limit = min(c.get('ds_limit', 0), 2_000_000) if c.get('ds_limit', 0) > 0 else 2_000_000
+    tmp_ds = LabeledMemmapDataset(config['pos_data_train'], config['neg_data_train'], limit=norm_limit)
+    train_norm_fn = KineticsNorm(tmp_ds, log_transform=True)
     del tmp_ds
 
     train_ds = LabeledMemmapDataset(
