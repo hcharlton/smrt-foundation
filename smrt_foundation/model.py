@@ -349,7 +349,92 @@ class Smrt2Vec(nn.Module):
 
 
 
-# could this be part of the loss? during the pretraining 
+class Smrt2VecInputMask(nn.Module):
+  """
+  SSL model with input-level masking (wav2vec 2.0 style).
+
+  Masks raw input kinetics BEFORE the CNN, forcing the encoder to learn
+  representations without information at masked positions. The CNN's
+  107-base receptive field means latent masking (Smrt2Vec) leaks information
+  through overlapping receptive fields — this class fixes that.
+
+  Same return signature as Smrt2Vec: (c_proj, targets, mask_idx)
+  Uses the same SmrtEncoder, so pretrained weights transfer to DirectClassifier.
+  """
+  def __init__(self, d_model=128, n_layers=4, n_head=4, max_len=4096, p_mask=0.15, mask_size=10):
+    super().__init__()
+    self.d_model = d_model
+    self.p_mask = p_mask
+    self.mask_size = mask_size
+    self.encoder = SmrtEncoder(d_model, n_layers, n_head, max_len)
+
+    self.project = nn.Sequential(
+        nn.Linear(d_model, d_model),
+        nn.GELU(),
+        nn.Linear(d_model, d_model)
+    )
+
+  def apply_input_mask(self, x, p_mask, mask_size):
+    """Mask kinetics channels at the input level (before CNN).
+
+    Zeros out kinetics (channels 1, 2) at random contiguous spans.
+    Keeps sequence tokens (channel 0) and padding mask (channel 3) intact.
+
+    Returns:
+      x_masked: input with kinetics zeroed at masked positions
+      mask_bool: boolean mask at input resolution [B, T]
+    """
+    B, T, C = x.shape
+    pad = x[..., 3]
+
+    # Sample mask centers, exclude padding
+    mask_centers = (torch.rand(B, T, device=x.device) < p_mask) & ~(pad.bool())
+
+    # Expand centers into contiguous spans
+    mask_full = F.max_pool1d(
+        mask_centers.float().unsqueeze(1),
+        kernel_size=mask_size, stride=1,
+        padding=mask_size // 2
+    ).squeeze(1)[:, :T].bool() & ~(pad.bool())
+
+    # Zero out kinetics at masked positions, keep seq and pad intact
+    x_masked = x.clone()
+    x_masked[mask_full, 1] = 0.0  # fi / IPD
+    x_masked[mask_full, 2] = 0.0  # fp / pulse width
+
+    return x_masked, mask_full
+
+  def _downsample_mask(self, mask, target_len):
+    """Downsample input-resolution mask to CNN output resolution.
+
+    A downsampled position is masked if ANY of its corresponding
+    input positions were masked (conservative — ensures we predict
+    at every position that lost information).
+    """
+    m = mask.float().unsqueeze(1)  # [B, 1, T]
+    # Match the CNN's two stride-2 downsampling blocks
+    m = F.max_pool1d(m, kernel_size=2, stride=2)  # T → T/2
+    m = F.max_pool1d(m, kernel_size=2, stride=2)  # T/2 → T/4
+    return m.squeeze(1).bool()[:, :target_len]
+
+  def forward(self, x):
+    # Targets: unmasked CNN features (no grad needed for targets)
+    with torch.no_grad():
+      _, _, targets = self.encoder.get_latents(x)
+
+    # Masked path: mask input kinetics, then run through full encoder
+    x_masked, input_mask = self.apply_input_mask(x, self.p_mask, self.mask_size)
+    z, z_pad, _ = self.encoder.get_latents(x_masked)
+    z = self.encoder.add_pe(z)
+    c = self.encoder.forward_transformer(z, z_pad)
+    c_proj = self.project(c)
+
+    # Downsample mask to match CNN output resolution
+    ds_mask = self._downsample_mask(input_mask, z.shape[1])
+
+    return c_proj, targets.detach(), ds_mask
+
+
 class DirectClassifier(nn.Module):
   def __init__(self, d_model, n_layers, n_head, max_len):
     super().__init__()
