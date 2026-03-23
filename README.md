@@ -43,19 +43,18 @@ To launch a new experimental iteration:
 ### Debug new labeled dataset
 The legacy dataset class (script at archive/make_legacy_labeled_dataset, dataset at data/01_processed/legacy*.parquet) is performing much better with direct downstream training (using all the model components) than the new dataset class (script at scripts/zarr_to_methyl_memmap.py). I have not been able to figure out why. The reason that I originally made the new dataset class was to upgrade the datset to online normalization to run experiments, since the contrastively pretrained encoder (the bulk of the project) was not generalizing to the downstraem methylation classification task
 
-#### What's been ruled out
-1. **Normalization method + hyperparameters** (Experiment 16): Added log1p transform to ZNorm to match legacy's log(x+1) z-score normalization. Also aligned max_lr (3e-3) and ds_limit (2M) with legacy config. Result: same ~70% top1.
-2. **Train/val leakage** (`tests/test_legacy_leakage.py`): Checked whether read_names overlap between legacy train/test parquets. Result: PASSED. The original legacy script (`archive/legacy_dataset_script_unmodified.py`) splits by read_name with an explicit disjointness assert (line 249).
-3. **CpG site finding differences**: `re.finditer("CG", seq)` (legacy) and `sliding_window_view(seq, 2)` (new) find the same CpG sites — "CG" is 2 chars and can't self-overlap. Both also handle "CGCG" identically (two matches at positions 0 and 2).
-4. **UInt16 vs uint8 kinetics truncation**: The legacy parquet stores kinetics as UInt16, but PacBio CCS fi/fp/ri/rp are uint8 arrays in the BAM spec, so all values are in [0, 255]. No truncation in the Zarr path.
+#### Root cause: reverse kinetics misalignment in zarr_to_methyl_memmap.py
 
-#### Pending experiments
-1. **Experiment 17 (fwd kinetics only)**: Use fi/fp for both strands (matching legacy behavior). Failed on first attempt — data not generated before training was scheduled (workflow dependency issue, now fixed). Needs rerun.
-2. **Experiment 18 (v2 clean rewrite)**: `scripts/zarr_to_methyl_memmap_v2.py` mirrors the unmodified legacy extraction logic exactly (forward-strand CpGs only, explicit reverse indexing for ri/rp, writes paired fwd+rev views per CpG). End-to-end tests at `tests/test_zarr_to_methyl_memmap_v2.py`. Not yet run.
+**RESOLVED.** Experiments 17 and 18 both peak at ~80% top1, matching the legacy baseline. The bug was a kinetics/sequence misalignment in reverse strand windows.
 
-#### Remaining hypotheses
-1. **Per-feature normalization stats contamination.** Legacy normalizes fi, fp, ri, rp each with their OWN mean/std (via `compute_log_normalization_stats`). ZNorm computes SHARED stats over mixed fi+ri in column 1 and fp+rp in column 2. If fi and ri have different distributions, neither is correctly centered under ZNorm. Experiment 16 tested log1p but still used mixed stats, so this was never actually tested. Experiment 17 (pure fi/fp, no mixing) would test this indirectly.
-2. **Kinetics mixing in model input columns.** Legacy always feeds fi/fp into model columns 1-2 for forward views and ri/rp for reverse views — but each is normalized with its own feature-specific stats. New pipeline mixes fi/fp and ri/rp into the same columns with shared normalization, giving the kin_embed layer a bimodal distribution to handle. Experiment 17 tests this directly.
-3. **Training data composition.** Legacy extracts CpGs from the forward strand only, then yields two views of each CpG (fwd: fi/fp, rev: flip(ri)/flip(rp)) via single_strand=True. The new v1 pipeline extracts CpGs from BOTH forward and reverse strands independently. Same total window count, but legacy has paired views of the same CpG sites while v1 has single views of different sites. Paired views are a form of data augmentation where the model sees the same genomic position from both kinetics perspectives.
-4. **Subtle preprocessing bugs in zarr_to_methyl_memmap.py.** The original script uses np.flip on the entire read, stride tricks, and complex index mapping (`list(set(...))`). The v2 rewrite avoids all of this. Experiment 18 tests whether matching the legacy logic exactly closes the gap.
-5. **fi vs ri distribution mismatch.** If fi and ri have meaningfully different distributions at CpG sites, the mixed normalization and mixed model inputs compound the problem. Diagnostic test at `tests/test_kinetics_distributions.py` (requires BAM files, can't run on Gefion where BAMs are mocked).
+PacBio stores forward and reverse kinetics in different orders: `fi[i]` = forward kinetics at position `i` (forward order), but `ri[i]` = reverse kinetics at position `L-1-i` (reverse order). The v1 script (`zarr_to_methyl_memmap.py`) processes reverse windows with `np.flip(read_rev, axis=0)`, which flips all columns together. After the flip, the sequence at position `j` represents original position `L-1-j` (correct after RC), but ri at position `j` gives reverse kinetics at position `j` (because ri was already reversed, flipping puts it in forward order). The sequence and kinetics point to different genomic positions — every reverse window has kinetics from the mirror-image positions.
+
+`np.flip` works correctly for fi/fp (forward order → flip → reverse order, matching the reversed sequence) but incorrectly for ri/rp (already reverse order → flip → forward order, opposite to the reversed sequence). Since ~50% of training windows are reverse strand, half the training data had misaligned features.
+
+The v2 script (`zarr_to_methyl_memmap_v2.py`) fixes this by using explicit reverse indexing (`ri[L-end:L-start]`) matching the legacy script, with no `np.flip` on the whole read. Experiment 17 also works because using fi/fp for both strands sidesteps the issue entirely (fi is in forward order, so flipping aligns correctly).
+
+#### What was ruled out along the way
+1. **Normalization method + hyperparameters** (Experiment 16): log1p ZNorm + matched LR/ds_limit. Same ~70%.
+2. **Train/val leakage** (`tests/test_legacy_leakage.py`): PASSED, no read_name overlap.
+3. **CpG site finding differences**: both pipelines find the same sites.
+4. **UInt16 vs uint8 kinetics truncation**: PacBio CCS tags are uint8, no truncation.
