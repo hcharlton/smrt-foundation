@@ -377,7 +377,7 @@ def train_supervised(config_path, script_path):
     inputs = {'config': config_path}
     outputs = {'sentinel': sentinel_path}
 
-    options = {'cores': 16, 'memory': '64gb', 'walltime': '3:00:00', 'gres': 'gpu:8'}
+    options = {'cores': 16, 'memory': '256gb', 'walltime': '24:00:00', 'gres': 'gpu:8'}
 
     spec = f"""
     source .venv/bin/activate

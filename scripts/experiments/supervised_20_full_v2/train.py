@@ -65,12 +65,16 @@ def main():
             yaml.dump(config, f)
         tracker.writer.add_text("Full_Config", f"```yaml\n{yaml.dump(config, indent=2)}\n```", 0)
 
-    tmp_ds = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_train'), limit=config_updated['ds_limit'])
+    # Compute ZNorm from a capped sample (1M is plenty for statistics)
+    znorm_limit = min(config_updated['ds_limit'], 2_000_000) if config_updated['ds_limit'] > 0 else 2_000_000
+    tmp_ds = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_train'), limit=znorm_limit)
     train_norm_fn = ZNorm(tmp_ds, log_transform=True)
+    del tmp_ds
 
     if accelerator.is_main_process:
         print(f"ZNorm stats — means: {train_norm_fn.means}, stds: {train_norm_fn.stds}")
 
+    # Full training dataset (ds_limit=0 uses all data)
     train_ds = LabeledMemmapDataset(config.get('pos_data_train'), config.get('neg_data_train'), limit=config_updated['ds_limit'], norm_fn=train_norm_fn, balance=True)
 
     if accelerator.is_main_process:
