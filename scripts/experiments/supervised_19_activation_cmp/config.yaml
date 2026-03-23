@@ -1,0 +1,26 @@
+experiment_type: 'supervised'
+experiment_name: '19_activation_comparison'
+run_message: 'Train on both legacy and new datasets, collect encoder activations for diagnostic comparison'
+
+legacy_train: data/01_processed/val_sets/pacbio_standard_train.parquet
+legacy_val: data/01_processed/val_sets/pacbio_standard_test.parquet
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos.memmap/val'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg.memmap/val'
+
+classifier:
+  d_model: 128
+  n_head: 4
+  context: 32
+  n_layers: 4
+  vocab_size: 5
+  weight_decay: 0.02
+  epochs: 5
+  ds_limit: 500000
+  batch_size: 256
+  optimizer: 'AdamW'
+  max_lr: 3e-3
+  pct_start: 0.5
+  eval_samples: 20000
