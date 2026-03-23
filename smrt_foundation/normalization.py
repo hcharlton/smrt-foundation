@@ -71,3 +71,50 @@ class ZNorm:
         x[..., [1, 2]] -= self.means[[1, 2]]
         x[..., [1, 2]] /= (self.stds[[1, 2]] + self.eps)
         return x
+
+
+class KineticsNorm:
+    """Unified log1p + z-score normalization for kinetics channels [1, 2].
+
+    Replaces both ZNorm (for LabeledMemmapDataset) and SSLNorm (for
+    ShardedMemmapDataset). Handles both dataset types automatically and
+    excludes padded positions when computing statistics.
+
+    Args:
+        ds: Any Dataset. If __getitem__ returns a tuple, the first element
+            is used. If it returns a tensor, used directly.
+        eps: Epsilon for numerical stability in division.
+        log_transform: Whether to apply log1p before z-scoring.
+        max_samples: Maximum samples to load for computing statistics.
+    """
+    def __init__(self, ds, eps=1e-8, log_transform=True, max_samples=1_048_576):
+        self.log_transform = log_transform
+        self.eps = eps
+
+        sampler = ChunkedRandomSampler(ds, 2048, shuffle_within=True)
+        batch = next(iter(DataLoader(ds, batch_size=max_samples, sampler=sampler)))
+
+        # Handle both (x, y) tuples and raw tensors
+        x = batch[0] if isinstance(batch, (tuple, list)) else batch
+
+        if self.log_transform:
+            x = x.clone()
+            x[..., [1, 2]] = torch.log1p(x[..., [1, 2]])
+
+        # Exclude padded positions (mask channel is last: 0.0 = real, 1.0 = pad)
+        active = x[..., -1] == 0.0
+
+        self.means = torch.zeros(x.shape[-1])
+        self.stds = torch.ones(x.shape[-1])
+        for c in [1, 2]:
+            vals = x[..., c][active]
+            if vals.numel() > 0:
+                self.means[c] = vals.mean()
+                self.stds[c] = vals.std()
+
+    def __call__(self, x):
+        if self.log_transform:
+            x[..., [1, 2]] = torch.log1p(x[..., [1, 2]])
+        x[..., [1, 2]] -= self.means[[1, 2]]
+        x[..., [1, 2]] /= (self.stds[[1, 2]] + self.eps)
+        return x
