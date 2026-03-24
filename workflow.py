@@ -1,7 +1,4 @@
 import os
-import yaml
-from pathlib import Path
-import gwf
 from gwf import Workflow, AnonymousTarget
 
 
@@ -23,8 +20,6 @@ else:
 # Add more dataset entries here and they'll get processed automatically.
 CONFIG = {
     'project_root': root_dir,
-    'ssl_config': 'configs/ssl.yaml',
-    'supervised_config': 'configs/supervised.yaml',
     'data_config': 'configs/data.yaml',
     'stats': {
         'path': 'data/02_analysis/norm_stats.yaml',
@@ -53,18 +48,14 @@ CONFIG = {
         'cpg_pos':{
             'bam': 'data/00_raw/labeled/methylated_hifi_reads.bam',
             'zarr': 'data/01_processed/ssl_sets/cpg_pos.zarr',
-            'memmap': 'data/01_processed/val_sets/cpg_pos.memmap',
-            'memmap_raw': 'data/01_processed/val_sets/cpg_pos_raw.memmap',
-            'memmap_filter_qual':  'data/01_processed/val_sets/cpg_pos_filter_qual.memmap',
+            'memmap': 'data/01_processed/val_sets/cpg_pos_v2.memmap',
             'optional_tags': [],
             'n_reads': 0,
         },
         'cpg_neg':{
             'bam': 'data/00_raw/labeled/unmethylated_hifi_reads.bam',
             'zarr': 'data/01_processed/ssl_sets/cpg_neg.zarr',
-            'memmap': 'data/01_processed/val_sets/cpg_neg.memmap',
-            'memmap_raw': 'data/01_processed/val_sets/cpg_neg_raw.memmap',
-            'memmap_filter_qual':  'data/01_processed/val_sets/cpg_neg_filter_qual.memmap',
+            'memmap': 'data/01_processed/val_sets/cpg_neg_v2.memmap',
             'optional_tags': [],
             'n_reads': 0,
         },
@@ -195,53 +186,6 @@ def memmap_conversion(
 
 
 def memmap_cpg_conversion(
-    zarr_path,
-    output_path,
-    config_path,
-    shard_size=4*2**20,
-    shards=0,
-    context=32,
-    fwd_features=['seq', 'fi', 'fp'],
-    rev_features=['seq', 'ri', 'rp'],
-    reverse_complement=True,
-    normalize=False,
-    filter_qual=False,
-    profile=False
-):
-    inputs = {'in_file': zarr_path}
-    outputs = {'out_file': f'{output_path}'}
-
-    options = {'cores': 8, 'memory': '64gb', 'walltime': '18:00:00'}
-
-    profiler_env = "TimeLINE_PROFILE=1" if profile else ""
-    rc_flag = "--reverse_complement" if reverse_complement else ""
-    norm_flag = "--normalize" if normalize else ""
-    filter_qual_flag = "--filter_qual" if filter_qual else ""
-    fwd_str = " ".join(fwd_features)
-    rev_str = " ".join(rev_features)
-
-    spec = f"""
-    source $(conda info --base)/etc/profile.d/conda.sh
-    conda activate data_prep
-    cd {p('')}
-
-    {profiler_env} python -m scripts.zarr_to_methyl_memmap \
-        --input_path {zarr_path} \
-        --output_path {output_path} \
-        --config_path {config_path} \
-        --shard_size {shard_size} \
-        --max_shards {shards} \
-        --context {context} \
-        --fwd_features {fwd_str} \
-        --rev_features {rev_str} \
-        {rc_flag} \
-        {norm_flag} \
-        {filter_qual_flag}
-    """
-    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
-
-
-def memmap_cpg_conversion_v2(
     zarr_path, output_path, config_path,
     shard_size=4*2**20, shards=0, context=32,
     val_pct=0.2, seed=42, profile=False
@@ -265,38 +209,6 @@ def memmap_cpg_conversion_v2(
         --context {context} \
         --val_pct {val_pct} \
         --seed {seed}
-    """
-    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
-
-
-def legacy_parquet_conversion(pos_bam, neg_bam, output_path, context=32):
-    inputs = {'pos_bam': pos_bam, 'neg_bam': neg_bam}
-    outputs = {'out_file': output_path}
-
-    options = {'cores': 4, 'memory': '32gb', 'walltime': '01:00:00'}
-
-    spec = f"""
-    source $(conda info --base)/etc/profile.d/conda.sh
-    conda activate data_prep
-    cd {p('')}
-
-    python -m archive.make_legacy_labeled_dataset \
-        --input_path {pos_bam} \
-        --output_path {output_path}.pos.tmp \
-        --context {context} \
-        --label 1
-    python -m archive.make_legacy_labeled_dataset \
-        --input_path {neg_bam} \
-        --output_path {output_path}.neg.tmp \
-        --context {context} \
-        --label 0
-    python -c "
-import pyarrow.parquet as pq, pyarrow as pa
-t1 = pq.read_table('{output_path}.pos.tmp')
-t2 = pq.read_table('{output_path}.neg.tmp')
-pq.write_table(pa.concat_tables([t1, t2]), '{output_path}')
-import os; os.remove('{output_path}.pos.tmp'); os.remove('{output_path}.neg.tmp')
-"
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
@@ -341,71 +253,6 @@ def inject_norm_stats(zarr_path, chunk_stride, idx_stride, num_threads):
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
 
-# --- training ---
-
-def train_ssl(config_path, input_memmap):
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-
-    exp_type = config.get('experiment_type', 'ssl')
-    exp_name = config.get('experiment_name', 'smrt_experiment')
-
-    sentinel_path = p(f"training_logs/{exp_type}/{exp_name}/run.sentinel")
-    inputs = {'config': config_path, 'memmap': input_memmap}
-    outputs = {'sentinel': sentinel_path}
-
-    options = {'cores': 16, 'memory': '64gb', 'walltime': '3:00:00', 'gres': 'gpu:8'}
-
-    spec = f"""
-    source .venv/bin/activate
-    cd {p('')}
-    accelerate launch --num_processes=8 --mixed_precision='no' scripts/train_ssl.py {config_path}
-    touch {sentinel_path}
-    """
-    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
-
-
-def train_supervised(config_path, script_path):
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-
-    exp_type = config.get('experiment_type', 'supervised')
-    exp_name = config.get('experiment_name', 'supervised_experiment')
-
-    sentinel_path = p(f"training_logs/{exp_type}/{exp_name}/run.sentinel")
-    sentinel_path = p(f"{Path(script_path).parent}/run.sentinel")
-    inputs = {'config': config_path}
-    outputs = {'sentinel': sentinel_path}
-
-    options = {'cores': 16, 'memory': '256gb', 'walltime': '24:00:00', 'gres': 'gpu:8'}
-
-    spec = f"""
-    source .venv/bin/activate
-    cd {p('')}
-    accelerate launch --num_processes=8 --mixed_precision='no' {script_path} {config_path}
-    touch {sentinel_path}
-    """
-    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
-
-
-# --- testing ---
-
-def run_test(test_module_path):
-    module_name = Path(test_module_path).stem
-    sentinel = p(f"tests/{module_name}.sentinel")
-    inputs = {}
-    outputs = {'sentinel': sentinel}
-    options = {'cores': 4, 'memory': '32gb', 'walltime': '01:00:00'}
-
-    spec = f"""
-    source .venv/bin/activate
-    cd {p('')}
-    python -m pytest {test_module_path} -v --tb=short
-    touch {sentinel}
-    """
-    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
-
-
 ############################# PIPELINE LOGIC ###################################
 
 def process_dataset(name, data):
@@ -429,41 +276,13 @@ def process_dataset(name, data):
 
     if name.startswith('cpg'):
         gwf.target_from_template(
-            name=f'{name}_to_val_memmap',
+            name=f'{name}_to_memmap',
             template=memmap_cpg_conversion(
                 zarr_path=zarr_target.outputs['out_file'],
                 output_path=data['memmap'],
                 config_path=CONFIG['data_config'],
-                profile=True,
-                normalize=False,
-                shards=0
             )
         )
-        # v1 with fwd kinetics only (experiment 17)
-        if name in ('cpg_pos', 'cpg_neg'):
-            gwf.target_from_template(
-                name=f'{name}_fwd_kin_memmap',
-                template=memmap_cpg_conversion(
-                    zarr_path=zarr_target.outputs['out_file'],
-                    output_path=f'data/01_processed/val_sets/{name}_fwd_kin.memmap',
-                    config_path=CONFIG['data_config'],
-                    profile=True,
-                    normalize=False,
-                    shards=0,
-                    fwd_features=['seq', 'fi', 'fp'],
-                    rev_features=['seq', 'fi', 'fp'],
-                )
-            )
-            # v2 clean rewrite (experiment 18)
-            gwf.target_from_template(
-                name=f'{name}_v2_memmap',
-                template=memmap_cpg_conversion_v2(
-                    zarr_path=zarr_target.outputs['out_file'],
-                    output_path=f'data/01_processed/val_sets/{name}_v2.memmap',
-                    config_path=CONFIG['data_config'],
-                    profile=True,
-                )
-            )
         return
 
     memmap_target = gwf.target_from_template(
@@ -501,7 +320,6 @@ def process_dataset(name, data):
             shards=500
         )
     )
-
 
     gwf.target_from_template(
         name=f'{name}_validation',
@@ -550,32 +368,5 @@ def process_dataset(name, data):
 
 ############################# TARGETS ##########################################
 
-# --- data pipeline ---
 for name, data in CONFIG['datasets'].items():
     process_dataset(name, data)
-
-gwf.target_from_template(
-    name='legacy_parquet_subset',
-    template=legacy_parquet_conversion(
-        pos_bam='data/00_raw/labeled/methylated_subset.bam',
-        neg_bam='data/00_raw/labeled/unmethylated_subset.bam',
-        output_path='data/01_processed/val_sets/legacy_subset_train.parquet',
-    )
-)
-
-# --- training (auto-discovers scripts/experiments/*/train.py) ---
-for path in Path('./scripts/experiments').rglob('train.py'):
-    gwf.target_from_template(
-        name=f"exp_{path.parent.name}",
-        template=train_supervised(
-            config_path=str(path.parent / 'config.yaml'),
-            script_path=str(path)
-        )
-    )
-
-# --- testing (auto-discovers tests/test_*.py) ---
-for path in Path('./tests').glob('test_*.py'):
-    gwf.target_from_template(
-        name=f"{path.stem}",
-        template=run_test(str(path))
-    )
