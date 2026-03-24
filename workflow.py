@@ -388,23 +388,6 @@ def train_supervised(config_path, script_path):
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
 
-# --- plotting ---
-
-def make_plot(script_path):
-    inputs = {}
-    output_path = f"{os.path.dirname(script_path)}/plot.svg"
-    outputs = {'output': output_path}
-
-    options ={'cores': 16, 'memory': '64gb', 'walltime': '00:30:00'}
-
-    spec = f"""
-    source .venv/bin/activate
-    cd {p('')}
-    python {script_path} --output_path {output_path}
-    """
-    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
-
-
 # --- testing ---
 
 def run_test(test_module_path):
@@ -589,13 +572,6 @@ for path in Path('./scripts/experiments').rglob('train.py'):
             script_path=str(path)
         )
     )
-
-# --- plotting (auto-discovers report/eda/*/plot.py) ---
-for path in Path('./report/eda').rglob('plot.py'):
-    gwf.target_from_template(
-            name=f"plot_{path.parent.name}",
-            template=make_plot(str(path))
-        )
 
 # --- testing (auto-discovers tests/test_*.py) ---
 for path in Path('./tests').glob('test_*.py'):

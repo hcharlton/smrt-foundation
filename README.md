@@ -42,7 +42,15 @@ This script defines the Directed Acyclic Graph (DAG) for data processing and com
 This is the single source of truth for individual training runs. It defines the hyperparameter topology, target dataset selection, and experiment metadata. During execution, an immutable snapshot of this configuration is embedded into the TensorBoard event logs alongside the Git commit hash to guarantee run reproducibility.
 * **Usage:** Modify this file for every new experiment. Update `project_name`, `run_message`, and specific model or optimizer hyperparameters prior to triggering the workflow.
 
-### 3. Model Logic & Codebase Safety Net (`scripts/train.py`)
+### 3. EDA Plots (`plot.sh`)
+Plot scripts live in `report/eda/<name>/plot.py`. Run any of them with:
+```bash
+bash plot.sh report/eda/model_input_heatmaps              # local: runs directly
+bash plot.sh report/eda/fi_vs_ri_distributions --mem=128gb # HPC: submits sbatch with override
+```
+Auto-detects environment (local/Gefion/GenomeDK). Output goes to `report/eda/<name>/plot.svg`.
+
+### 4. Model Logic & Codebase Safety Net (`scripts/train.py`)
 The training script utilizes an internal `DEFAULT_SMRT2VEC` dictionary to establish baseline architectural parameters. This implements a fail-safe mechanism, ensuring backward compatibility by providing default values if a legacy `config.yaml` is executed that lacks newly introduced variables. 
 * **Usage:** Modify these defaults only when introducing structural changes to the `Smrt2Vec` architecture (e.g., new projection heads for the single strand methylation classifier, updated kinetics masking ratios) to prevent execution failures on older configurations.
 
