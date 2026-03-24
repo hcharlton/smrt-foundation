@@ -1,7 +1,13 @@
-
 experiment_type: 'supervised'
 experiment_name: '15_legacy_reproduction'
 run_message: 'reproduce the success with the legacy data in a static directory'
+
+resources:
+  cores: 16
+  memory: 64gb
+  walltime: 03:00:00
+  gres: gpu:8
+  num_processes: 8
 
 legacy_train: data/01_processed/val_sets/pacbio_standard_train.parquet
 legacy_val: data/01_processed/val_sets/pacbio_standard_test.parquet

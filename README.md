@@ -34,13 +34,17 @@ Experiment 22 (`scripts/experiments/supervised_22_finetune/`): Fine-tune pretrai
 - Compare against experiment 20 direct training baseline
 
 ## Process
-### 1. Infrastructure Registry (`workflow.py`)
-This script defines the Directed Acyclic Graph (DAG) for data processing and compute allocation. The internal `CONFIG` dictionary acts as a static registry for data provenance, mapping raw BAM files to intermediate Zarr stores and final training-ready Memmap tensors.
-* **Usage:** Modify the `CONFIG` dictionary only when ingesting new raw sequencing datasets, adjusting genome chunking logic, or altering cluster resource allocation (e.g., GPU requests or walltimes). 
+### 1. Data Pipeline (`workflow.py`)
+gwf manages the data pipeline DAG only: BAM → Zarr → memmap → validation. The `CONFIG` dictionary is a static registry mapping raw BAM files to intermediate Zarr stores and training-ready memmap tensors.
+* **Usage:** Modify `CONFIG` when ingesting new raw sequencing datasets. Run `gwf run` to process any new or updated entries.
 
-### 2. Experiment Control (`config.yaml`)
-This is the single source of truth for individual training runs. It defines the hyperparameter topology, target dataset selection, and experiment metadata. During execution, an immutable snapshot of this configuration is embedded into the TensorBoard event logs alongside the Git commit hash to guarantee run reproducibility.
-* **Usage:** Modify this file for every new experiment. Update `project_name`, `run_message`, and specific model or optimizer hyperparameters prior to triggering the workflow.
+### 2. Experiment Submission (`run.sh`)
+Each experiment is a self-contained directory under `scripts/experiments/<name>/` with a `config.yaml` and `train.py`. Resource specs (cores, memory, walltime, GPU) live in the config's `resources:` section. Submit via:
+```bash
+bash run.sh scripts/experiments/ssl_21_pretrain              # uses config resources
+bash run.sh scripts/experiments/supervised_20_full_v2 --mem=512gb  # sbatch override
+```
+Auto-detects environment (local/Gefion/GenomeDK). Job output goes to the experiment directory as `<jobid>.out`.
 
 ### 3. EDA Plots (`plot.sh`)
 Plot scripts live in `report/eda/<name>/plot.py`. Run any of them with:
@@ -50,15 +54,21 @@ bash plot.sh report/eda/fi_vs_ri_distributions --mem=128gb # HPC: submits sbatch
 ```
 Auto-detects environment (local/Gefion/GenomeDK). Output goes to `report/eda/<name>/plot.svg`.
 
-### 4. Model Logic & Codebase Safety Net (`scripts/train.py`)
-The training script utilizes an internal `DEFAULT_SMRT2VEC` dictionary to establish baseline architectural parameters. This implements a fail-safe mechanism, ensuring backward compatibility by providing default values if a legacy `config.yaml` is executed that lacks newly introduced variables. 
-* **Usage:** Modify these defaults only when introducing structural changes to the `Smrt2Vec` architecture (e.g., new projection heads for the single strand methylation classifier, updated kinetics masking ratios) to prevent execution failures on older configurations.
+### 4. Tests (`test.sh`)
+```bash
+bash test.sh tests/test_kinetics_norm.py               # local: runs pytest
+bash test.sh tests/                                      # local: all tests
+bash test.sh tests/test_cpg_pipeline_fidelity.py --mem=64gb  # HPC: sbatch
+```
+
+### 5. Model Logic & Codebase Safety Net
+Training scripts use internal `DEFAULT_*` dictionaries for baseline architectural parameters, ensuring backward compatibility when a legacy `config.yaml` lacks newly introduced variables.
 
 ### Standard Execution Flow
 To launch a new experimental iteration:
-1. Define the run metadata, target dataset, and hyperparameter configuration in `config.yaml`.
-2. Verify the dataset requested in `config.yaml` exists within the `workflow.py` registry.
-3. Evaluate and execute the graph via `gwf run`. The engine will parse the updated `project_name` from the YAML, identify the unfulfilled `run.sentinel` artifact, and dynamically submit the requisite data pipeline and distributed training jobs.
+1. Create an experiment directory with `config.yaml` (hyperparameters + `resources:` section) and `train.py`.
+2. Verify the dataset paths in `config.yaml` exist (check `workflow.py` CONFIG registry).
+3. Submit via `bash run.sh scripts/experiments/<name>`.
 
 
 ## TODO + Problems

@@ -2,6 +2,13 @@ experiment_type: 'ssl'
 experiment_name: '21_normalized_pretrain'
 run_message: 'SSL pretraining with ZNorm log1p normalization (matching supervised), higher masking ratio, linear probe eval after each epoch, model checkpointing.'
 
+resources:
+  cores: 16
+  memory: 256gb
+  walltime: 24:00:00
+  gres: gpu:8
+  num_processes: 8
+
 ssl_dataset: 'ob007_raw.memmap'
 
 # Labeled data for linear probe evaluation

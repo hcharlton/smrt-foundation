@@ -2,6 +2,13 @@ experiment_type: 'supervised'
 experiment_name: '20_full_v2_8h100'
 run_message: 'Full production run on v2 memmap shards. All data, 8 H100, bf16.'
 
+resources:
+  cores: 16
+  memory: 256gb
+  walltime: 24:00:00
+  gres: gpu:8
+  num_processes: 8
+
 pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
 neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
 pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'

@@ -2,6 +2,13 @@ experiment_type: 'supervised'
 experiment_name: '22_finetune_pretrained'
 run_message: 'Fine-tune pretrained SSL encoder on labeled CpG data. Two-stage: frozen head warmup then full fine-tuning.'
 
+resources:
+  cores: 16
+  memory: 256gb
+  walltime: 24:00:00
+  gres: gpu:8
+  num_processes: 8
+
 pretrained_checkpoint: 'scripts/experiments/ssl_21_pretrain/checkpoints/final_model.pt'
 
 pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
