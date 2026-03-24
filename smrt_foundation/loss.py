@@ -26,21 +26,30 @@ class InfoNCE(nn.Module):
     return loss
 
 class AgInfoNCE(nn.Module):
-    def __init__(self, temperature=0.1):
+    def __init__(self, temperature=0.1, max_negatives=None):
         super().__init__()
         self.cross_entropy = nn.CrossEntropyLoss()
         self.temperature = temperature
+        self.max_negatives = max_negatives
 
     def forward(self, c_proj, targets, mask_idx):
         preds = F.normalize(c_proj[mask_idx], dim=-1)
         truth = F.normalize(targets[mask_idx], dim=-1)
-        
+
+        # Subsample masked positions to cap similarity matrix size.
+        # With input masking + CNN downsampling, ~99% of latents are masked,
+        # making the full [N_local, N_total] matrix too large for GPU memory.
+        if self.max_negatives and preds.shape[0] > self.max_negatives:
+            idx = torch.randperm(preds.shape[0], device=preds.device)[:self.max_negatives]
+            preds = preds[idx]
+            truth = truth[idx]
+
         if dist.is_initialized():
             truth_gathered = torch.cat(dist_nn.all_gather(truth), dim=0)
             labels = torch.arange(truth.shape[0], device=truth.device) + (dist.get_rank() * truth.shape[0])
         else:
             truth_gathered = truth
             labels = torch.arange(truth.shape[0], device=truth.device)
-            
+
         logits = torch.mm(preds, truth_gathered.T) / self.temperature
         return self.cross_entropy(logits, labels)
