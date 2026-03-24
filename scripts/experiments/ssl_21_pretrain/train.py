@@ -158,7 +158,7 @@ def main():
         print(f"SSL dataset: {len(ds)} samples from {memmap_path}")
 
     # Compute normalization stats from SSL data
-    ssl_norm = KineticsNorm(ds)
+    ssl_norm = KineticsNorm(ds, max_samples=16_384)
     if accelerator.is_main_process:
         print(f"SSL norm — means: {ssl_norm.means}, stds: {ssl_norm.stds}")
 

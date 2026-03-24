@@ -1,0 +1,29 @@
+experiment_type: 'ssl'
+experiment_name: '23_pretrain_smoke'
+run_message: 'Small-scale smoke test to validate SSL training loop end-to-end before full run.'
+
+resources:
+  cores: 4
+  memory: 64gb
+  walltime: 00:30:00
+  gres: gpu:1
+  num_processes: 1
+
+ssl_dataset: 'ob007_raw.memmap'
+
+smrt2vec:
+  d_model: 128
+  n_head: 4
+  context: 4096
+  n_layers: 4
+  vocab_size: 5
+  weight_decay: 0.02
+  p_mask: 0.15
+  mask_size: 10
+  epochs: 2
+  ds_limit: 50000
+  batch_size: 16
+  optimizer: 'AdamW'
+  max_lr: 3e-4
+  temperature: 0.1
+  pct_start: 0.25
