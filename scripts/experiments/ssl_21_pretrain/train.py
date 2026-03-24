@@ -67,7 +67,7 @@ def linear_probe_eval(encoder, probe_config, config, accelerator):
     # Linear probe: single linear layer on frozen encoder center representation
     d_model = encoder.d_model
     probe_head = nn.Linear(d_model, 1).to(device)
-    probe_opt = torch.optim.Adam(probe_head.parameters(), lr=pc.get('lr', 3e-3))
+    probe_opt = torch.optim.Adam(probe_head.parameters(), lr=float(pc.get('lr', 3e-3)))
     criterion = nn.BCEWithLogitsLoss()
 
     # Short training
