@@ -35,7 +35,6 @@ def get_git_revision_hash():
     except Exception:
         return "unknown"
 
-@torch.no_grad()
 def linear_probe_eval(encoder, probe_config, config, accelerator):
     """Freeze encoder, train a linear head on labeled CpG data, report accuracy."""
     device = accelerator.device
