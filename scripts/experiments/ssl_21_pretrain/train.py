@@ -187,7 +187,7 @@ def main():
         print(f"Model parameters: {n_params:,}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(c['max_lr']), weight_decay=c['weight_decay'])
-    criterion = AgInfoNCE(temperature=float(c['temperature']))
+    criterion = AgInfoNCE(temperature=float(c['temperature']), max_negatives=c.get('max_negatives', 8192))
 
     model, optimizer, dl = accelerator.prepare(model, optimizer, dl)
 
