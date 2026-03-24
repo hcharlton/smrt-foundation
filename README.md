@@ -16,7 +16,7 @@ Direct supervised training on v2 memmap shards reaches ~80% top1 (experiment 20 
 Contrastive encoder learns (InfoNCE loss converges), but does not generalize to downstream CpG classification. Analysis identified four blockers:
 1. **Information leakage through CNN receptive field.** The CNN has a 107-base receptive field. With latent masking (masking AFTER the CNN), adjacent unmasked latents share 96% of their input bases with masked positions. The transformer can trivially reconstruct masked positions by interpolating from neighbors — the pretraining task is too easy and doesn't force learning meaningful representations.
 2. **Normalization mismatch**: SSL trains on raw uint8 kinetics (0-255), supervised uses log1p + z-score (~-3 to +3). The `kin_embed` linear layer learns weights calibrated for the wrong input scale, making weight transfer fail.
-3. **No fine-tuning infrastructure**: No code existed to load pretrained weights, freeze/unfreeze layers, or use differential learning rates.
+3. **No fine-tuning infrastructure**: No code exists to load pretrained weights, freeze/unfreeze layers, or use differential learning rates.
 4. **Sparse masking**: p_mask=0.05 is too easy for the same reason as #1.
 
 ### Pretraining strategy
@@ -35,16 +35,15 @@ Experiment 22 (`scripts/experiments/supervised_22_finetune/`): Fine-tune pretrai
 
 ## Process
 ### 1. Data Pipeline (`workflow.py`)
-gwf manages the data pipeline DAG only: BAM → Zarr → memmap → validation. The `CONFIG` dictionary is a static registry mapping raw BAM files to intermediate Zarr stores and training-ready memmap tensors.
-* **Usage:** Modify `CONFIG` when ingesting new raw sequencing datasets. Run `gwf run` to process any new or updated entries.
+gwf only manages the data pipeline: BAM → Zarr → memmap → validation. The `CONFIG` dictionary at the top is a static registry that maps raw BAM files to intermediate Zarr stores and training-ready memmap tensors. Modify `CONFIG` when ingesting new datasets, then `gwf run` to process them.
 
-### 2. Experiment Submission (`run.sh`)
-Each experiment is a self-contained directory under `scripts/experiments/<name>/` with a `config.yaml` and `train.py`. Resource specs (cores, memory, walltime, GPU) live in the config's `resources:` section. Submit via:
+### 2. Experiments (`run.sh`)
+Each experiment lives in its own directory under `scripts/experiments/<name>/` with a `config.yaml` and `train.py`. Resource specs (cores, memory, walltime, GPUs) go in the config's `resources:` section so they stay with the experiment. Submit with:
 ```bash
 bash run.sh scripts/experiments/ssl_21_pretrain              # uses config resources
 bash run.sh scripts/experiments/supervised_20_full_v2 --mem=512gb  # sbatch override
 ```
-Auto-detects environment (local/Gefion/GenomeDK). Job output goes to the experiment directory as `<jobid>.out`.
+Auto-detects environment (local/Gefion/GenomeDK). Job output lands in the experiment directory as `<jobid>.out`. Avoids hunting through `.gwf/logs/`.
 
 ### 3. EDA Plots (`plot.sh`)
 Plot scripts live in `report/eda/<name>/plot.py`. Run any of them with:
@@ -61,19 +60,19 @@ bash test.sh tests/                                      # local: all tests
 bash test.sh tests/test_cpg_pipeline_fidelity.py --mem=64gb  # HPC: sbatch
 ```
 
-### 5. Model Logic & Codebase Safety Net
-Training scripts use internal `DEFAULT_*` dictionaries for baseline architectural parameters, ensuring backward compatibility when a legacy `config.yaml` lacks newly introduced variables.
+### 5. Model Logic & Codebase Safety Net (`scripts/train.py`)
+The training scripts have internal `DEFAULT_SMRT2VEC` / `DEFAULT` dictionaries that establish baseline architectural parameters. This is a fail-safe so that older `config.yaml` files that don't have newly introduced variables still run without crashing.
 
 ### Standard Execution Flow
-To launch a new experimental iteration:
-1. Create an experiment directory with `config.yaml` (hyperparameters + `resources:` section) and `train.py`.
-2. Verify the dataset paths in `config.yaml` exist (check `workflow.py` CONFIG registry).
-3. Submit via `bash run.sh scripts/experiments/<name>`.
+To launch a new experiment:
+1. Make a directory under `scripts/experiments/` with a `config.yaml` (hyperparameters + `resources:` section) and `train.py`.
+2. Make sure the dataset paths in `config.yaml` exist (check the `workflow.py` CONFIG registry).
+3. `bash run.sh scripts/experiments/<name>`.
 
 
 ## TODO + Problems
 ### Debug new labeled dataset
-The legacy dataset class (script at archive/make_legacy_labeled_dataset, dataset at data/01_processed/legacy*.parquet) is performing much better with direct downstream training (using all the model components) than the new dataset class (script at scripts/zarr_to_methyl_memmap.py). I have not been able to figure out why. The reason that I originally made the new dataset class was to upgrade the datset to online normalization to run experiments, since the contrastively pretrained encoder (the bulk of the project) was not generalizing to the downstraem methylation classification task
+The legacy dataset class (script at archive/make_legacy_labeled_dataset, dataset at data/01_processed/legacy*.parquet) was performing much better with direct downstream training (using all the model components) than the new dataset class (original script now at archive/zarr_to_methyl_memmap.py). The reason I originally made the new dataset class was to upgrade the dataset to online normalization to run experiments, since the contrastively pretrained encoder (the bulk of the project) was not generalizing to the downstream methylation classification task
 
 #### Root cause: reverse kinetics misalignment in zarr_to_methyl_memmap.py
 
