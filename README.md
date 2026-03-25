@@ -89,3 +89,8 @@ The v2 script (`zarr_to_methyl_memmap_v2.py`) fixes this by using explicit rever
 2. **Train/val leakage** (`tests/test_legacy_leakage.py`): PASSED, no read_name overlap.
 3. **CpG site finding differences**: both pipelines find the same sites.
 4. **UInt16 vs uint8 kinetics truncation**: PacBio CCS tags are uint8, no truncation.
+
+### Tests
+
+#### `tests/test_ssl_21_train.py` — PASSED
+Static analysis tests for the ssl_21_pretrain training script. Verifies that the linear probe evaluation runs on all ranks (not just `is_main_process`) and that `wait_for_everyone()` is called between the probe and the next epoch. These guards prevent the NCCL timeout / "Invalid mt19937 state" crash that occurs when ranks desynchronize at epoch boundaries.

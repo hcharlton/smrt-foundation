@@ -236,20 +236,24 @@ def main():
         accelerator.log({"epoch_avg_loss": avg_loss}, step=global_step)
 
         # --- Linear probe evaluation ---
+        # Run on ALL ranks to keep RNG/NCCL state synchronized across processes.
+        # Only rank 0 logs results.
         probe_config = config.get('probe', {})
-        if config.get('probe_pos_train') and accelerator.is_main_process:
+        if config.get('probe_pos_train'):
             unwrapped = accelerator.unwrap_model(model)
             probe_top1, probe_auroc = linear_probe_eval(
                 unwrapped.encoder, probe_config, config, accelerator
             )
-            accelerator.log({
-                "probe_top1": probe_top1,
-                "probe_auroc": probe_auroc,
-            }, step=global_step)
-            print(f"Epoch {epoch+1}: ssl_loss={avg_loss:.4f}  probe_top1={probe_top1:.4f}  probe_auroc={probe_auroc:.4f}")
+            if accelerator.is_main_process:
+                accelerator.log({
+                    "probe_top1": probe_top1,
+                    "probe_auroc": probe_auroc,
+                }, step=global_step)
+                print(f"Epoch {epoch+1}: ssl_loss={avg_loss:.4f}  probe_top1={probe_top1:.4f}  probe_auroc={probe_auroc:.4f}")
         elif accelerator.is_main_process:
             print(f"Epoch {epoch+1}: ssl_loss={avg_loss:.4f}")
 
+        accelerator.wait_for_everyone()
         model.train()
 
     # --- Save final checkpoint ---
