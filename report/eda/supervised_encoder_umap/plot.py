@@ -1,11 +1,11 @@
 """
-UMAP of learned encoder representations for CpG methylation.
+UMAP of supervised encoder representations for CpG methylation.
 
-Loads the SSL-pretrained encoder from experiment 21, runs inference on
-labeled CpG data to extract 128-dim hidden states, then projects with
-UMAP. Compares to the raw-kinetics UMAP in cpg_umap/ — if the encoder
-has learned the conditional kinetics-given-sequence signal, these
-representations should show better class separation.
+Loads the supervised encoder from experiment 20 (DirectClassifier trained
+to 82% top1), runs inference on labeled CpG data to extract 128-dim
+hidden states, then projects with UMAP. Serves as a sanity check — a
+supervised encoder that achieves 82% accuracy should produce representations
+with visible class separation.
 """
 
 import os
@@ -27,7 +27,7 @@ from smrt_foundation.dataset import LabeledMemmapDataset
 from smrt_foundation.normalization import KineticsNorm
 
 
-CHECKPOINT = 'scripts/experiments/ssl_21_pretrain/checkpoints/final_model.pt'
+CHECKPOINT = 'scripts/experiments/supervised_20_full_v2/checkpoints/final_model.pt'
 POS_TRAIN = 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
 NEG_TRAIN = 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
 LIMIT = 2_000_000
@@ -37,10 +37,10 @@ BATCH_SIZE = 4096
 
 
 def load_encoder(checkpoint_path, device):
-    """Load pretrained SmrtEncoder from SSL checkpoint."""
+    """Load encoder from supervised checkpoint."""
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint['config']
-    c = config['smrt2vec']
+    c = config['classifier']
 
     encoder = SmrtEncoder(
         d_model=c['d_model'],
@@ -131,7 +131,7 @@ def main(output_path):
     ).properties(
         width=600,
         height=600,
-        title=f'UMAP of SSL encoder representations — {n_umap:,} CpG samples (d_model=128)',
+        title=f'UMAP of supervised encoder representations — {n_umap:,} CpG samples (d_model=128)',
     )
 
     chart.save(output_path)
