@@ -122,8 +122,10 @@ class LabeledMemmapDataset(Dataset):
         return x, y
 
 def compute_log_normalization_stats(df, features, epsilon=1):
-    means = {col: (df[col].explode() + epsilon).log().mean() for col in features}
-    stds = {col: (df[col].explode() + epsilon).log().explode().std() for col in features}
+    def clean(col):
+        return df[col].explode().fill_null(0).cast(pl.Float32).clip(lower_bound=0).log1p()
+    means = {col: clean(col).mean() for col in features}
+    stds = {col: clean(col).std() for col in features}
     return means, stds
 
 class LegacyMethylDataset(IterableDataset):
@@ -163,8 +165,10 @@ class LegacyMethylDataset(IterableDataset):
         kin_list = []
         for k in self.kin_feats:
             if self.norm:
-                vals = (np.log(df[k].to_numpy() + 1) - self.means[k]) / self.stds[k]
-            else: 
+                raw = np.nan_to_num(df[k].to_numpy(), nan=0.0).astype(np.float32)
+                np.clip(raw, 0, None, out=raw)
+                vals = (np.log1p(raw) - self.means[k]) / (self.stds[k] + 0.1)
+            else:
                 vals = df[k].to_numpy()
             kin_list.append(vals)
         kin_t = torch.tensor(np.stack(kin_list, axis=1), dtype=torch.float)
