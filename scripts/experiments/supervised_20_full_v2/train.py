@@ -188,6 +188,20 @@ def main():
         if accelerator.is_main_process:
             print(f"Epoch {epoch+1}: loss={avg_epoch_loss:.4f}  top1={epoch_acc:.4f}  f1={epoch_f1:.4f}  auroc={epoch_auroc:.4f}")
 
+    # --- Save final checkpoint ---
+    if accelerator.is_main_process:
+        checkpoint_dir = os.path.join(os.path.dirname(config_path), 'checkpoints')
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        unwrapped = accelerator.unwrap_model(model)
+        save_path = os.path.join(checkpoint_dir, 'final_model.pt')
+        torch.save({
+            'model_state_dict': unwrapped.state_dict(),
+            'encoder_state_dict': unwrapped.encoder.state_dict(),
+            'config': config,
+            'epoch': config_updated['epochs'],
+        }, save_path)
+        print(f"Saved checkpoint to {save_path}")
+
     accelerator.end_training()
 
 if __name__ == "__main__":
