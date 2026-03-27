@@ -13,6 +13,7 @@ training_logs/
 *.out
 CLAUDE.md
 .claude/
+\.claude
 .gwf/
 # Byte-compiled / optimized / DLL files
 __pycache__/

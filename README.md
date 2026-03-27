@@ -27,6 +27,24 @@ Experiment 21 (`scripts/experiments/ssl_21_pretrain/`): SSL pretraining with:
 - Linear probe evaluation after each epoch (frozen encoder + linear head on labeled data) to track whether representations are becoming useful for classification
 - Model checkpointing for downstream transfer
 
+#### Why contrastive pretraining failed to transfer
+
+Experiments 21 and 23 showed that the InfoNCE loss converges but the linear probe accuracy on CpG classification *declines* over training epochs. Three compounding issues were identified:
+
+1. **Normalization mismatch** (fixed in later runs): The probe computed separate `KineticsNorm` statistics from the CpG dataset instead of reusing the SSL training normalization, so the encoder received out-of-distribution inputs during probing.
+2. **Sequence length mismatch**: The encoder trained on 4096-position sequences (1024 after CNN) but was probed on 32-position CpG windows (8 after CNN). Transformer attention patterns learned for 1024 positions don't transfer to 8. Experiment 23 reduced this to context=128 (32 after CNN) — probe still didn't improve.
+3. **Task misalignment**: InfoNCE teaches "given surrounding context, predict what kinetics belong at position X." This reconstruction-in-embedding-space objective treats all positions equally and discards the methylation signal as noise. The targets are layer-normed CNN features that shift as the encoder trains (moving-target problem), and the loss operates in an abstract cosine-similarity space disconnected from the actual kinetics values.
+
+### Masked autoencoder pretraining
+
+Experiment 24 (`scripts/experiments/ssl_24_autoencoder/`) replaces the contrastive objective with direct kinetics reconstruction via `SmrtAutoencoder`:
+
+- **Architecture**: The encoder (`SmrtEncoder`, shared with all other models) feeds into a lightweight `SmrtDecoder` — two transposed convolutions for 4x upsampling back to input resolution, then a linear projection to 2 channels (IPD, PW). The decoder is intentionally shallow so the encoder must learn informative representations; a deep decoder could reconstruct from minimal encoder features.
+- **Masking**: Same input-level masking as experiment 23 — random contiguous spans of kinetics channels zeroed before the CNN (p_mask=0.15, mask_size=10). Sequence tokens pass through unmasked, giving the encoder access to nucleotide context.
+- **Loss**: `MaskedReconstructionLoss` — MSE between predicted and original kinetics at masked positions only. The targets are the normalized input values themselves (fixed), not learned representations. No distributed all_gather needed — standard DDP gradient averaging.
+- **Normalization**: `KineticsNorm` (log1p + z-score) computed once from SSL data and reused for both training and probe evaluation, eliminating the distribution mismatch.
+- **Context**: 128 positions (32 after CNN), matching the probe's operating regime. SSL shards are truncated from 4096 to 128 at load time.
+
 Experiment 22 (`scripts/experiments/supervised_22_finetune/`): Fine-tune pretrained encoder:
 - Load encoder weights from experiment 21 checkpoint
 - Stage 1: frozen encoder, train classification head only (5 epochs)
