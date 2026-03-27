@@ -53,3 +53,9 @@ class AgInfoNCE(nn.Module):
 
         logits = torch.mm(preds, truth_gathered.T) / self.temperature
         return self.cross_entropy(logits, labels)
+
+class MaskedReconstructionLoss(nn.Module):
+    """MSE loss on masked kinetics positions only."""
+    def forward(self, kin_recon, kin_target, mask):
+        # kin_recon: [B, T, 2], kin_target: [B, T, 2], mask: [B, T] bool
+        return F.mse_loss(kin_recon[mask], kin_target[mask])

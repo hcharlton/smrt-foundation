@@ -435,6 +435,70 @@ class Smrt2VecInputMask(nn.Module):
     return c_proj, targets.detach(), ds_mask
 
 
+class SmrtDecoder(nn.Module):
+  """Lightweight decoder that upsamples transformer output back to input resolution."""
+  def __init__(self, d_model):
+    super().__init__()
+    self.upsample = nn.Sequential(
+      nn.ConvTranspose1d(d_model, d_model, kernel_size=4, stride=2, padding=1),
+      nn.GELU(),
+      nn.ConvTranspose1d(d_model, d_model, kernel_size=4, stride=2, padding=1),
+      nn.GELU(),
+    )
+    self.head = nn.Linear(d_model, 2)  # predict kinetics (IPD, PW)
+
+  def forward(self, z):
+    # z: [B, T/4, d_model]
+    z = z.permute(0, 2, 1)       # [B, d_model, T/4]
+    z = self.upsample(z)         # [B, d_model, T]
+    z = z.permute(0, 2, 1)       # [B, T, d_model]
+    return self.head(z)          # [B, T, 2]
+
+
+class SmrtAutoencoder(nn.Module):
+  """Masked autoencoder for kinetics reconstruction.
+
+  Masks input kinetics at random spans, encodes through CNN + transformer,
+  decodes back to input resolution, and reconstructs the masked kinetics.
+  """
+  def __init__(self, d_model=128, n_layers=4, n_head=4, max_len=128, p_mask=0.15, mask_size=10):
+    super().__init__()
+    self.encoder = SmrtEncoder(d_model, n_layers, n_head, max_len)
+    self.decoder = SmrtDecoder(d_model)
+    self.p_mask = p_mask
+    self.mask_size = mask_size
+
+  def apply_input_mask(self, x, p_mask, mask_size):
+    """Mask kinetics channels at the input level (before CNN).
+
+    Zeros out kinetics (channels 1, 2) at random contiguous spans.
+    Keeps sequence tokens (channel 0) and padding mask (channel 3) intact.
+    """
+    B, T, C = x.shape
+    pad = x[..., 3]
+
+    mask_centers = (torch.rand(B, T, device=x.device) < p_mask) & ~(pad.bool())
+
+    mask_full = F.max_pool1d(
+        mask_centers.float().unsqueeze(1),
+        kernel_size=mask_size, stride=1,
+        padding=mask_size // 2
+    ).squeeze(1)[:, :T].bool() & ~(pad.bool())
+
+    x_masked = x.clone()
+    x_masked[mask_full, 1] = 0.0
+    x_masked[mask_full, 2] = 0.0
+
+    return x_masked, mask_full
+
+  def forward(self, x):
+    x_orig = x.clone()
+    x_masked, mask = self.apply_input_mask(x, self.p_mask, self.mask_size)
+    c = self.encoder(x_masked)       # [B, T/4, d_model]
+    kin_recon = self.decoder(c)       # [B, T, 2]
+    return kin_recon, x_orig[..., 1:3], mask
+
+
 class DirectClassifier(nn.Module):
   def __init__(self, d_model, n_layers, n_head, max_len):
     super().__init__()
