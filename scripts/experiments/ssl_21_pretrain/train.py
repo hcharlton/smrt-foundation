@@ -35,29 +35,25 @@ def get_git_revision_hash():
     except Exception:
         return "unknown"
 
-def linear_probe_eval(encoder, probe_config, config, accelerator):
-    """Freeze encoder, train a linear head on labeled CpG data, report accuracy."""
+def linear_probe_eval(encoder, probe_config, config, accelerator, norm_fn):
+    """Freeze encoder, train a linear head on labeled CpG data, report accuracy.
+
+    Uses the same normalization (norm_fn) as SSL training so the encoder
+    sees the same input distribution it was trained on.
+    """
     device = accelerator.device
     encoder.eval()
 
     pc = probe_config
     probe_limit = pc.get('ds_limit', 500000)
 
-    # Load labeled data with same normalization
-    tmp_ds = LabeledMemmapDataset(
-        config.get('probe_pos_train'), config.get('probe_neg_train'),
-        limit=min(probe_limit, 2_000_000)
-    )
-    probe_norm = KineticsNorm(tmp_ds, log_transform=True)
-    del tmp_ds
-
     train_ds = LabeledMemmapDataset(
         config.get('probe_pos_train'), config.get('probe_neg_train'),
-        limit=probe_limit, norm_fn=probe_norm, balance=True
+        limit=probe_limit, norm_fn=norm_fn, balance=True
     )
     val_ds = LabeledMemmapDataset(
         config.get('probe_pos_val'), config.get('probe_neg_val'),
-        limit=probe_limit, norm_fn=probe_norm
+        limit=probe_limit, norm_fn=norm_fn
     )
 
     train_dl = DataLoader(train_ds, batch_size=pc.get('batch_size', 512), shuffle=True, num_workers=2)
@@ -242,7 +238,7 @@ def main():
         if config.get('probe_pos_train'):
             unwrapped = accelerator.unwrap_model(model)
             probe_top1, probe_auroc = linear_probe_eval(
-                unwrapped.encoder, probe_config, config, accelerator
+                unwrapped.encoder, probe_config, config, accelerator, ssl_norm
             )
             if accelerator.is_main_process:
                 accelerator.log({
