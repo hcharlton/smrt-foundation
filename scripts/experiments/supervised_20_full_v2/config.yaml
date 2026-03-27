@@ -5,7 +5,7 @@ run_message: 'Full production run on v2 memmap shards. All data, 8 H100, bf16.'
 resources:
   cores: 16
   memory: 256gb
-  walltime: 24:00:00
+  walltime: 20:00:00
   gres: gpu:8
   num_processes: 8
 

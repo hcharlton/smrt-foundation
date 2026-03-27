@@ -5,7 +5,7 @@ run_message: 'SSL pretraining with ZNorm log1p normalization (matching supervise
 resources:
   cores: 16
   memory: 256gb
-  walltime: 24:00:00
+  walltime: 2:00:00
   gres: gpu:8
   num_processes: 8
 

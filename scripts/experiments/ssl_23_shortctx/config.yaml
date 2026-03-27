@@ -5,7 +5,7 @@ run_message: 'SSL pretraining with context=128 to close the length gap with the 
 resources:
   cores: 16
   memory: 256gb
-  walltime: 24:00:00
+  walltime: 2:00:00
   gres: gpu:8
   num_processes: 8
 
