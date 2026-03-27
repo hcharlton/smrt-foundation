@@ -157,18 +157,21 @@ def main():
     if accelerator.is_main_process:
         print(f"SSL norm — means: {ssl_norm.means}, stds: {ssl_norm.stds}")
 
-    # Wrap dataset to apply normalization
+    # Wrap dataset to apply normalization and truncate to context length
     class NormedDataset(torch.utils.data.Dataset):
-        def __init__(self, inner, norm_fn):
+        def __init__(self, inner, norm_fn, context=None):
             self.inner = inner
             self.norm_fn = norm_fn
+            self.context = context
         def __len__(self):
             return len(self.inner)
         def __getitem__(self, idx):
             x = self.inner[idx]
+            if self.context is not None:
+                x = x[:self.context]
             return self.norm_fn(x)
 
-    normed_ds = NormedDataset(ds, ssl_norm)
+    normed_ds = NormedDataset(ds, ssl_norm, context=c['context'])
     dl = DataLoader(normed_ds, batch_size=c['batch_size'], num_workers=2,
                     pin_memory=True, prefetch_factor=4, shuffle=True)
 
