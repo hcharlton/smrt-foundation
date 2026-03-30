@@ -1,7 +1,12 @@
 # smrt-foundation
 A foundation model for pacbio SMRT reads, providing a native understanding of kinetics wrt nucleotide context. The success case is producing a downstream classifier that using the pretrained encoder that beats (ideally by a significant margin) a classifier that is trained purely by supervised learning. This is directly comparable to wav2vec 2.0 minus the quantization module. 
 ## Data
-PacBio SMRT HiFi reads. Unlike normal genetic sequencing data this comes with two extra features: Pulse width (pw or rp/fp) and interpulse duration (ipd or fi/ri). These respectively 
+PacBio SMRT HiFi reads. Unlike normal genetic sequencing data this comes with two extra features: Pulse width (pw or rp/fp) and interpulse duration (ipd or fi/ri). Since modifications to nucleuotides are also forced through the polymerase, they alter the kinetics of the molecule along with nucleotide context. This allows the inference of modifications on a per-site basis. This is natively done on a dual-strand basis for CpG sites by PacBio, but many other types of modifications are missing. 
+## Plan
+1. Establish a supervised baseline for single strand CpG methylation classification on 32/64 basepair samples. 
+2. Implement the "smrt2vec" following the design principles of wav2vec 2.0. 
+3. Run pretraining experiments 
+4. Align pretraining down downstream tasks (???)
 ## Self supervised task
 Use an info-NCE loss on masked latents in a 4096 sequence of SMRT. This involves masking a large percentages of the indices and then teaching the model how to make a projection that is more similar to the label (positive) and dissimilar to the in-batch negatives. 
 ## Downstream task
@@ -10,40 +15,99 @@ Binary classification task of a fixed context window around CpG sites for a sing
 ## Status
 
 ### Supervised baseline: RESOLVED
-Direct supervised training on v2 memmap shards reaches ~80% top1 (experiment 20 running on full dataset). The 70% regression from the original memmap pipeline was caused by a reverse kinetics misalignment bug in `zarr_to_methyl_memmap.py` — see "Debug new labeled dataset" below.
+Direct supervised training on v2 memmap shards reaches ~82% top1 (experiment 20 running on full dataset). The 70% regression from the original memmap pipeline was caused by a reverse kinetics misalignment bug in `zarr_to_methyl_memmap.py` — see "Debug new labeled dataset" below.
 
 ### Self-supervised pretraining: IN PROGRESS
-Contrastive encoder learns (InfoNCE loss converges), but does not generalize to downstream CpG classification. Analysis identified four blockers:
-1. **Information leakage through CNN receptive field.** The CNN has a 107-base receptive field. With latent masking (masking AFTER the CNN), adjacent unmasked latents share 96% of their input bases with masked positions. The transformer can trivially reconstruct masked positions by interpolating from neighbors — the pretraining task is too easy and doesn't force learning meaningful representations.
-2. **Normalization mismatch**: SSL trains on raw uint8 kinetics (0-255), supervised uses log1p + z-score (~-3 to +3). The `kin_embed` linear layer learns weights calibrated for the wrong input scale, making weight transfer fail.
-3. **No fine-tuning infrastructure**: No code exists to load pretrained weights, freeze/unfreeze layers, or use differential learning rates.
-4. **Sparse masking**: p_mask=0.05 is too easy for the same reason as #1.
+Earlier blockers (all resolved): information leakage from latent masking (fixed by input masking in `Smrt2VecInputMask`), normalization mismatch (fixed by shared `KineticsNorm`), missing fine-tuning infrastructure (built in exp 22), sparse masking (increased to p_mask=0.15).
 
-### Pretraining strategy
-Experiment 21 (`scripts/experiments/ssl_21_pretrain/`): SSL pretraining with:
-- **Input masking** via `Smrt2VecInputMask` (`model.py`): masks raw kinetics BEFORE the CNN (wav2vec 2.0 style), forcing the encoder to learn without information at masked positions. CNN runs twice per step (masked input for context, unmasked for targets). Replaces the old `Smrt2Vec` latent masking approach (which remains available for comparison).
-- ZNorm log1p normalization matching the supervised pipeline
-- Higher masking: p_mask=0.15, mask_size=10
-- Linear probe evaluation after each epoch (frozen encoder + linear head on labeled data) to track whether representations are becoming useful for classification
-- Model checkpointing for downstream transfer
+Current status: both contrastive (~58% probe) and autoencoder (~62% probe) pretraining on full-read SSL data produce representations far below the supervised baseline (82%). Experiments 25/26 test whether training on CpG data directly (labels discarded, context=32) closes the gap — isolating data regime vs pretraining objective as the bottleneck.
 
-#### Why contrastive pretraining failed to transfer
+### Shared encoder (`SmrtEncoder`)
 
-Experiments 21 and 23 showed that the InfoNCE loss converges but the linear probe accuracy on CpG classification *declines* over training epochs. Three compounding issues were identified:
+All pretraining and supervised models share the same encoder. The forward path:
 
-1. **Normalization mismatch** (fixed in later runs): The probe computed separate `KineticsNorm` statistics from the CpG dataset instead of reusing the SSL training normalization, so the encoder received out-of-distribution inputs during probing.
-2. **Sequence length mismatch**: The encoder trained on 4096-position sequences (1024 after CNN) but was probed on 32-position CpG windows (8 after CNN). Transformer attention patterns learned for 1024 positions don't transfer to 8. Experiment 23 reduced this to context=128 (32 after CNN) — probe still didn't improve.
-3. **Task misalignment**: InfoNCE teaches "given surrounding context, predict what kinetics belong at position X." This reconstruction-in-embedding-space objective treats all positions equally and discards the methylation signal as noise. The targets are layer-normed CNN features that shift as the encoder trains (moving-target problem), and the loss operates in an abstract cosine-similarity space disconnected from the actual kinetics values.
+```
+Input [B, T, 4]  (seq token, IPD, PW, pad mask)
+  │
+  ├─ SmrtEmbedding
+  │    nuc: Embedding(5, d/2)  →  [B, T, d/2]     (scaled by √d)
+  │    kin: Linear(2, d/2)     →  [B, T, d/2]     (scaled by √d)
+  │    concat + LayerNorm      →  [B, T, d]
+  │
+  ├─ CNN (11 ResBlocks, two stride-2 for 4× downsampling)
+  │    [B, T, d] → permute → [B, d, T] → conv stack → [B, d, T/4] → permute → [B, T/4, d]
+  │    Also downsamples pad mask: [B, T] → max_pool → [B, T/4]
+  │
+  ├─ Sinusoidal PE: [B, T/4, d] += pe[:, :T/4]
+  │
+  └─ Transformer (n_layers × {LayerNorm → MultiHeadAttn → LayerNorm → MLP(d→4d→d)})
+       [B, T/4, d] → [B, T/4, d]
+```
 
-### Masked autoencoder pretraining
+Default: d_model=128, n_layers=4, n_head=4. CNN receptive field ≈ 107 bases.
 
-Experiment 24 (`scripts/experiments/ssl_24_autoencoder/`) replaces the contrastive objective with direct kinetics reconstruction via `SmrtAutoencoder`:
+### Contrastive pretraining (`Smrt2VecInputMask`)
 
-- **Architecture**: The encoder (`SmrtEncoder`, shared with all other models) feeds into a lightweight `SmrtDecoder` — two transposed convolutions for 4x upsampling back to input resolution, then a linear projection to 2 channels (IPD, PW). The decoder is intentionally shallow so the encoder must learn informative representations; a deep decoder could reconstruct from minimal encoder features.
-- **Masking**: Same input-level masking as experiment 23 — random contiguous spans of kinetics channels zeroed before the CNN (p_mask=0.15, mask_size=10). Sequence tokens pass through unmasked, giving the encoder access to nucleotide context.
-- **Loss**: `MaskedReconstructionLoss` — MSE between predicted and original kinetics at masked positions only. The targets are the normalized input values themselves (fixed), not learned representations. No distributed all_gather needed — standard DDP gradient averaging.
-- **Normalization**: `KineticsNorm` (log1p + z-score) computed once from SSL data and reused for both training and probe evaluation, eliminating the distribution mismatch.
-- **Context**: 128 positions (32 after CNN), matching the probe's operating regime. SSL shards are truncated from 4096 to 128 at load time.
+Experiments 21, 23. Wav2vec 2.0 style: mask input kinetics, encode, match to unmasked targets via InfoNCE.
+
+```
+Input x [B, T, 4]
+  │
+  ├─ Targets branch (no grad):
+  │    encoder.get_latents(x)  →  z_clean [B, T/4, d]
+  │    LayerNorm(z_clean)      →  targets [B, T/4, d]
+  │
+  ├─ Masked branch:
+  │    apply_input_mask(x)     →  x_masked [B, T, 4]  (kinetics ch 1,2 zeroed at random spans)
+  │    encoder.get_latents     →  z [B, T/4, d]
+  │    add_pe + transformer    →  c [B, T/4, d]
+  │    MLP(d→d, GELU, d→d)    →  c_proj [B, T/4, d]
+  │
+  └─ Loss (AgInfoNCE):
+       Select masked positions: c_proj[mask] [N, d], targets[mask] [N, d]
+       L2-normalize both, cosine similarity matrix [N, N_gathered] / τ
+       Cross-entropy against diagonal (each prediction matches its own target)
+       Distributed: all_gather targets across ranks for more negatives
+```
+
+**Transfer results on full-read SSL data** (experiments 21, 23): InfoNCE loss converges, but the linear probe accuracy on CpG classification *declines* over epochs (~58%). Three compounding issues identified:
+
+1. **Normalization mismatch** (fixed in exp 21 rerun): Probe computed separate `KineticsNorm` from CpG data instead of reusing SSL norm.
+2. **Length mismatch** (tested in exp 23): Encoder trained on T=4096 (1024 after CNN) but probed on T=32 (8 after CNN). Reducing to T=128 didn't help.
+3. **Task misalignment**: Targets are layer-normed CNN features that shift as the encoder trains (moving target). The loss operates in cosine-similarity space disconnected from actual kinetics values.
+
+Experiment 26 re-tests contrastive on CpG data directly (labels discarded, context=32) to isolate whether the objective or the data regime is the bottleneck.
+
+### Masked autoencoder pretraining (`SmrtAutoencoder`)
+
+Experiment 24. Replaces contrastive matching with direct kinetics reconstruction.
+
+```
+Input x [B, T, 4]
+  │
+  ├─ Save target: x_orig[..., 1:3]  →  kin_target [B, T, 2]
+  │
+  ├─ apply_input_mask(x)             →  x_masked [B, T, 4]
+  │
+  ├─ Encoder: SmrtEncoder(x_masked)  →  c [B, T/4, d]
+  │
+  ├─ Decoder (SmrtDecoder):
+  │    permute                        →  [B, d, T/4]
+  │    ConvTranspose1d(d, d, k=4, s=2, p=1) + GELU  →  [B, d, T/2]
+  │    ConvTranspose1d(d, d, k=4, s=2, p=1) + GELU  →  [B, d, T]
+  │    permute + Linear(d, 2)        →  kin_recon [B, T, 2]
+  │
+  └─ Loss (MaskedReconstructionLoss):
+       MSE(kin_recon[mask], kin_target[mask])
+       Targets are the original normalized kinetics (fixed, not learned)
+       No all_gather — standard DDP gradient averaging
+```
+
+The decoder is intentionally shallow (two transpose convolutions + linear) so the encoder must learn informative representations; a deep decoder could reconstruct from minimal encoder features. Normalization (`KineticsNorm`: log1p + z-score) is computed once from SSL data and reused for both training and probe evaluation.
+
+**Transfer results on full-read SSL data** (experiment 24): Probe accuracy stabilized at ~62% (no decline), a 4pp improvement over contrastive. Still 20pp below the supervised baseline (82%).
+
+**Current experiments** (25, 26): Both architectures retrained on CpG data directly (pos+neg combined, labels discarded, context=32). Eliminates the data distribution, context length, and normalization mismatches. If probe accuracy improves significantly, the bottleneck was data regime. If not, the pretraining objectives themselves are insufficient for this task.
 
 Experiment 22 (`scripts/experiments/supervised_22_finetune/`): Fine-tune pretrained encoder:
 - Load encoder weights from experiment 21 checkpoint
