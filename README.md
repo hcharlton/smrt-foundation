@@ -20,7 +20,7 @@ Direct supervised training on v2 memmap shards reaches ~82% top1 (experiment 20 
 ### Self-supervised pretraining: IN PROGRESS
 Earlier blockers (all resolved): information leakage from latent masking (fixed by input masking in `Smrt2VecInputMask`), normalization mismatch (fixed by shared `KineticsNorm`), missing fine-tuning infrastructure (built in exp 22), sparse masking (increased to p_mask=0.15).
 
-Current status: both contrastive (~58% probe) and autoencoder (~62% probe) pretraining on full-read SSL data produce representations far below the supervised baseline (82%). Experiments 25/26 test whether training on CpG data directly (labels discarded, context=32) closes the gap — isolating data regime vs pretraining objective as the bottleneck.
+Current status: both contrastive (~58% probe) and autoencoder (~62% probe) pretraining on full-read SSL data produce representations far below the supervised baseline (82%). Experiments 25/26 test whether training on CpG data directly (labels discarded, context=32) closes the gap by isolating data regime vs pretraining objective as the bottleneck.
 
 ### Shared encoder (`SmrtEncoder`)
 
@@ -76,7 +76,7 @@ Input x [B, T, 4]
 2. **Length mismatch** (tested in exp 23): Encoder trained on T=4096 (1024 after CNN) but probed on T=32 (8 after CNN). Reducing to T=128 didn't help.
 3. **Task misalignment**: Targets are layer-normed CNN features that shift as the encoder trains (moving target). The loss operates in cosine-similarity space disconnected from actual kinetics values.
 
-Experiment 26 re-tests contrastive on CpG data directly (labels discarded, context=32) to isolate whether the objective or the data regime is the bottleneck.
+Experiment 26 re-tests contrastive on CpG data directly (labels discarded, context=32) to isolate whether the objective or the data regime/handling is the bottleneck.
 
 ### Masked autoencoder pretraining (`SmrtAutoencoder`)
 

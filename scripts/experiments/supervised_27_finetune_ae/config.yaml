@@ -5,7 +5,7 @@ run_message: 'Fine-tune the exp 25 autoencoder encoder (best pretrained checkpoi
 resources:
   cores: 16
   memory: 256gb
-  walltime: 2:00:00
+  walltime: 6:00:00
   gres: gpu:8
   num_processes: 8
 
@@ -23,7 +23,7 @@ classifier:
   n_layers: 4
   vocab_size: 5
   weight_decay: 0.02
-  ds_limit: 2000000
+  ds_limit: 20000000
   batch_size: 512
   optimizer: 'AdamW'
 
