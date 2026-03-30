@@ -41,7 +41,10 @@ def load_pretrained_encoder(checkpoint_path, model):
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
     encoder_weights = checkpoint['encoder_state_dict']
 
-    # Transfer encoder weights (skip PE buffer size mismatch by loading non-strict)
+    # Filter out PE buffer if sizes don't match (pretrained at different max_len)
+    encoder_weights = {k: v for k, v in encoder_weights.items()
+                       if not (k == 'pe.pe' and v.shape != model.encoder.pe.pe.shape)}
+
     missing, unexpected = model.encoder.load_state_dict(encoder_weights, strict=False)
 
     print(f"Loaded pretrained encoder from {checkpoint_path}")
