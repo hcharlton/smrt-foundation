@@ -30,6 +30,16 @@
 
 **Conclusion:** Switching from contrastive to reconstruction objective yields only ~4-5 percentage points of improvement. The pretraining objective alone is not the dominant bottleneck. Possible remaining factors: (1) the encoder architecture itself may not learn transferable features at this scale/depth, (2) the unlabeled SSL data (full reads) may not contain enough methylation-discriminative signal for the probe to extract, (3) the linear probe evaluation may be too shallow to exploit the learned representations — full fine-tuning (exp 22) could reveal more. The gap between 63% and 80% suggests pretrained features carry *some* methylation signal but far less than direct supervision provides.
 
+## 2026-03-30: Training on CpG Data Improves but Does Not Close Gap to Supervised
+
+**Hypothesis:** The 16-20pp gap between SSL pretraining and supervised baseline is primarily caused by data distribution mismatch (full reads vs CpG-centered windows). Training SSL directly on CpG data (labels discarded, context=32) should close the gap.
+
+**Experimental Setup:** Experiment 25 (autoencoder on CpG data, ctx=32, 12 epochs) and experiment 26 (contrastive on CpG data, ctx=32, 12 epochs). Both use CpG pos+neg memmap data with labels discarded, KineticsNorm from CpG data, same architecture (d=128, L=4).
+
+**Observation:** Autoencoder probe: ~66% (up from 62% on full reads). Contrastive probe: ~63% (up from 58% on full reads). Both stable across epochs, not improving. 30 minutes training each.
+
+**Conclusion:** Data regime mismatch accounts for ~4-5pp of the gap but not the remaining ~16pp. The improvement is consistent across both architectures, suggesting it's a data effect, not architecture-specific. The SSL objectives themselves (reconstruction and contrastive) produce representations that plateau at ~63-66% linear probe accuracy regardless of data regime. The linear probe may be too strict a test — fine-tuning (exp 22) should be run next to determine if the representations contain non-linearly-separable signal that end-to-end training can unlock.
+
 ## ~2026-03: Reducing Pretraining Context Length Does Not Fix Transfer
 
 **Hypothesis:** The transfer failure in experiment 21 is primarily caused by the length mismatch between pretraining (4096 bases) and downstream evaluation (32 bases). Training at context=128 (32 latents after CNN, matching probe) will fix probe accuracy.
