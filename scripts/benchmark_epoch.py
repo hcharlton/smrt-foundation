@@ -92,6 +92,7 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.02)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"\nModel parameters: {n_params:,}")
+    print(f"CNN receptive field: {model.encoder.cnn.r0} bases")
 
     # --- Phase 1: Data loading throughput ---
     print(f"\n=== Data loading (no GPU) ===")

@@ -177,6 +177,8 @@ def main():
     if accelerator.is_main_process:
         n_params = sum(p.numel() for p in model.parameters())
         print(f"Model parameters: {n_params:,}")
+        print(f"CNN receptive field: {model.encoder.cnn.r0} bases")
+        tracker.writer.add_scalar("architecture/cnn_receptive_field", model.encoder.cnn.r0, 0)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(c['max_lr']), weight_decay=c['weight_decay'])
     criterion = MaskedReconstructionLoss()
