@@ -10,6 +10,9 @@ training_logs/
 *.stderr
 *.sentinel
 *.csv
+march2026update/
+notebooks/scratch.ipynb
+wave2vec2.0.pdf
 *.out
 CLAUDE.md
 .claude/

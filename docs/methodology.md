@@ -72,6 +72,14 @@
 
 **Justification:** With minimal reconstruction capacity in the decoder, the encoder must learn rich, informative representations to support accurate kinetics reconstruction. This is the same design principle as MAE (He et al., 2022): asymmetric encoder-decoder where the encoder does the heavy lifting.
 
+## 2026-03: Pretraining Data Scale Must Exceed Labeled Data
+
+**Motivation:** Exp 27 fine-tuned the exp 25 autoencoder encoder and reached 79% — 3pp below the supervised baseline trained from scratch (82%). The pretraining data (CpG memmap with labels removed) is a subset of the fine-tuning data (same CpG memmap with labels). At a 1:1 unlabeled:labeled ratio, pretraining provides no information advantage.
+
+**Observation:** wav2vec 2.0 uses 10-6000x more unlabeled data than labeled. The SSL value proposition is leveraging abundant unlabeled data that can't be labeled. When pretraining and fine-tuning use the same data, pretraining adds only a different loss function's inductive bias, not additional information.
+
+**Implication:** Future pretraining experiments should use a larger unlabeled corpus (e.g., the full ob007_raw.memmap at ~839K reads) and fine-tune on a smaller labeled subset. The data regime mismatch (full reads vs CpG windows) remains a challenge but fine-tuning may bridge it where linear probing couldn't.
+
 ## 2026-03: SSL on Downstream Data Distribution (CpG Windows)
 
 **Motivation:** Experiments 21-24 trained SSL on full-read segments (ob007_raw.memmap, context=4096 or 128) but evaluated on 32-base CpG windows. Three mismatches: data distribution (genome-wide vs CpG-biased), context length (128→32), and normalization statistics. All three compound to prevent transfer.
