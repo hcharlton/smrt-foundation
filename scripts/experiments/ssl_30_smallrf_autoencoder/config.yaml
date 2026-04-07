@@ -1,0 +1,43 @@
+experiment_type: 'ssl'
+experiment_name: '30_smallrf_autoencoder'
+run_message: 'Masked autoencoder (A1 variant) on CpG data with SmrtAutoencoderSmallRF: 4-block CNN, receptive field 27, 4x downsample. Tests whether reducing RF to fit inside ctx=32 closes the 3pp gap between exp 27 fine-tune (79%) and exp 20 supervised baseline (82%). Everything else is identical to exp 25 so the delta is attributable to the CNN architecture alone.'
+
+resources:
+  cores: 16
+  memory: 256gb
+  walltime: 2:00:00
+  gres: gpu:8
+  num_processes: 8
+
+# SSL data source: CpG memmap shards (labels ignored, combined pos+neg)
+ssl_pos_dir: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+ssl_neg_dir: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+
+# Labeled data for linear probe evaluation
+probe_pos_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+autoencoder:
+  d_model: 128
+  n_head: 4
+  context: 32
+  n_layers: 4
+  vocab_size: 5
+  weight_decay: 0.02
+  p_mask: 0.15
+  mask_size: 5
+  epochs: 12
+  ds_limit: 2000000
+  batch_size: 1024
+  optimizer: 'AdamW'
+  max_lr: 3e-4
+  pct_start: 0.25
+
+probe:
+  context: 32
+  batch_size: 512
+  epochs: 3
+  lr: 3e-3
+  ds_limit: 500000

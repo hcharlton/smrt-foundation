@@ -632,3 +632,101 @@ class DirectClassifier(nn.Module):
     c = self.encoder.forward(x)
     logits = self.head(c[:, c.shape[1]//2, :])
     return logits
+
+
+### Small-receptive-field variants
+#
+# The default CNN has 11 ResBlocks and a receptive field of ~107 bases. At
+# short downstream contexts (e.g., the 32-base CpG windows used by exp
+# 25/26/27), RF (107) >> context (32), which means every CNN output latent
+# is a function of the entire input — there is no "local" region of the
+# input that a latent specifically represents. This erases the locality
+# that masked-prediction SSL objectives (both contrastive InfoNCE and the
+# masked autoencoder) implicitly depend on: the model is supposed to
+# "predict the missing position given the surrounding context", but with
+# RF > context the surrounding context IS the entire input, including the
+# position being predicted.
+#
+# The Small-RF variants below rebuild the CNN with 4 ResBlocks and a
+# receptive field of 27 bases, which fits comfortably inside a 32-base
+# context window. The downsampling ratio (4x) is preserved so latent counts
+# and positional geometry match the default encoder at equal contexts,
+# which keeps the probe head, the decoder, and the shape contracts of the
+# SSL wrappers unchanged.
+#
+# Each variant is implemented by inheriting from its non-variant parent
+# and explicitly calling nn.Module.__init__() to skip the parent's __init__
+# (which would build the wrong CNN). All forward-path methods are inherited
+# unchanged, so behavior matches the base class except for the CNN stack.
+# State-dict keys are NOT interchangeable with the base classes because the
+# ResBlock counts differ — these are fresh-training-only variants.
+
+
+class CNNSmallRF(CNN):
+  """
+  CNN variant with 4 ResBlocks (k=3, k=3, k=3 stride=2, k=3 stride=2) and
+  receptive field 27. Same 4x total downsampling as the default CNN.
+
+  Intended for ctx <= 32 tasks where the default CNN's RF=107 exceeds the
+  input and erases per-latent locality. At RF=27 in a 32-base input, each
+  latent depends on a distinct ~27-base sub-window, restoring the locality
+  that masked-prediction objectives rely on.
+
+  Inherits forward, _compute_r0, and _get_output_shape from CNN.
+  """
+  def __init__(self, d_model, max_len, dropout_p):
+    # Skip CNN.__init__ (which builds the default 11-block extractor).
+    nn.Module.__init__(self)
+    self.max_len = max_len
+    self.in_channels = d_model
+    self.extractor = nn.ModuleList([
+        ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # (B, C, T)   -> (B, C, T)
+        ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # (B, C, T)   -> (B, C, T)
+        ResBlock(self.in_channels, self.in_channels, kernel_size=3, stride=2),  # (B, C, T)   -> (B, C, T/2)
+        ResBlock(self.in_channels, self.in_channels, kernel_size=3, stride=2),  # (B, C, T/2) -> (B, C, T/4)
+    ])
+    self.dropout = nn.Dropout(p=dropout_p)
+    # calculate fc layer input with dummy passthrough
+    self.output_shapes = self._get_output_shape()
+    self.r0 = self._compute_r0()
+
+
+class SmrtEncoderSmallRF(SmrtEncoder):
+  """
+  SmrtEncoder variant using CNNSmallRF (RF=27) instead of CNN (RF=107).
+  See the Small-RF section comment for motivation.
+
+  Inherits get_latents, add_pe, forward_transformer, and forward from
+  SmrtEncoder. Only the CNN differs.
+  """
+  def __init__(self, d_model=128, n_layers=4, n_head=4, max_len=32, dropout_p=0.01):
+    # Skip SmrtEncoder.__init__ (which would instantiate the default CNN).
+    nn.Module.__init__(self)
+    self.d_model = d_model
+    self.embed = SmrtEmbedding(d_model)
+    self.pe = PositionalEncoding(d_model, max_len=max_len)
+    self.cnn = CNNSmallRF(d_model, max_len=max_len, dropout_p=dropout_p)
+    self.layer_norm_target = nn.LayerNorm(d_model)
+    self.blocks = nn.ModuleList([
+        TransformerBlock(d_model=d_model, n_head=n_head, max_len=max_len) for _ in range(n_layers)
+    ])
+
+
+class SmrtAutoencoderSmallRF(SmrtAutoencoder):
+  """
+  SmrtAutoencoder variant using SmrtEncoderSmallRF (CNN RF=27) instead of
+  SmrtEncoder (CNN RF=107). Intended for short-context autoencoder
+  pretraining (ctx <= 32) where the default encoder's RF would cover the
+  entire input and defeat the "reconstruct the masked kinetics from the
+  surrounding context" framing.
+
+  Same masking, decoder, and return signature as SmrtAutoencoder. Inherits
+  apply_input_mask and forward from SmrtAutoencoder.
+  """
+  def __init__(self, d_model=128, n_layers=4, n_head=4, max_len=32, p_mask=0.15, mask_size=10):
+    # Skip SmrtAutoencoder.__init__ (which would build the default encoder).
+    nn.Module.__init__(self)
+    self.encoder = SmrtEncoderSmallRF(d_model, n_layers, n_head, max_len)
+    self.decoder = SmrtDecoder(d_model)
+    self.p_mask = p_mask
+    self.mask_size = mask_size

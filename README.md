@@ -8,7 +8,8 @@ PacBio SMRT HiFi reads. Unlike normal genetic sequencing data this comes with tw
 1. ~~Establish a supervised baseline for single strand CpG methylation classification on 32/64 basepair samples.~~ Done (exp 20, ~82% top-1).
 2. ~~Implement the "smrt2vec" following the design principles of wav2vec 2.0.~~ Done (`Smrt2VecInputMask`, `SmrtAutoencoder`).
 3. ~~Run pretraining experiments.~~ Contrastive (exp 21/23/26) and autoencoder (exp 24/25) completed; fine-tuning (exp 27) reached 79%.
-4. Close the gap between pretrained and supervised models. Current direction: large-scale pretraining with data scale advantage (exp 29, deferred).
+4. Close the gap between pretrained and supervised models. Current direction: experimenting with receptive field
+
 ## Self supervised task
 Use an info-NCE loss on masked latents in a 4096 sequence of SMRT. This involves masking a large percentages of the indices and then teaching the model how to make a projection that is more similar to the label (positive) and dissimilar to the in-batch negatives. 
 ## Downstream task
@@ -23,6 +24,9 @@ Direct supervised training on v2 memmap shards reaches ~82% top1 (experiment 20 
 Earlier blockers (all resolved): information leakage from latent masking (fixed by input masking in `Smrt2VecInputMask`), normalization mismatch (fixed by shared `KineticsNorm`), missing fine-tuning infrastructure (built in exp 22), sparse masking (increased to p_mask=0.15).
 
 Contrastive pretraining (exp 21/23) produced probe accuracy of ~58% that declined over epochs. Autoencoder pretraining (exp 24) stabilized at ~62%. Training on CpG data directly (exp 25/26) improved both by +4-5pp (autoencoder ~66%, contrastive ~63%). Fine-tuning the best autoencoder encoder (exp 27) recovered 13pp over the linear probe, reaching 79% -- still 3pp below the supervised baseline. The comparison is confounded by optimizer schedule differences and 1:1 unlabeled:labeled data ratio. Two experiments are created but deferred: exp 28 (data-budget control) and exp 29 (large-scale pretraining on 839K full reads with random cropping, ~1000 GPU hours).
+
+TLDR/Summary: The pretraining, even when it's performing at its best (79 percent) is still worse than 1 epoch of training directly.  
+
 
 ### Shared encoder (`SmrtEncoder`)
 
