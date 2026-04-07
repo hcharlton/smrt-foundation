@@ -1,6 +1,6 @@
 # Research Status
 
-*Last updated: 2026-03-30*
+*Last updated: 2026-04-01*
 
 ## Active Objective
 
@@ -18,23 +18,25 @@
 
 ## Current State
 
-Fine-tuning (exp 27) recovered most of the probe gap (66% → 79%) but landed 3pp below the supervised baseline (82%). The comparison is confounded:
+Fine-tuning (exp 27) recovered most of the probe gap (66% -> 79%) but landed 3pp below the supervised baseline (82%). The comparison is confounded by three factors:
 
-1. **Optimizer schedule difference**: Exp 20 uses single-stage AdamW at lr=3e-3 for 20 epochs. Exp 27 uses two-stage (5 frozen + 15 unfrozen at encoder lr=3e-4). The 10x lower encoder LR may be too conservative.
+1. **Optimizer schedule difference**: Exp 20 uses single-stage AdamW at lr=3e-3 for 20 epochs. Exp 27 uses two-stage (5 frozen + 15 unfrozen at encoder lr=3e-4). The 10x lower encoder LR may undertrain.
 
-2. **No information advantage from pretraining**: Exp 25 pretrains on the CpG data with labels removed. Exp 27 fine-tunes on the same data with labels. The unlabeled pretraining data is a subset of the labeled fine-tuning data. SSL is designed to leverage MORE unlabeled data than labeled data (wav2vec 2.0 uses 10-6000x more unlabeled data). At a 1:1 ratio, pretraining provides no information the supervised model doesn't already have.
+2. **No information advantage from pretraining**: Exp 25 pretrains on CpG data with labels removed; exp 27 fine-tunes on the same data with labels. At a 1:1 unlabeled:labeled ratio, pretraining provides no information the supervised model doesn't already have.
 
-3. **Short pretraining**: Exp 25 trained for 30 minutes (~3k steps, 12 epochs). Probe plateaued, but more epochs on the same 2M samples would just overfit reconstruction — it wouldn't add new signal.
+3. **Short pretraining**: Exp 25 trained for ~3k steps (12 epochs on 2M samples). Probe plateaued, but more epochs on the same data would just overfit reconstruction.
+
+Two experiments have been designed to disentangle these confounds but are currently deferred (not yet submitted to the cluster).
 
 ## Open Questions
 
-1. **Is the 3pp gap from the fine-tuning schedule or from pretraining hurting?** A controlled experiment (exp 20 schedule + exp 27's ds_limit) would disambiguate.
+1. **Is the 3pp gap from the fine-tuning schedule or from pretraining hurting?** Exp 28 controls for data budget by training exp 20 from scratch with ds_limit=20M (matching exp 27's budget).
 
-2. **Does pretraining on MORE data (full reads) help fine-tuning?** Exp 24's checkpoint (autoencoder on 839K full reads) could be fine-tuned with the exp 27 schedule. This tests the actual SSL value proposition: more unlabeled data → better initialization.
+2. **Does pretraining on MORE data help?** Exp 29 tests the actual SSL value proposition: 3000-epoch autoencoder on 839K full reads with random cropping (~27M effective windows/epoch, ~1000 GPU hours). This is the first experiment with a genuine data scale advantage.
 
-## Planned Experiments
+## Deferred Experiments
 
 | Experiment | Purpose | Status |
 |-----------|---------|--------|
-| supervised_28_baseline_control | Exp 20 from scratch with ds_limit=20M — matches exp 27's data budget | Ready to run |
-| ssl_29_large_pretrain | 3000-epoch autoencoder on full SSL data with random cropping (~1000 GPU hours). Tests whether more unlabeled data → better initialization | Ready to run |
+| supervised_28_baseline_control | Exp 20 from scratch with ds_limit=20M -- matches exp 27's data budget | Created, deferred |
+| ssl_29_large_pretrain | 3000-epoch autoencoder on full SSL data with random cropping (~1000 GPU hours). Tests whether more unlabeled data -> better initialization | Created, deferred |

@@ -191,6 +191,222 @@ Direct comparison tests between the legacy parquet pipeline (`archive/make_legac
 
 ---
 
+### `test_kinetics_norm.py`
+
+Equivalence tests verifying that `KineticsNorm` produces identical statistics and normalized outputs as the original `ZNorm` (on labeled data) and `SSLNorm` (on SSL data). Ensures the unified normalization class is a drop-in replacement.
+
+#### Session fixtures
+
+| Fixture | What it does |
+|---|---|
+| `labeled_ds` | `LabeledMemmapDataset` with 10,000 samples from CpG subset memmaps |
+| `ssl_ds` | `ShardedMemmapDataset` with 10,000 samples from SSL subset memmaps |
+
+#### Test classes
+
+**`TestZNormEquivalence`** &mdash; KineticsNorm matches ZNorm on LabeledMemmapDataset
+
+| Test | Verifies |
+|---|---|
+| `test_statistics_match` | KineticsNorm means/stds for kinetics channels (cols 1, 2) match ZNorm within atol=1e-4 |
+| `test_batch_output_identical` | Normalized tensor output is identical to ZNorm output within atol=1e-5 |
+| `test_multiple_samples` | Equivalence holds across 50 different samples |
+
+**`TestSSLNormEquivalence`** &mdash; KineticsNorm matches SSLNorm on ShardedMemmapDataset
+
+| Test | Verifies |
+|---|---|
+| `test_statistics_match` | KineticsNorm means/stds match SSLNorm within atol=1e-4 |
+| `test_batch_output_identical` | Normalized output matches SSLNorm within atol=1e-5 |
+| `test_multiple_samples` | Equivalence holds across 50 samples |
+
+**`TestKineticsNormProperties`** &mdash; Internal behavior checks
+
+| Test | Verifies |
+|---|---|
+| `test_seq_and_mask_unchanged` | Columns 0 (sequence) and 3 (mask) are not modified by normalization |
+| `test_kinetics_are_modified` | Columns 1 and 2 (IPD, PW) are modified |
+| `test_no_log_transform_mode` | z-score-only mode (log_transform=False) still modifies kinetics |
+
+---
+
+### `test_ssl_21_train.py`
+
+Static AST-based analysis of `ssl_21_pretrain/train.py`. Parses the training script source to verify that the linear probe evaluation runs on all ranks (not gated behind `is_main_process`) and that `wait_for_everyone()` synchronizes ranks between probe and next epoch. These guards prevent NCCL timeouts from rank desynchronization.
+
+#### Module fixtures
+
+| Fixture | What it does |
+|---|---|
+| `train_source` | Raw source code of train.py as string |
+| `train_ast` | Parsed AST of train.py |
+
+#### Test classes
+
+**`TestLinearProbeNotRankGated`**
+
+| Test | Verifies |
+|---|---|
+| `test_probe_call_not_inside_is_main_process_guard` | `linear_probe_eval()` is not inside an `if is_main_process` block (single-rank probe causes RNG divergence and NCCL timeout at next epoch) |
+
+**`TestBarrierAfterProbe`**
+
+| Test | Verifies |
+|---|---|
+| `test_wait_for_everyone_after_probe` | `wait_for_everyone()` exists between `linear_probe_eval()` and the next `model.train()` call |
+
+---
+
+### `test_autoencoder.py`
+
+Unit tests for `SmrtAutoencoder`, `SmrtDecoder`, and `MaskedReconstructionLoss`. Uses synthetic inputs (no data files required).
+
+#### Test classes
+
+**`TestSmrtDecoder`** &mdash; Decoder output dimensions
+
+| Test | Verifies |
+|---|---|
+| `test_output_shape` | Input `(B, T/4, d)` produces output `(B, T, 2)` |
+| `test_different_lengths` | Correct shapes across context lengths (32, 64, 128, 256) |
+
+**`TestSmrtAutoencoder`** &mdash; Forward pass, masking, gradients
+
+| Test | Verifies |
+|---|---|
+| `test_forward_shapes` | Returns kin_recon `(B, T, 2)`, kin_target `(B, T, 2)`, mask `(B, T)` |
+| `test_masking_zeros_kinetics` | `apply_input_mask()` zeros kinetics at masked positions |
+| `test_masking_preserves_sequence` | Sequence tokens (col 0) and pad mask (col 3) unchanged after masking |
+| `test_masking_produces_masked_positions` | Masking actually creates True values in the mask tensor |
+| `test_gradient_flows` | Loss backward propagates gradients to both encoder and decoder |
+
+**`TestMaskedReconstructionLoss`** &mdash; Loss function correctness
+
+| Test | Verifies |
+|---|---|
+| `test_basic` | Produces scalar > 0 on random input |
+| `test_perfect_reconstruction` | Loss < 1e-6 when recon equals target |
+| `test_only_masked_positions` | Loss computed only at masked positions, not everywhere |
+
+**`TestEncoderCompatibility`** &mdash; Weight transfer between models
+
+| Test | Verifies |
+|---|---|
+| `test_encoder_weights_transfer` | Autoencoder encoder weights load into DirectClassifier via `load_state_dict()` (only positional encoding buffer size may differ) |
+
+---
+
+### `test_large_pretrain.py`
+
+Tests for experiment 29 features: random cropping augmentation, cosine LR scheduling over 3000 epochs, and periodic probe/checkpoint logic. Uses synthetic data and scheduler objects (no cluster or GPU required).
+
+#### Test classes
+
+**`TestRandomCropping`** &mdash; Random crop augmentation
+
+| Test | Verifies |
+|---|---|
+| `test_returns_correct_shape` | Cropping `(4096, 4)` with context=128 produces `(128, 4)` |
+| `test_crops_differ_across_calls` | 10 crops from same sample have at least 2 different start positions |
+| `test_crop_stays_in_bounds` | 100 crops never exceed input length |
+| `test_short_input_fallback` | Input shorter than context falls back gracefully |
+
+**`TestLRSchedulerLongTraining`** &mdash; Cosine schedule with low warmup
+
+| Test | Verifies |
+|---|---|
+| `test_lr_starts_near_zero` | LR < 1e-6 at step 1 |
+| `test_lr_peaks_after_warmup` | LR = max_lr at end of warmup phase (1% of total steps) |
+| `test_lr_decays_at_midpoint` | LR between floor and max at midpoint |
+| `test_lr_reaches_floor_at_end` | Final LR = max_lr * 0.05 |
+| `test_lr_never_negative` | LR >= 0 at sampled checkpoints throughout training |
+
+**`TestProbeFrequency`** &mdash; Periodic evaluation and checkpointing
+
+| Test | Verifies |
+|---|---|
+| `test_probe_runs_at_correct_intervals` | Probe fires at correct epoch multiples |
+| `test_checkpoint_runs_at_correct_intervals` | Checkpoint saves at correct epoch multiples |
+
+---
+
+### `test_kinetics_distributions.py`
+
+Compares forward vs reverse kinetics distributions (fi vs ri, fp vs rp) at CpG sites using Kolmogorov-Smirnov tests. Identifies whether mixing forward and reverse kinetics in the same model input columns forces the embedding to handle two different distributions. Requires BAM files on disk; skips if not found.
+
+Can also run standalone: `python tests/test_kinetics_distributions.py [max_reads]`
+
+| Test | Verifies |
+|---|---|
+| `test_kinetics_distributions` | Runs distribution comparison for methylated and unmethylated BAMs, prints KS statistics and summary |
+
+---
+
+### `test_zarr_to_methyl_memmap_v2.py`
+
+End-to-end integration tests for the v2 CpG memmap pipeline: Zarr &rarr; shards &rarr; `LabeledMemmapDataset` &rarr; `DataLoader`. Requires Zarr stores on disk; skips if not found.
+
+#### Session fixtures
+
+| Fixture | What it does |
+|---|---|
+| `config` | Loads `configs/data.yaml` |
+| `pos_zarr` / `neg_zarr` | Paths to positive/negative Zarr stores (auto-discovered) |
+| `pos_shards` / `neg_shards` | Runs `zarr_to_methyl_memmap_v2` on the Zarr stores into temp directories |
+
+#### Test classes
+
+**`TestCpgExtraction`** &mdash; CpG window identification
+
+| Test | Verifies |
+|---|---|
+| `test_all_windows_have_cg_at_center` | All windows have C at center, G at center+1 |
+| `test_window_count_matches_zarr` | Total windows = 2x CpG sites in Zarr (forward + reverse) |
+| `test_forward_and_reverse_alternate` | Windows written in fwd/rev pairs; both have CG at center |
+
+**`TestKineticsAlignment`** &mdash; Kinetics values match Zarr source
+
+| Test | Verifies |
+|---|---|
+| `test_forward_kinetics_match_zarr` | Forward window fi/fp match Zarr values at corresponding positions |
+| `test_reverse_kinetics_match_zarr` | Reverse window ri/rp match Zarr with correct reverse indexing |
+| `test_reverse_seq_is_rc_of_forward` | Reverse sequence is reverse complement of forward |
+
+**`TestShardIntegrity`** &mdash; Shard format and metadata
+
+| Test | Verifies |
+|---|---|
+| `test_shard_shape` | All shards are `(N, 32, 4)` |
+| `test_mask_is_zero` | Mask channel is all 0.0 (no padding in CpG windows) |
+| `test_no_nan_inf` | All values are finite |
+| `test_seq_tokens_valid` | Sequence tokens in range [0, 4] |
+| `test_schema_written` | `schema.json` exists in train/ and val/ |
+| `test_train_val_no_read_overlap` | Train + val counts sum to total (no duplication) |
+
+**`TestDataLoaderIntegration`** &mdash; Dataset and DataLoader loading
+
+| Test | Verifies |
+|---|---|
+| `test_dataset_loads` | `LabeledMemmapDataset` instantiates, len > 0 |
+| `test_sample_shape` | Samples are `(32, 4)` float32; labels are scalar in {0.0, 1.0} |
+| `test_model_input_channels` | Channel layout: col 0 = seq tokens, cols 1-2 = kinetics, col 3 = mask |
+| `test_positive_label_is_one` | Positive samples have label 1.0 |
+| `test_negative_label_is_zero` | Negative samples have label 0.0 |
+
+---
+
+### `test_legacy_leakage.py`
+
+Checks whether the legacy parquet train/test split leaks windows from the same reads across splits. Read-level overlap would inflate evaluation metrics because CpG sites on the same read share kinetics context. Requires legacy parquet files on disk; skips if not found.
+
+Can also run standalone: `python tests/test_legacy_leakage.py [train_path] [test_path]`
+
+| Test | Verifies |
+|---|---|
+| `test_no_leakage` | Zero read_name overlap between train and test parquet files |
+
+---
+
 ## Adding new tests
 
 - Place new test modules in this directory, named `test_*.py`. They are automatically picked up by the gwf workflow &mdash; no changes to `workflow.py` needed.

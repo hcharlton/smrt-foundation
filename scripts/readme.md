@@ -2,15 +2,15 @@
 
 Entry points for data processing and training. All scripts are invoked as modules (`python -m scripts.<name>`) from the project root or via gwf targets defined in `workflow.py`.
 
-Configuration lives in `configs/`. The data pipeline reads from `configs/data.yaml`; training scripts read from `configs/ssl.yaml` or `configs/supervised.yaml`.
+Configuration lives in `configs/`. The data pipeline reads from `configs/data.yaml`; supervised training reads from `configs/supervised.yaml`. SSL experiment configs live in per-experiment directories (`scripts/experiments/<name>/config.yaml`).
 
 ## Pipeline overview
 
 ```
-BAM  ──►  Zarr  ──►  memmap shards  ──►  DataLoader  ──►  Training
-       ①         ②                                      ④
-                  ├── ②a (SSL, full reads)
-                  └── ②b (CpG, windowed)
+BAM  -->  Zarr  -->  memmap shards  -->  DataLoader  -->  Training
+       1         2                                      4
+                  |-- 2a (SSL, full reads)
+                  '-- 2b (CpG, windowed)
 ```
 
 ---
@@ -46,16 +46,18 @@ Supports per-read MAD normalisation (`--normalize`), reverse-complement mapping 
 --fwd_features / --rev_features  Feature columns per strand
 ```
 
-### `zarr_to_methyl_memmap.py`
+### `zarr_to_methyl_memmap_v2.py`
 
-Converts a Zarr store into sharded `.npy` files for **CpG methylation classification**. Instead of fixed segments, extracts windows centred on CpG dinucleotide sites using `extract_pattern_windows_2d` (sliding-window pattern match). Produces one sample per CpG site per strand direction. Output is split into `train/` and `val/` directories and consumed by `LabeledMemmapDataset`.
+Converts a Zarr store into sharded `.npy` files for **CpG methylation classification**. Extracts windows centred on CpG dinucleotide sites, producing one sample per CpG site per strand direction. Output is split into `train/` and `val/` directories and consumed by `LabeledMemmapDataset`.
+
+This is the v2 script that fixes a reverse kinetics misalignment bug in the original `zarr_to_methyl_memmap.py` (now archived). The v2 fix uses explicit reverse indexing (`ri[L-end:L-start]`) instead of `np.flip`, which incorrectly double-reversed the already-reversed ri/rp tags.
 
 Pipeline parameters (context, features) should be kept in sync with `configs/data.yaml` under `cpg_pipeline`.
 
 Same CLI interface as `zarr_to_memmap_instanceNorm.py`. Key differences: CpG-centred windowing, train/val split at the read level.
 
 **Known issues:**
-- CLI default `--shard_size` is `int(2e20)` (will OOM) — always override via workflow or CLI.
+- CLI default `--shard_size` is `int(2e20)` (will OOM) -- always override via workflow or CLI.
 - Train/val split is non-deterministic (no seed).
 - Schema labels all samples with forward feature names, but reverse-strand samples contain reverse features.
 
@@ -96,12 +98,10 @@ Run with: `python -m pytest scripts/validate_zarr.py`
 
 ### `train_ssl.py`
 
-Self-supervised pretraining using masked prediction (InfoNCE / AgInfoNCE loss). Loads data via `ShardedMemmapDataset` and trains `Smrt2Vec`. Uses HuggingFace Accelerate for multi-GPU, TensorBoard for logging. Config from `configs/ssl.yaml`.
+Self-supervised pretraining using masked prediction (InfoNCE / AgInfoNCE loss). Loads data via `ShardedMemmapDataset` and trains `Smrt2Vec`. Uses HuggingFace Accelerate for multi-GPU, TensorBoard for logging.
 
 ```
-python -m scripts.train_ssl configs/ssl.yaml
-# or via accelerate:
-accelerate launch --num_processes=8 scripts/train_ssl.py configs/ssl.yaml
+accelerate launch --num_processes=8 scripts/train_ssl.py configs/supervised.yaml
 ```
 
 ### `train_supervised.py`
@@ -112,6 +112,39 @@ Binary CpG methylation classifier. Loads pos/neg memmap shards via `LabeledMemma
 accelerate launch --num_processes=1 scripts/train_supervised.py configs/supervised.yaml
 ```
 
-### `train_supervised_legacy.py`
+---
 
-Same task as `train_supervised.py` but uses `LegacyMethylDataset` (parquet-based, log-normalised) instead of the memmap pipeline. Kept for comparison against the legacy data format. Uses the `legacy_train` / `legacy_val` paths from the supervised config.
+## Experiment infrastructure
+
+Each experiment lives in its own directory under `scripts/experiments/<name>/` with two files:
+
+- **`config.yaml`** -- Hyperparameters, data paths, and a `resources:` section (cores, memory, walltime, GPUs) for cluster submission.
+- **`train.py`** -- Training script. Hardcoded `DEFAULT` dicts provide fallback values for any parameters not in the config, so older configs remain runnable when new hyperparameters are added.
+
+### Submitting experiments (`run.sh`)
+
+```bash
+bash run.sh scripts/experiments/ssl_21_pretrain              # uses config resources
+bash run.sh scripts/experiments/supervised_20_full_v2 --mem=512gb  # sbatch override
+```
+
+Auto-detects environment (local / Gefion / GenomeDK). On HPC, reads the `resources:` section from the experiment's config.yaml and submits via sbatch. Locally, runs via `accelerate launch --num_processes=1`. Job output lands in the experiment directory as `<jobid>.out`.
+
+### Submitting tests (`test.sh`)
+
+```bash
+bash test.sh tests/test_kinetics_norm.py               # single module
+bash test.sh tests/                                      # all tests
+bash test.sh tests/test_cpg_pipeline_fidelity.py --mem=64gb  # sbatch override
+```
+
+Same environment detection as run.sh. Locally runs pytest directly; on HPC submits via sbatch.
+
+### Running EDA plots (`plot.sh`)
+
+```bash
+bash plot.sh report/eda/model_input_heatmaps              # local: runs directly
+bash plot.sh report/eda/fi_vs_ri_distributions --mem=128gb # HPC: sbatch with override
+```
+
+Plot scripts live in `report/eda/<name>/plot.py`. Output goes to `report/eda/<name>/plot.svg`.

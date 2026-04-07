@@ -1,14 +1,14 @@
 # smrt-foundation
 A foundation model for pacbio SMRT reads, providing a native understanding of kinetics wrt nucleotide context. The success case is producing a downstream classifier that using the pretrained encoder that beats (ideally by a significant margin) a classifier that is trained purely by supervised learning. This is directly comparable to wav2vec 2.0 minus the quantization module.
 
-The supervised baseline for single-strand CpG methylation classification is established at 82% top-1 accuracy using a CNN-transformer encoder trained end-to-end on labeled kinetics windows. The bulk of the work over the past six months has been on the self-supervised pretraining side, which has proven more difficult than anticipated. A wav2vec 2.0-style contrastive approach (InfoNCE on masked kinetics) was implemented first, but probe accuracy actively declined over pretraining epochs — a systematic investigation traced this to a combination of normalization mismatch, context length mismatch (4096 pretraining vs 32 downstream), and fundamental task misalignment where the contrastive objective discards the kinetics signal relevant to methylation. Switching to a masked autoencoder with direct kinetics reconstruction stabilized the probe at ~66% but did not close the gap. Fine-tuning the best pretrained encoder reached 79%, narrowing the deficit to 3pp, though the comparison is confounded by optimizer schedule differences and the fact that pretraining and fine-tuning used the same data distribution — violating the core SSL premise of leveraging additional unlabeled data. A large-scale pretraining run (~1000 GPU hours) on the full read dataset with random cropping augmentation is now underway to test whether data scale is the missing ingredient. A significant amount of infrastructure was built along the way: a BAM-to-memmap data pipeline, multi-GPU training with HuggingFace Accelerate, two pretraining architectures (contrastive and autoencoder), a linear probe evaluation framework, and a two-stage fine-tuning pipeline with differential learning rates.
+The supervised baseline for single-strand CpG methylation classification is established at 82% top-1 accuracy using a CNN-transformer encoder trained end-to-end on labeled kinetics windows. The bulk of the work over the past six months has been on the self-supervised pretraining side, which has proven more difficult than anticipated. A wav2vec 2.0-style contrastive approach (InfoNCE on masked kinetics) was implemented first, but probe accuracy actively declined over pretraining epochs — a systematic investigation traced this to a combination of normalization mismatch, context length mismatch (4096 pretraining vs 32 downstream), and fundamental task misalignment where the contrastive objective discards the kinetics signal relevant to methylation. Switching to a masked autoencoder with direct kinetics reconstruction stabilized the probe at ~66% but did not close the gap. Fine-tuning the best pretrained encoder reached 79%, narrowing the deficit to 3pp, though the comparison is confounded by optimizer schedule differences and the fact that pretraining and fine-tuning used the same data distribution — violating the core SSL premise of leveraging additional unlabeled data. A large-scale pretraining experiment (~1000 GPU hours) on the full read dataset with random cropping augmentation has been designed to test whether data scale is the missing ingredient. A significant amount of infrastructure was built along the way: a BAM-to-memmap data pipeline, multi-GPU training with HuggingFace Accelerate, two pretraining architectures (contrastive and autoencoder), a linear probe evaluation framework, and a two-stage fine-tuning pipeline with differential learning rates.
 ## Data
 PacBio SMRT HiFi reads. Unlike normal genetic sequencing data this comes with two extra features: Pulse width (pw or rp/fp) and interpulse duration (ipd or fi/ri). Since modifications to nucleuotides are also forced through the polymerase, they alter the kinetics of the molecule along with nucleotide context. This allows the inference of modifications on a per-site basis. This is natively done on a dual-strand basis for CpG sites by PacBio, but many other types of modifications are missing. 
 ## Plan
-1. Establish a supervised baseline for single strand CpG methylation classification on 32/64 basepair samples. 
-2. Implement the "smrt2vec" following the design principles of wav2vec 2.0. 
-3. Run pretraining experiments 
-4. Align pretraining down downstream tasks (???)
+1. ~~Establish a supervised baseline for single strand CpG methylation classification on 32/64 basepair samples.~~ Done (exp 20, ~82% top-1).
+2. ~~Implement the "smrt2vec" following the design principles of wav2vec 2.0.~~ Done (`Smrt2VecInputMask`, `SmrtAutoencoder`).
+3. ~~Run pretraining experiments.~~ Contrastive (exp 21/23/26) and autoencoder (exp 24/25) completed; fine-tuning (exp 27) reached 79%.
+4. Close the gap between pretrained and supervised models. Current direction: large-scale pretraining with data scale advantage (exp 29, deferred).
 ## Self supervised task
 Use an info-NCE loss on masked latents in a 4096 sequence of SMRT. This involves masking a large percentages of the indices and then teaching the model how to make a projection that is more similar to the label (positive) and dissimilar to the in-batch negatives. 
 ## Downstream task
@@ -22,7 +22,7 @@ Direct supervised training on v2 memmap shards reaches ~82% top1 (experiment 20 
 ### Self-supervised pretraining: IN PROGRESS
 Earlier blockers (all resolved): information leakage from latent masking (fixed by input masking in `Smrt2VecInputMask`), normalization mismatch (fixed by shared `KineticsNorm`), missing fine-tuning infrastructure (built in exp 22), sparse masking (increased to p_mask=0.15).
 
-Current status: both contrastive (~58% probe) and autoencoder (~62% probe) pretraining on full-read SSL data produce representations far below the supervised baseline (82%). Experiments 25/26 test whether training on CpG data directly (labels discarded, context=32) closes the gap by isolating data regime vs pretraining objective as the bottleneck.
+Contrastive pretraining (exp 21/23) produced probe accuracy of ~58% that declined over epochs. Autoencoder pretraining (exp 24) stabilized at ~62%. Training on CpG data directly (exp 25/26) improved both by +4-5pp (autoencoder ~66%, contrastive ~63%). Fine-tuning the best autoencoder encoder (exp 27) recovered 13pp over the linear probe, reaching 79% -- still 3pp below the supervised baseline. The comparison is confounded by optimizer schedule differences and 1:1 unlabeled:labeled data ratio. Two experiments are created but deferred: exp 28 (data-budget control) and exp 29 (large-scale pretraining on 839K full reads with random cropping, ~1000 GPU hours).
 
 ### Shared encoder (`SmrtEncoder`)
 
@@ -109,13 +109,11 @@ The decoder is intentionally shallow (two transpose convolutions + linear) so th
 
 **Transfer results on full-read SSL data** (experiment 24): Probe accuracy stabilized at ~62% (no decline), a 4pp improvement over contrastive. Still 20pp below the supervised baseline (82%).
 
-**Current experiments** (25, 26): Both architectures retrained on CpG data directly (pos+neg combined, labels discarded, context=32). Eliminates the data distribution, context length, and normalization mismatches. If probe accuracy improves significantly, the bottleneck was data regime. If not, the pretraining objectives themselves are insufficient for this task.
+**CpG data regime** (experiments 25, 26): Both architectures retrained on CpG data directly (pos+neg combined, labels discarded, context=32). Autoencoder probe improved to ~66%, contrastive to ~63%. Confirms data regime matters (+4-5pp), but the gap to supervised 82% remains large.
 
-Experiment 22 (`scripts/experiments/supervised_22_finetune/`): Fine-tune pretrained encoder:
-- Load encoder weights from experiment 21 checkpoint
-- Stage 1: frozen encoder, train classification head only (5 epochs)
-- Stage 2: unfreeze all, differential LR (encoder 3e-4, head 3e-3, 15 epochs)
-- Compare against experiment 20 direct training baseline
+**Fine-tuning** (experiment 27): Fine-tunes the exp 25 autoencoder encoder on labeled CpG data with a two-stage schedule (5 epochs frozen, 15 unfrozen with differential LR). Reached 79% top-1, recovering 13pp over the linear probe but landing 3pp below the supervised baseline. The deficit is confounded by optimizer schedule differences and matching data budget (see exp 28/29 in `docs/status.md`).
+
+**Fine-tuning infrastructure** (experiment 22, `scripts/experiments/supervised_22_finetune/`): The original fine-tuning experiment, loading contrastive (exp 21) encoder weights. Two-stage training: frozen encoder + classification head (5 epochs), then unfreeze all with differential LR (encoder 3e-4, head 3e-3, 15 epochs). Exp 27 reuses this infrastructure with the autoencoder encoder.
 
 ## Process
 ### 1. Data Pipeline (`workflow.py`)
@@ -144,7 +142,7 @@ bash test.sh tests/                                      # local: all tests
 bash test.sh tests/test_cpg_pipeline_fidelity.py --mem=64gb  # HPC: sbatch
 ```
 
-### 5. Model Logic & Codebase Safety Net (`scripts/train.py`)
+### 5. Model Logic & Codebase Safety Net
 The training scripts have internal `DEFAULT_SMRT2VEC` / `DEFAULT` dictionaries that establish baseline architectural parameters. This is a fail-safe so that older `config.yaml` files that don't have newly introduced variables still run without crashing.
 
 ### Standard Execution Flow
@@ -154,13 +152,11 @@ To launch a new experiment:
 3. `bash run.sh scripts/experiments/<name>`.
 
 
-## TODO + Problems
-### Debug new labeled dataset
-The legacy dataset class (script at archive/make_legacy_labeled_dataset, dataset at data/01_processed/legacy*.parquet) was performing much better with direct downstream training (using all the model components) than the new dataset class (original script now at archive/zarr_to_methyl_memmap.py). The reason I originally made the new dataset class was to upgrade the dataset to online normalization to run experiments, since the contrastively pretrained encoder (the bulk of the project) was not generalizing to the downstream methylation classification task
+## Resolved Issues
 
-#### Root cause: reverse kinetics misalignment in zarr_to_methyl_memmap.py
+### Reverse kinetics misalignment in zarr_to_methyl_memmap.py (RESOLVED)
 
-**RESOLVED.** Experiments 17 and 18 both peak at ~80% top1, matching the legacy baseline. The bug was a kinetics/sequence misalignment in reverse strand windows.
+The new memmap dataset class (original script now at `archive/zarr_to_methyl_memmap.py`) regressed to ~70% top-1 compared to the legacy parquet pipeline's ~80%. Root cause: kinetics/sequence misalignment in reverse strand windows. Experiments 17 and 18 confirmed the fix, both peaking at ~80%.
 
 PacBio stores forward and reverse kinetics in different orders: `fi[i]` = forward kinetics at position `i` (forward order), but `ri[i]` = reverse kinetics at position `L-1-i` (reverse order). The v1 script (`zarr_to_methyl_memmap.py`) processes reverse windows with `np.flip(read_rev, axis=0)`, which flips all columns together. After the flip, the sequence at position `j` represents original position `L-1-j` (correct after RC), but ri at position `j` gives reverse kinetics at position `j` (because ri was already reversed, flipping puts it in forward order). The sequence and kinetics point to different genomic positions — every reverse window has kinetics from the mirror-image positions.
 
@@ -176,5 +172,31 @@ The v2 script (`zarr_to_methyl_memmap_v2.py`) fixes this by using explicit rever
 
 ### Tests
 
-#### `tests/test_ssl_21_train.py` — PASSED
-Static analysis tests for the ssl_21_pretrain training script. Verifies that the linear probe evaluation runs on all ranks (not just `is_main_process`) and that `wait_for_everyone()` is called between the probe and the next epoch. These guards prevent the NCCL timeout / "Invalid mt19937 state" crash that occurs when ranks desynchronize at epoch boundaries.
+See `tests/readme.md` for full documentation of all test modules. Summary:
+
+#### `tests/test_cpg_pipeline_fidelity.py`
+End-to-end fidelity: BAM -> Zarr -> CpG memmap. Verifies byte-exact kinetics transfer at every pipeline stage.
+
+#### `tests/test_legacy_vs_new_pipeline.py`
+Direct comparison between legacy parquet and new memmap pipelines. Traces the same BAM reads through both paths.
+
+#### `tests/test_zarr_to_methyl_memmap_v2.py`
+Integration tests for the v2 CpG memmap pipeline: Zarr -> shards -> LabeledMemmapDataset -> DataLoader.
+
+#### `tests/test_kinetics_norm.py`
+Equivalence tests verifying KineticsNorm matches ZNorm and SSLNorm on their respective dataset types.
+
+#### `tests/test_autoencoder.py`
+Unit tests for SmrtAutoencoder, SmrtDecoder, and MaskedReconstructionLoss. Verifies shapes, masking, gradients, and encoder weight transfer.
+
+#### `tests/test_large_pretrain.py`
+Tests for exp 29 features: random cropping, cosine LR schedule over 3000 epochs, periodic probe/checkpoint scheduling.
+
+#### `tests/test_ssl_21_train.py` -- PASSED
+Static AST analysis of ssl_21_pretrain/train.py. Verifies linear probe runs on all ranks (not gated behind `is_main_process`) and `wait_for_everyone()` synchronizes before next epoch.
+
+#### `tests/test_kinetics_distributions.py`
+Compares forward vs reverse kinetics distributions (fi vs ri, fp vs rp) at CpG sites via KS tests.
+
+#### `tests/test_legacy_leakage.py` -- PASSED
+Checks legacy parquet train/test split for read-level leakage. No overlap found.

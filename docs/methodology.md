@@ -95,3 +95,27 @@
 **Method:** Linear warmup over 25% of total steps, then cosine decay to 5% of peak LR.
 
 **Justification:** 25% warmup is conservative but stable for the relatively small model (128d, 4 layers). Cosine decay is smooth and avoids the sharp transitions of step schedules. The 5% minimum LR floor prevents complete stagnation in late training.
+
+## 2026-03: Data-Budget Controlled Comparison (exp 28)
+
+**Motivation:** Exp 27 (fine-tuned autoencoder encoder) reached 79% vs exp 20's 82%, but the comparison is confounded: exp 20 trains on the full dataset while exp 27 uses ds_limit=20M. The 3pp deficit might be explained by data budget alone rather than pretraining being harmful.
+
+**Method:** Exp 28 reruns exp 20's DirectClassifier from scratch with ds_limit=20M, matching exp 27's data budget exactly. All other hyperparameters (lr=3e-3, 20 epochs, single-stage optimizer) remain identical to exp 20.
+
+**Justification:** This is the minimal control needed to interpret exp 27. If exp 28 also lands at ~79%, the deficit is from the smaller data budget, not from pretraining. If exp 28 still reaches ~82%, pretraining is actively hurting by 3pp under these conditions.
+
+## 2026-03: Random Cropping for Large-Scale Pretraining (exp 29)
+
+**Motivation:** Previous SSL experiments pre-segment reads into fixed windows, creating a fixed-size dataset. With 839K reads and context=128, this yields ~27M windows. Training for 3000 epochs on a fixed dataset would simply overfit reconstruction.
+
+**Method:** Instead of pre-segmenting, exp 29 randomly crops a 128-base window from each 4096-base read at each epoch. The crop position is sampled uniformly at runtime, so the model sees different subsequences every epoch. This creates a virtually infinite dataset from the same reads.
+
+**Justification:** Random cropping makes long training schedules meaningful: 3000 epochs x 839K reads = 2.5B training windows, each unique. This is the first experiment with a genuine data scale advantage over the labeled CpG data (~40M windows). The 128-base crop length matches exp 24's context while being large enough for the 107-base CNN receptive field.
+
+## 2026-03: Receptive Field Logging
+
+**Motivation:** The CNN's receptive field determines how much local context the encoder uses at each position. When comparing experiments with different kernel configurations or context lengths, the effective receptive field relative to context is an important architectural parameter.
+
+**Method:** `model.encoder.cnn.r0` is computed from the CNN's kernel sizes and strides and logged to both stdout and TensorBoard at training startup.
+
+**Justification:** Avoids manually re-deriving the receptive field from kernel configs when reviewing experiment logs. Makes it immediately visible whether the receptive field exceeds the context window (which would mean every output position sees the entire input).
