@@ -80,6 +80,32 @@ Input x [B, T, 4]
 
 Experiment 26 re-tests contrastive on CpG data directly (labels discarded, context=32) to isolate whether the objective or the data regime/handling is the bottleneck.
 
+### Contrastive pretraining, mask-token variant (`Smrt2VecInputMaskToken`)
+
+Not yet wired to an experiment. Same contrastive objective as `Smrt2VecInputMask`, but the masked branch injects a learnable d_model mask token at the embedding output instead of zeroing kinetics channels at the raw input. Motivation: after `KineticsNorm` (log1p + z-score), zeros are indistinguishable from real kinetics that happen to sit at the mean of the normalized distribution, so the encoder has no explicit signal that a position is masked. A learnable token gives the encoder a distinct "this position is missing" representation, matching how wav2vec 2.0 and BERT handle masking.
+
+```
+Input x [B, T, 4]
+  │
+  ├─ Targets branch (no grad):
+  │    encoder.get_latents(x)              →  z_clean [B, T/4, d]
+  │    LayerNorm(z_clean)                  →  targets [B, T/4, d]
+  │
+  ├─ Masked branch:
+  │    apply_input_mask(x)                 →  input_mask [B, T]   (contiguous random spans, padding excluded)
+  │    encoder.embed(x_nuc, x_kin, x_pad)  →  x_emb [B, T, d]
+  │    x_emb[input_mask] = mask_vec        →  learnable d_model mask token at masked positions
+  │    encoder.cnn → add_pe → transformer  →  c [B, T/4, d]
+  │    MLP(d→d, GELU, d→d)                 →  c_proj [B, T/4, d]
+  │
+  └─ Loss (AgInfoNCE):
+       Same as Smrt2VecInputMask — select masked positions, L2-normalize,
+       cosine similarity / τ, cross-entropy against diagonal, all_gather
+       targets across ranks for more negatives.
+```
+
+The masked branch cannot reuse `encoder.get_latents()` because there is no mid-call hook to overwrite the embedding output before the CNN; the forward pass runs `encoder.embed → cnn → add_pe → forward_transformer` manually instead. Encoder weights remain interchangeable with `DirectClassifier` for fine-tuning since the underlying `SmrtEncoder` is unchanged.
+
 ### Masked autoencoder pretraining (`SmrtAutoencoder`)
 
 Experiment 24. Replaces contrastive matching with direct kinetics reconstruction.

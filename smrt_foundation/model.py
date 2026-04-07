@@ -435,6 +435,125 @@ class Smrt2VecInputMask(nn.Module):
     return c_proj, targets.detach(), ds_mask
 
 
+class Smrt2VecInputMaskToken(nn.Module):
+  """
+  SSL model with input-level mask-token injection (wav2vec 2.0 style, mask-token variant).
+
+  Variant of Smrt2VecInputMask. Instead of zeroing kinetics channels at the
+  raw input, this class lets the embedding run normally, then overwrites the
+  embedding output at masked positions with a learnable d_model mask token
+  before the CNN. Compared to:
+
+  - Smrt2Vec (latent-level masking after the CNN): the original kinetics
+    never reach the CNN through the masked path, so the CNN's 107-base
+    receptive field cannot leak the masked values through neighboring latents.
+
+  - Smrt2VecInputMask (zeroing channels 1, 2 at the raw input): zeros are
+    indistinguishable from "real value at the mean of the normalized
+    distribution" because KineticsNorm mean-centers the kinetics, so the
+    encoder gets no signal that a position is masked. The learnable token
+    here gives the encoder an explicit, distinct mask signal at the same
+    representational level as the embedding output.
+
+  Architectural differences from Smrt2VecInputMask:
+    - Adds self.mask_vec: nn.Parameter(d_model), same shape as Smrt2Vec.mask_vec.
+    - apply_input_mask returns only the boolean mask, not a masked input tensor.
+    - forward() runs encoder.embed -> inject mask_vec -> encoder.cnn -> add_pe ->
+      forward_transformer manually (cannot use encoder.get_latents on the
+      masked path because it has no mid-call hook).
+
+  Same return signature as Smrt2VecInputMask: (c_proj, targets, mask_idx).
+  Uses the same SmrtEncoder, so pretrained encoder weights remain
+  interchangeable with DirectClassifier for fine-tuning.
+  """
+  def __init__(self, d_model=128, n_layers=4, n_head=4, max_len=4096, p_mask=0.15, mask_size=10):
+    super().__init__()
+    self.d_model = d_model
+    self.p_mask = p_mask
+    self.mask_size = mask_size
+    self.encoder = SmrtEncoder(d_model, n_layers, n_head, max_len)
+
+    # Learnable mask token, injected at the embedding output before the CNN.
+    # Same shape as Smrt2Vec.mask_vec so the parameter has equivalent capacity.
+    self.mask_vec = nn.Parameter(torch.randn(d_model))
+
+    self.project = nn.Sequential(
+        nn.Linear(d_model, d_model),
+        nn.GELU(),
+        nn.Linear(d_model, d_model)
+    )
+
+  def apply_input_mask(self, x, p_mask, mask_size):
+    """Sample a contiguous-span boolean mask at input resolution.
+
+    Returns:
+      mask_full: boolean mask at input resolution [B, T]. Padded positions
+                 are excluded from the mask.
+
+    The actual mask token injection is performed at the embedding output
+    in forward(); this method only samples which positions to mask.
+    """
+    B, T, _ = x.shape
+    pad = x[..., 3]
+
+    # Sample mask centers, exclude padding
+    mask_centers = (torch.rand(B, T, device=x.device) < p_mask) & ~(pad.bool())
+
+    # Expand centers into contiguous spans
+    mask_full = F.max_pool1d(
+        mask_centers.float().unsqueeze(1),
+        kernel_size=mask_size, stride=1,
+        padding=mask_size // 2
+    ).squeeze(1)[:, :T].bool() & ~(pad.bool())
+
+    return mask_full
+
+  def _downsample_mask(self, mask, target_len):
+    """Downsample input-resolution mask to CNN output resolution.
+
+    A downsampled position is masked if ANY of its corresponding
+    input positions were masked (conservative -- ensures we predict
+    at every position that lost information).
+    """
+    m = mask.float().unsqueeze(1)  # [B, 1, T]
+    # Match the CNN's two stride-2 downsampling blocks
+    m = F.max_pool1d(m, kernel_size=2, stride=2)  # T -> T/2
+    m = F.max_pool1d(m, kernel_size=2, stride=2)  # T/2 -> T/4
+    return m.squeeze(1).bool()[:, :target_len]
+
+  def forward(self, x):
+    # Targets: unmasked CNN features (no grad needed for targets)
+    with torch.no_grad():
+      _, _, targets = self.encoder.get_latents(x)
+
+    # Sample the input-resolution mask
+    input_mask = self.apply_input_mask(x, self.p_mask, self.mask_size)
+
+    # Run the embedding manually so the learnable mask token can be injected
+    # between embed and CNN. encoder.get_latents() is not used here because
+    # it has no mid-call hook for swapping in the mask token.
+    x_nuc = x[..., 0]
+    x_kin = x[..., 1:3]
+    x_pad = x[..., 3]
+    x_emb = self.encoder.embed(x_nuc, x_kin, x_pad)  # [B, T, d_model]
+
+    # Replace the embedding at masked positions with the learnable mask token
+    x_emb = x_emb.clone()
+    x_emb[input_mask] = self.mask_vec.to(dtype=x_emb.dtype, device=x_emb.device)
+
+    # Continue through CNN, PE, transformer
+    z, z_pad = self.encoder.cnn(x_emb.permute(0, 2, 1), x_pad)
+    z = z.permute(0, 2, 1)
+    z = self.encoder.add_pe(z)
+    c = self.encoder.forward_transformer(z, z_pad)
+    c_proj = self.project(c)
+
+    # Downsample mask to match CNN output resolution
+    ds_mask = self._downsample_mask(input_mask, z.shape[1])
+
+    return c_proj, targets.detach(), ds_mask
+
+
 class SmrtDecoder(nn.Module):
   """Lightweight decoder that upsamples transformer output back to input resolution."""
   def __init__(self, d_model):
