@@ -45,6 +45,15 @@ CONFIG = {
             'optional_tags': ['sm', 'sx'],
             'n_reads': 0,
         },
+        'yoran': {
+            'bam': 'data/00_raw/unlabeled/yoran_kinetics_diploid.bam',
+            'zarr': 'data/01_processed/ssl_sets/yoran.zarr',
+            'memmap': 'data/01_processed/ssl_sets/yoran.memmap',
+            'memmap_raw':  'data/01_processed/ssl_sets/yoran_raw.memmap',
+            'memmap_filter_qual':  'data/01_processed/ssl_sets/yoran_filter_qual.memmap',
+            'optional_tags': ['sm', 'sx'],
+            'n_reads': 0,
+        },
         'cpg_pos':{
             'bam': 'data/00_raw/labeled/methylated_hifi_reads.bam',
             'zarr': 'data/01_processed/ssl_sets/cpg_pos.zarr',
