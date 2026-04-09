@@ -1,0 +1,19 @@
+experiment_type: 'eval'
+experiment_name: 'supervised_exp31'
+run_message: 'Inference on exp 31 (DirectClassifier baseline). Loads a final-epoch checkpoint, runs the classifier over the held-out CpG val shards, and writes (input, label, logit, shard_path, shard_row) per sample to a parquet for downstream analysis.'
+
+resources:
+  cores: 4
+  memory: 64gb
+  walltime: 02:00:00
+  gres: gpu:1
+
+checkpoint: 'scripts/experiments/supervised_31_baseline_clean/checkpoints/epoch_20.pt'
+pos_data: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+neg_data: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+output: 'report/eval/supervised/exp31/predictions_epoch_20.parquet'
+
+inference:
+  batch_size: 4096
+  limit: 0
+  num_workers: 4
