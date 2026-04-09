@@ -41,6 +41,7 @@ case "$ENV" in
         ;;
     gefion)
         sbatch --job-name="plot_$(basename "$PLOT_DIR")" \
+               --account=cu_0030 \
                --cpus-per-task=4 --mem=32gb --time=00:30:00 \
                --output="${PLOT_DIR}/slurm_%j.log" \
                "$@" \

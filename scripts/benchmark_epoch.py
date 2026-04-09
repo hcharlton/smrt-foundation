@@ -7,7 +7,7 @@ Usage:
     python -m scripts.benchmark_epoch <memmap_dir> [--batch-size 512] [--context 128] [--steps 30]
 
 Submit on Gefion:
-    sbatch --gres=gpu:1 --mem=64gb --time=00:30:00 \
+    sbatch --account=cu_0030 --gres=gpu:1 --mem=64gb --time=00:30:00 \
       --wrap="python -m scripts.benchmark_epoch data/01_processed/ob007_raw.memmap"
 """
 

@@ -9,7 +9,7 @@ IS_GEFION = curr_dir.startswith('/dcai')
 
 if IS_GEFION:
     root_dir = '/dcai/projects/cu_0030/smrt-foundation'
-    gwf_defaults = {}
+    gwf_defaults = {'account': 'cu_0030'}
 else:
     root_dir = '/home/chcharlton/mutationalscanning/Workspaces/chcharlton/smrt-foundation'
     gwf_defaults = {'account': 'mutationalscanning'}

@@ -66,6 +66,7 @@ case "$ENV" in
         ;;
     gefion)
         sbatch --job-name="exp_$(basename "$EXP_DIR")" \
+               --account=cu_0030 \
                --cpus-per-task="$CORES" --mem="$MEMORY" --time="$WALLTIME" \
                --gres="$GRES" \
                --output="${PROJECT_ROOT}/${EXP_DIR}/%j.out" \

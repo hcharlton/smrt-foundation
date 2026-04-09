@@ -37,6 +37,7 @@ case "$ENV" in
     gefion)
         JOB_NAME="test_$(basename "$TEST_PATH" .py)"
         sbatch --job-name="$JOB_NAME" \
+               --account=cu_0030 \
                --cpus-per-task=4 --mem=32gb --time=01:00:00 \
                --output="${PROJECT_ROOT}/tests/%j.out" \
                "$@" \
