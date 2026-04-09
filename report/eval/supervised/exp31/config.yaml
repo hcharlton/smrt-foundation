@@ -4,7 +4,7 @@ run_message: 'Inference on exp 31 (DirectClassifier baseline). Loads the third e
 
 resources:
   cores: 4
-  memory: 64gb
+  memory: 256gb
   walltime: 02:00:00
   gres: gpu:1
 
