@@ -634,6 +634,47 @@ class DirectClassifier(nn.Module):
     return logits
 
 
+class DirectClassifierNoTransformer(nn.Module):
+  """CNN-only ablation of DirectClassifier.
+
+  Same SmrtEmbedding and CNN as the default encoder, but no PositionalEncoding
+  and no TransformerBlocks. The classification head (center latent -> d/2 ->
+  GELU -> 1) is identical to DirectClassifier.
+
+  Intended as a capacity ablation of the supervised baseline at ctx=32, where
+  the default CNN's receptive field (107) already covers the full 32-base
+  input. Under that condition every CNN output latent is a function of the
+  entire input, so the transformer's bidirectional attention has less to
+  contribute than it would at longer contexts — its job is just to re-mix
+  latents that each already see everything. This class tests how much of the
+  supervised baseline's accuracy actually depends on that re-mixing.
+
+  State dict keys are NOT interchangeable with DirectClassifier: the
+  submodules (embed, cnn, head) sit directly on self instead of underneath
+  self.encoder, so weights cannot be transferred between the two classes.
+  This is fresh-training only.
+  """
+  def __init__(self, d_model, max_len, dropout_p=0.01):
+    super().__init__()
+    self.d_model = d_model
+    self.embed = SmrtEmbedding(d_model)
+    self.cnn = CNN(d_model, max_len=max_len, dropout_p=dropout_p)
+    self.head = nn.Sequential(
+      nn.Linear(d_model, d_model // 2),
+      nn.GELU(),
+      nn.Linear(d_model // 2, 1),
+    )
+
+  def forward(self, x):
+    x_nuc = x[..., 0]
+    x_kin = x[..., 1:3]
+    x_pad = x[..., 3]
+    z = self.embed(x_nuc, x_kin, x_pad)          # [B, T, d]
+    z, _ = self.cnn(z.permute(0, 2, 1), x_pad)   # [B, d, T/4]
+    z = z.permute(0, 2, 1)                        # [B, T/4, d]
+    return self.head(z[:, z.shape[1] // 2, :])    # [B, 1]
+
+
 ### Small-receptive-field variants
 #
 # The default CNN has 11 ResBlocks and a receptive field of ~107 bases. At
