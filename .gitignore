@@ -13,6 +13,8 @@ training_logs/
 march2026update/
 notebooks/scratch.ipynb
 wave2vec2.0.pdf
+report/vis_nn
+randnn_images_neylon.ipynb
 *.out
 CLAUDE.md
 .claude/
