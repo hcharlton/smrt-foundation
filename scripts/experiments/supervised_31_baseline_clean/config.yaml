@@ -1,0 +1,27 @@
+experiment_type: 'supervised'
+experiment_name: '31_baseline_clean'
+run_message: 'Clean rerun of exp 20 (DirectClassifier baseline) with per-epoch checkpointing. Functionally identical to exp 20 — same data, normalization (ZNorm), optimizer, schedule, metrics. Fixes the missing-artifact bug by writing a checkpoint after every completed epoch instead of only at the end of training.'
+
+resources:
+  cores: 16
+  memory: 256gb
+  walltime: 20:00:00
+  gres: gpu:8
+  num_processes: 8
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+classifier:
+  d_model: 128
+  n_head: 4
+  context: 32
+  n_layers: 4
+  weight_decay: 0.02
+  epochs: 20
+  ds_limit: 0
+  batch_size: 512
+  max_lr: 3e-3
+  pct_start: 0.1
