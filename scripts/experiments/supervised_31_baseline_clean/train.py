@@ -1,15 +1,20 @@
 """
 Clean rerun of exp 20 (supervised_20_full_v2) with per-epoch checkpointing.
 
-Functionally identical to exp 20 — same data, ZNorm, DirectClassifier, AdamW,
-cosine schedule, seed, metrics. The only training-trajectory differences are
-save-path-only: a checkpoint is written after every completed epoch into
-`<experiment_dir>/checkpoints/epoch_XX.pt` instead of a single final save
-at the end of the loop.
+Functionally identical to exp 20 on the CpG data distribution — same data,
+DirectClassifier, AdamW, cosine schedule, seed, metrics. The normalization
+class is swapped from ZNorm to KineticsNorm, but on CpG windows (no padding)
+the two produce mathematically identical statistics: KineticsNorm's
+padding-exclusion branch is a no-op when the pad mask is all zero, and both
+classes apply the same `(log1p(x) - mean) / std` transform on channels [1, 2].
+The swap exists so the saved `norm_means` / `norm_stds` can be loaded at
+inference time via `KineticsNorm.from_stats(...)` with no cross-class handoff.
 
-This fixes the missing-artifact failure mode in exp 20 where a SLURM walltime
-hit or any mid-run crash loses everything because the save block lives after
-`for epoch in range(...):` closes. See README.md for the full bug list.
+The main fix vs exp 20 is save timing: a checkpoint is written after every
+completed epoch into `<experiment_dir>/checkpoints/epoch_XX.pt`, not just a
+single final save after the loop. Exp 20 lost artifacts when a SLURM walltime
+hit killed training before the loop could finish and reach its save block.
+See README.md for the full bug list.
 """
 
 import sys
@@ -31,7 +36,7 @@ if module_path not in sys.path:
 from smrt_foundation.dataset import LabeledMemmapDataset
 from smrt_foundation.model import DirectClassifier
 from smrt_foundation.optim import get_cosine_schedule_with_warmup
-from smrt_foundation.normalization import ZNorm
+from smrt_foundation.normalization import KineticsNorm
 
 
 REQUIRED_DATA_KEYS = ['pos_data_train', 'neg_data_train', 'pos_data_val', 'neg_data_val']
@@ -50,7 +55,7 @@ def get_git_revision_hash():
         return "unknown"
 
 
-def save_epoch_checkpoint(accelerator, model, config, epoch, metrics, checkpoint_dir):
+def save_epoch_checkpoint(accelerator, model, config, epoch, metrics, norm_fn, checkpoint_dir):
     """Save a checkpoint for a completed epoch.
 
     Called at the end of every epoch after eval. Synchronizes all ranks
@@ -60,6 +65,11 @@ def save_epoch_checkpoint(accelerator, model, config, epoch, metrics, checkpoint
     with context instead of crashing the process with a bare traceback.
 
     epoch is 1-indexed to match human convention ("epoch 1 of 20").
+
+    The normalization stats (`norm_means`, `norm_stds`, `norm_log_transform`)
+    are persisted alongside the model so inference code can reconstruct the
+    exact training-time transform without re-sampling statistics from the
+    training data. Load them via `KineticsNorm.from_stats(...)`.
     """
     accelerator.wait_for_everyone()
     if not accelerator.is_main_process:
@@ -74,6 +84,7 @@ def save_epoch_checkpoint(accelerator, model, config, epoch, metrics, checkpoint
             'config': config,
             'epoch': epoch,
             'metrics': metrics,
+            **norm_fn.save_stats(),
         }, save_path)
         print(f"Saved checkpoint to {save_path}")
     except Exception as e:
@@ -127,13 +138,18 @@ def main():
         print(f"Checkpoint directory: {checkpoint_dir}")
 
     # --- Normalization (capped 2M sample for statistics) ---
-    znorm_limit = min(c['ds_limit'], 2_000_000) if c['ds_limit'] > 0 else 2_000_000
-    tmp_ds = LabeledMemmapDataset(config['pos_data_train'], config['neg_data_train'], limit=znorm_limit)
-    train_norm_fn = ZNorm(tmp_ds, log_transform=True)
+    # KineticsNorm produces the same statistics as ZNorm on CpG windows (no
+    # padding → the padding-exclusion branch in KineticsNorm is a no-op), and
+    # using it here means the saved `norm_means`/`norm_stds` can be loaded
+    # directly via `KineticsNorm.from_stats(...)` at inference time with no
+    # cross-class translation.
+    norm_limit = min(c['ds_limit'], 2_000_000) if c['ds_limit'] > 0 else 2_000_000
+    tmp_ds = LabeledMemmapDataset(config['pos_data_train'], config['neg_data_train'], limit=norm_limit)
+    train_norm_fn = KineticsNorm(tmp_ds, log_transform=True)
     del tmp_ds
 
     if accelerator.is_main_process:
-        print(f"ZNorm stats — means: {train_norm_fn.means}, stds: {train_norm_fn.stds}")
+        print(f"KineticsNorm stats — means: {train_norm_fn.means}, stds: {train_norm_fn.stds}")
 
     # --- Datasets and loaders ---
     train_ds = LabeledMemmapDataset(
@@ -277,7 +293,7 @@ def main():
             'eval_auprc': epoch_auprc,
         }
         save_epoch_checkpoint(
-            accelerator, model, config, epoch + 1, epoch_metrics, checkpoint_dir
+            accelerator, model, config, epoch + 1, epoch_metrics, train_norm_fn, checkpoint_dir
         )
 
     accelerator.end_training()

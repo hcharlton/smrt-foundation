@@ -1,6 +1,6 @@
 experiment_type: 'supervised'
 experiment_name: '31_baseline_clean'
-run_message: 'Clean rerun of exp 20 (DirectClassifier baseline) with per-epoch checkpointing. Functionally identical to exp 20 — same data, normalization (ZNorm), optimizer, schedule, metrics. Fixes the missing-artifact bug by writing a checkpoint after every completed epoch instead of only at the end of training.'
+run_message: 'Clean rerun of exp 20 (DirectClassifier baseline) with per-epoch checkpointing. Functionally identical to exp 20 on CpG data — same data, optimizer, schedule, metrics. Normalization swapped from ZNorm to KineticsNorm (equivalent on no-padding CpG windows) so saved stats can be loaded directly via KineticsNorm.from_stats at inference. Fixes the missing-artifact bug by writing a checkpoint after every completed epoch instead of only at the end of training.'
 
 resources:
   cores: 16

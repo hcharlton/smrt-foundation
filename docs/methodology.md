@@ -129,3 +129,61 @@
 **Justification:** A1 is the minimum-viable architectural test of the RF hypothesis: one new encoder class, zero new data pipelines, zero new loss functions, zero new probe infrastructure. If exp 30 (autoencoder at ctx=32 with CNNSmallRF) matches or beats exp 25, the RF mismatch was a contributing factor. If exp 30 goes on to fine-tune ≥82%, the mismatch was the dominant remaining bottleneck and the foundation-model target is hit. If exp 30 matches exp 25 at ~66% and fine-tunes at ~79%, the RF was not dominant and the remaining gap must come from elsewhere (loss objective, optimizer schedule, or data scale). In all three cases the result is informative and bounds the next decision.
 
 The RF=27 choice is conservative: 27/32 ≈ 0.84 of the context window, which leaves enough latent diversity for per-position representations to differ without losing so much kinetic context that the encoder starves. Smaller alternatives (RF=19 with 2 stride blocks, or patch embedding with RF=4) are available as follow-up variants if A1 partially resolves the gap.
+
+## 2026-04: Persistent Normalization Stats in Checkpoints
+
+**Motivation:** Every training script that uses `KineticsNorm` samples ~1M data points to compute mean/std statistics at startup. Those stats are what the model is actually trained on — a `(log1p(x) - mean) / std` transform on kinetics channels [1, 2]. At inference time a new input has to be normalized with the *same* stats or the model sees a distribution shift it was never trained to handle. Two prior patterns each had a failure mode:
+
+1. **Recompute stats at inference time.** Re-instantiating `KineticsNorm(inference_data)` fits fresh statistics from whatever data is on hand. Only safe if that data exactly matches the training distribution, and even in that case the random sampling adds ~1e-4 of noise vs the training stats. On a novel BAM (different sample, different polymerase conditions), this normalizes out the exact distribution shift the model needs to see.
+2. **Reimplement the save boilerplate in every train.py.** Before this change, any experiment that persisted stats wrote `{'norm_means': norm_fn.means.detach().cpu(), 'norm_stds': norm_fn.stds.detach().cpu(), 'norm_log_transform': norm_fn.log_transform}` by hand. Three lines of duplicated boilerplate, with no canonical key schema kept in sync between training scripts and inference code.
+
+**Method:** `KineticsNorm` now exposes a three-method API for stats persistence (`smrt_foundation/normalization.py`):
+
+- `norm_fn.save_stats()` — instance method. Returns `{'norm_means', 'norm_stds', 'norm_log_transform'}` with tensors detached to CPU. Ready to merge into a `torch.save(...)` dict via `**` unpacking.
+- `KineticsNorm.load_stats(state)` — classmethod. Extracts the three `norm_*` keys from either a full checkpoint dict or a bare stats dict (other keys are ignored). Defaults `norm_log_transform=True` when absent. Delegates internally to `from_stats`.
+- `KineticsNorm.from_stats(means, stds, log_transform=True, eps=1e-8)` — classmethod. Low-level constructor that takes raw tensors directly. Kept for callers that already have stats in hand; most code with a checkpoint should use `load_stats` instead so the key schema stays in one place.
+
+**Integration template for a new train.py:**
+
+```python
+from smrt_foundation.normalization import KineticsNorm
+
+# ... dataset setup ...
+train_norm_fn = KineticsNorm(tmp_ds, log_transform=True)
+
+# ... training loop ...
+
+# Per-epoch (or final) checkpoint save:
+torch.save({
+    'model_state_dict': unwrapped.state_dict(),
+    'encoder_state_dict': unwrapped.encoder.state_dict(),
+    'config': config,
+    'epoch': epoch,
+    'metrics': metrics,
+    **train_norm_fn.save_stats(),   # drops in norm_means, norm_stds, norm_log_transform
+}, save_path)
+```
+
+**Inference template:**
+
+```python
+import torch
+from smrt_foundation.normalization import KineticsNorm
+
+ckpt = torch.load('scripts/experiments/<name>/checkpoints/epoch_NN.pt', map_location='cpu')
+# ... reconstruct model from ckpt['config'] and load ckpt['model_state_dict'] ...
+norm_fn = KineticsNorm.load_stats(ckpt)   # reads norm_* keys, ignores everything else
+
+with torch.no_grad():
+    logits = model(norm_fn(x))
+```
+
+**When to apply this:** any new training script under `scripts/experiments/` that uses `KineticsNorm` — which should be all of them going forward, since `ZNorm` is deprecated in favor of `KineticsNorm` (they are equivalent on no-padding CpG data; `KineticsNorm` additionally handles padded SSL data correctly). The only line to add is `**norm_fn.save_stats()` inside the `torch.save(...)` dict. No per-script key management, no reimplementation of the detach/CPU incantation.
+
+**When NOT to apply this:** if a script's checkpoint is purely a throwaway (smoke-test runs, benchmark scripts that never load back), skipping `save_stats` is fine. Any checkpoint that might be loaded for inference, fine-tuning, or probe evaluation should include the stats.
+
+**Justification:** 
+- *Single source of truth.* The `norm_*` key schema lives in exactly one place (`save_stats` / `load_stats`). If it ever changes — say, to include an `eps` field or version number — only those two methods need updating, with no audit across every train.py and inference script.
+- *Bit-exact reproducibility.* Verified end-to-end: `train_norm_fn(x)` and `KineticsNorm.load_stats(ckpt)(x)` produce identical outputs at float32 precision, not "within sampling noise". This matters because a 1e-4 shift in normalization is enough to nudge near-boundary CpG classifications across threshold.
+- *No training data required at inference.* Re-instantiating `KineticsNorm(ds)` needs the full training dataset on disk to sample from. `load_stats(ckpt)` only needs the checkpoint file, which is useful for deployment, cross-cluster reproducibility, and sharing a model without shipping the corpus.
+- *Symmetric API.* `save_stats()` on the training side pairs 1:1 with `load_stats()` on the inference side. Any code reviewer can read a single line (`**norm_fn.save_stats()`) and immediately know what's in the checkpoint and how to load it back.
