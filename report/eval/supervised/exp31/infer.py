@@ -83,8 +83,14 @@ def load_model(checkpoint_path, device):
     at training time, reconstructed via `KineticsNorm.load_stats`; this is the
     documented inference entry point and avoids re-sampling statistics from
     the val data (which would drift from training).
+
+    The checkpoint is loaded to CPU and only the model is moved to `device`.
+    This keeps `norm_means` / `norm_stds` on CPU so that forked DataLoader
+    workers can apply the normalization without touching CUDA (CUDA contexts
+    don't survive fork, so any CUDA tensor reached from a worker process
+    raises `cudaErrorInitializationError`).
     """
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     c = ckpt['config']['classifier']
 
     model = DirectClassifier(
