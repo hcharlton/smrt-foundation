@@ -7,31 +7,34 @@ Measure how CpG methylation classification performance scales with training data
 ## Design
 
 - **Training sizes**: 100, 500, 1k, 2k, 4k, 8k, 16k, 32k, 64k, 128k
-- **Epochs per size**: 10
+- **Steps per size**: 200k (fixed budget — smaller datasets see more epochs)
+- **Evals per size**: 10 (every 20k steps)
 - **Validation**: First 1M samples (deterministic, no shuffle)
-- **GPU**: 1 (single process, no DDP)
+- **GPUs**: 8 (parallelised via `torch.multiprocessing.spawn`, 1 GPU per training size, no DDP)
 - **Controlled variables**: Seed (42), optimizer (AdamW lr=3e-3 wd=0.02), cosine schedule (pct_start=0.1), batch size (512)
 
-For each training size, the model is reinitialised from the same seed, KineticsNorm is recomputed from that training subset, and a fresh optimizer/schedule is created.
+Each training size gets the same number of optimizer steps. For 100 samples this means 200k epochs; for 128k samples this means ~800 epochs. This intentionally lets small datasets overfit, revealing the full data scaling curve shape.
+
+All 10 sizes run in parallel across 8 GPUs (GPUs 0-1 handle 2 sizes sequentially, GPUs 2-7 handle 1 each). Each worker writes its own per-size CSV, which are merged into `results.csv` at the end. For each training size, the model is reinitialised from the same seed, KineticsNorm is recomputed from that training subset, and a fresh optimizer/schedule is created.
 
 ## Outputs
 
 ### CSV (`results.csv`)
 
-100 rows (10 sizes x 10 epochs):
+100 rows (10 sizes x 10 eval points):
 
 | Column | Description |
 |--------|-------------|
 | train_size | Number of training samples |
-| epoch | Epoch number (1-10) |
-| train_loss | Average training loss for this epoch |
+| eval_point | Evaluation checkpoint (1-10) |
+| step | Optimizer step at this eval |
+| train_loss | Average training loss since last eval |
 | val_loss | Average validation loss |
 | val_f1 | Binary F1 on validation set |
 | val_auroc | Area under ROC curve |
 | val_auprc | Area under precision-recall curve |
 | val_accuracy | Binary accuracy |
-| steps_per_epoch | Optimizer steps per epoch |
-| total_train_samples_seen | Cumulative training samples processed |
+| epochs_completed | Number of full passes through training data |
 
 ### TensorBoard (`training_logs/`)
 
@@ -39,7 +42,7 @@ One run directory per training size (`n100/`, `n500/`, ..., `n128000/`). All run
 
 ### Checkpoints (`checkpoints/`)
 
-One checkpoint per training size after the final epoch: `n{size}_final.pt`. Contains model weights, encoder weights, config, normalization stats, and final metrics.
+One checkpoint per training size after the final step: `n{size}_final.pt`. Contains model weights, encoder weights, config, normalization stats, and final metrics.
 
 Loading a checkpoint:
 ```python

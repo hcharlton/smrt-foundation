@@ -6,10 +6,10 @@ run_message: >-
   how classification performance scales with training data volume. Single GPU.
 
 resources:
-  cores: 8
-  memory: 128gb
-  walltime: 8:00:00
-  gres: gpu:1
+  cores: 32
+  memory: 256gb
+  walltime: 48:00:00
+  gres: gpu:8
   num_processes: 1
 
 pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
@@ -20,7 +20,8 @@ neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
 scaling:
   train_sizes: [100, 500, 1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000]
   val_limit: 1000000
-  epochs_per_size: 10
+  steps_per_size: 200000
+  evals_per_size: 10
 
 classifier:
   d_model: 128

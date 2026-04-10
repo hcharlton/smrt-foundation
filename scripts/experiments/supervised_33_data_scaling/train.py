@@ -1,25 +1,22 @@
 """
 Data scaling experiment: train DirectClassifier from scratch at 10 training
-set sizes (100 to 128k), 10 epochs each, fixed 1M validation set.
+set sizes (100 to 128k), fixed step budget per size, fixed 1M validation set.
+
+Parallelised across GPUs: each training size runs independently on its own
+GPU via torch.multiprocessing.spawn. No inter-GPU communication — each worker
+trains a complete model from scratch. With 8 GPUs and 10 sizes, GPUs 0-1
+each handle 2 sizes sequentially (the two smallest finish fast), GPUs 2-7
+handle 1 size each.
 
 Based on supervised_31_baseline_clean. Same model architecture
 (DirectClassifier d_model=128 n_layers=4 n_head=4 ctx=32), same optimizer
 (AdamW lr=3e-3 wd=0.02), same cosine schedule with warmup (pct_start=0.1),
 same bf16 mixed precision, same KineticsNorm, same evaluation metrics.
 
-The only controlled variable is training set size. For each size:
-  1. Fresh model initialisation (same seed)
-  2. Fresh KineticsNorm computed from that training subset
-  3. Fresh optimizer + cosine schedule (total_steps based on this size)
-  4. 10 training epochs
-  5. Evaluation after each epoch on a fixed 1M-sample validation set
-
-Results are logged to:
-  - TensorBoard: one run directory per training set size
-  - CSV: one file with all (train_size, epoch) rows
-
-Single GPU only (1 process). Multi-GPU is wasteful for small datasets and
-causes issues at sizes < batch_size.
+The only controlled variable is training set size. Each size gets the same
+number of optimizer steps (steps_per_size), so smaller datasets see many
+more epochs — this is intentional to let the model overfit and reveal the
+data scaling curve shape.
 """
 
 import sys
@@ -29,10 +26,10 @@ import yaml
 import csv
 import torch
 import torch.nn as nn
+import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-from accelerate import Accelerator
 from accelerate.utils import set_seed
 from torchmetrics.classification import (
     BinaryF1Score, BinaryAUROC, BinaryAveragePrecision, BinaryAccuracy
@@ -64,8 +61,186 @@ def get_git_revision_hash():
         return "unknown"
 
 
-def save_checkpoint(model, config, train_size, epoch, metrics, norm_fn, checkpoint_dir):
-    """Save checkpoint after final epoch of a training size."""
+def cycling_iter(dataloader):
+    """Infinite iterator that cycles through a DataLoader."""
+    while True:
+        yield from dataloader
+
+
+def train_one_size(rank, train_size, config, c, steps_per_size, evals_per_size,
+                   eval_every, experiment_dir, checkpoint_dir, tb_dir):
+    """Train a single training size on GPU `rank`."""
+    torch.cuda.set_device(rank)
+    device = torch.device(f'cuda:{rank}')
+
+    tag = f"[GPU {rank} n={train_size:,}]"
+    print(f"{tag} Starting")
+
+    set_seed(42)
+
+    # KineticsNorm from this training subset.
+    norm_ds = LabeledMemmapDataset(
+        config['pos_data_train'], config['neg_data_train'],
+        limit=train_size
+    )
+    norm_fn = KineticsNorm(norm_ds, log_transform=True)
+    del norm_ds
+    print(f"{tag} KineticsNorm means: {norm_fn.means}, stds: {norm_fn.stds}")
+
+    # Datasets.
+    train_ds = LabeledMemmapDataset(
+        config['pos_data_train'], config['neg_data_train'],
+        limit=train_size, norm_fn=norm_fn, balance=True
+    )
+    train_dl = DataLoader(
+        train_ds, batch_size=c['batch_size'], num_workers=2,
+        pin_memory=True, prefetch_factor=4, shuffle=True, drop_last=False,
+    )
+    val_ds = LabeledMemmapDataset(
+        config['pos_data_val'], config['neg_data_val'],
+        limit=config['scaling']['val_limit'], norm_fn=norm_fn
+    )
+    val_dl = DataLoader(
+        val_ds, batch_size=c['batch_size'], num_workers=2,
+        pin_memory=True, prefetch_factor=4, shuffle=False,
+    )
+
+    steps_per_epoch = len(train_dl)
+    print(f"{tag} Train: {len(train_ds)}, Val: {len(val_ds)}, "
+          f"Steps/epoch: {steps_per_epoch}, "
+          f"Total epochs: {steps_per_size / max(steps_per_epoch, 1):.1f}")
+
+    # Model.
+    model = DirectClassifier(
+        d_model=c['d_model'], n_layers=c['n_layers'],
+        n_head=c['n_head'], max_len=c['context'],
+    ).to(device)
+
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"{tag} Parameters: {n_params:,}, "
+          f"CNN receptive field: {model.encoder.cnn.r0}")
+
+    # Optimizer + schedule.
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=float(c['max_lr']), weight_decay=c['weight_decay']
+    )
+    criterion = nn.BCEWithLogitsLoss()
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer, total_steps=steps_per_size, pct_start=c['pct_start']
+    )
+
+    # Metrics.
+    f1_metric = BinaryF1Score().to(device)
+    auroc_metric = BinaryAUROC().to(device)
+    auprc_metric = BinaryAveragePrecision().to(device)
+    acc_metric = BinaryAccuracy().to(device)
+
+    # TensorBoard.
+    writer = SummaryWriter(log_dir=os.path.join(tb_dir, f'n{train_size}'))
+    writer.add_text("config", f"```yaml\n{yaml.dump(config, indent=2)}\n```", 0)
+    writer.add_scalar("train_size", train_size, 0)
+
+    # Per-size CSV (no locking needed — one file per worker).
+    csv_path = os.path.join(experiment_dir, f'results_n{train_size}.csv')
+    csv_file = open(csv_path, 'w', newline='')
+    csv_writer = csv.writer(csv_file)
+    csv_writer.writerow([
+        'train_size', 'eval_point', 'step',
+        'train_loss', 'val_loss',
+        'val_f1', 'val_auroc', 'val_auprc', 'val_accuracy',
+        'epochs_completed',
+    ])
+    csv_file.flush()
+
+    # --- Step-based training with periodic eval ---
+    train_iter = cycling_iter(train_dl)
+    interval_loss = 0.0
+    avg_train_loss = avg_val_loss = 0.0
+    eval_f1 = eval_auroc = eval_auprc = eval_acc = 0.0
+
+    for step in tqdm(range(1, steps_per_size + 1), desc=f"n={train_size}",
+                     position=rank, leave=True):
+        model.train()
+        x, y = next(train_iter)
+        x, y = x.to(device), y.to(device)
+
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            logits = model(x)
+            loss = criterion(logits, y.unsqueeze(1))
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        scheduler.step()
+
+        interval_loss += loss.item()
+
+        writer.add_scalar("train/loss", loss.item(), step)
+        writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
+
+        # --- Periodic eval ---
+        if step % eval_every == 0:
+            eval_point = step // eval_every
+            avg_train_loss = interval_loss / eval_every
+            interval_loss = 0.0
+
+            writer.add_scalar("train/interval_avg_loss", avg_train_loss, step)
+
+            model.eval()
+            val_loss_sum = 0.0
+            val_batches = 0
+            for vx, vy in val_dl:
+                vx, vy = vx.to(device), vy.to(device)
+                with torch.no_grad(), torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                    vlogits = model(vx)
+                    vloss = criterion(vlogits, vy.unsqueeze(1))
+                val_loss_sum += vloss.item()
+                val_batches += 1
+                vy_hat = (vlogits > 0).squeeze(-1)
+                vy_int = vy.long()
+                f1_metric.update(vy_hat, vy_int)
+                auroc_metric.update(vlogits.squeeze(-1).float(), vy_int)
+                auprc_metric.update(vlogits.squeeze(-1).float(), vy_int)
+                acc_metric.update(vy_hat, vy_int)
+
+            avg_val_loss = val_loss_sum / max(val_batches, 1)
+            eval_f1 = f1_metric.compute().item()
+            eval_auroc = auroc_metric.compute().item()
+            eval_auprc = auprc_metric.compute().item()
+            eval_acc = acc_metric.compute().item()
+
+            f1_metric.reset()
+            auroc_metric.reset()
+            auprc_metric.reset()
+            acc_metric.reset()
+
+            # TensorBoard
+            writer.add_scalar("eval/loss", avg_val_loss, step)
+            writer.add_scalar("eval/f1", eval_f1, step)
+            writer.add_scalar("eval/auroc", eval_auroc, step)
+            writer.add_scalar("eval/auprc", eval_auprc, step)
+            writer.add_scalar("eval/accuracy", eval_acc, step)
+
+            epochs_completed = step / max(steps_per_epoch, 1)
+
+            # CSV
+            csv_writer.writerow([
+                train_size, eval_point, step,
+                f'{avg_train_loss:.6f}', f'{avg_val_loss:.6f}',
+                f'{eval_f1:.6f}', f'{eval_auroc:.6f}',
+                f'{eval_auprc:.6f}', f'{eval_acc:.6f}',
+                f'{epochs_completed:.1f}',
+            ])
+            csv_file.flush()
+
+            print(f"{tag} [{eval_point}/{evals_per_size}] step={step:,} "
+                  f"({epochs_completed:.0f} ep) "
+                  f"loss={avg_train_loss:.4f} val={avg_val_loss:.4f} "
+                  f"acc={eval_acc:.4f} f1={eval_f1:.4f} auroc={eval_auroc:.4f}")
+
+    csv_file.close()
+
+    # Checkpoint.
     save_path = os.path.join(checkpoint_dir, f'n{train_size}_final.pt')
     try:
         torch.save({
@@ -73,14 +248,57 @@ def save_checkpoint(model, config, train_size, epoch, metrics, norm_fn, checkpoi
             'encoder_state_dict': model.encoder.state_dict(),
             'config': config,
             'train_size': train_size,
-            'epoch': epoch,
-            'metrics': metrics,
+            'step': steps_per_size,
+            'metrics': {'train_loss': avg_train_loss, 'val_loss': avg_val_loss,
+                        'eval_f1': eval_f1, 'eval_auroc': eval_auroc,
+                        'eval_auprc': eval_auprc, 'eval_accuracy': eval_acc},
             **norm_fn.save_stats(),
         }, save_path)
-        print(f"Saved checkpoint to {save_path}")
+        print(f"{tag} Saved checkpoint to {save_path}")
     except Exception as e:
-        print(f"ERROR: failed to save checkpoint to {save_path}: {type(e).__name__}: {e}")
+        print(f"{tag} ERROR saving checkpoint: {type(e).__name__}: {e}")
         raise
+
+    writer.close()
+
+
+def worker_fn(rank, world_size, train_sizes, config, c, steps_per_size,
+              evals_per_size, eval_every, experiment_dir, checkpoint_dir, tb_dir):
+    """Worker entry point: handles all training sizes assigned to this rank."""
+    for train_size in train_sizes[rank::world_size]:
+        train_one_size(rank, train_size, config, c, steps_per_size, evals_per_size,
+                       eval_every, experiment_dir, checkpoint_dir, tb_dir)
+        torch.cuda.empty_cache()
+
+
+def merge_csvs(experiment_dir, train_sizes):
+    """Merge per-size CSV files into a single results.csv."""
+    merged_path = os.path.join(experiment_dir, 'results.csv')
+    rows = []
+    header = None
+
+    for train_size in train_sizes:
+        per_size_path = os.path.join(experiment_dir, f'results_n{train_size}.csv')
+        if not os.path.exists(per_size_path):
+            print(f"WARNING: missing {per_size_path}")
+            continue
+        with open(per_size_path) as f:
+            reader = csv.reader(f)
+            h = next(reader)
+            if header is None:
+                header = h
+            rows.extend(list(reader))
+        os.remove(per_size_path)
+
+    rows.sort(key=lambda r: (int(r[0]), int(r[1])))
+
+    with open(merged_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        if header is not None:
+            writer.writerow(header)
+        writer.writerows(rows)
+
+    print(f"Merged results into {merged_path} ({len(rows)} rows)")
 
 
 def main():
@@ -97,221 +315,38 @@ def main():
 
     s = config['scaling']
     train_sizes = s['train_sizes']
-    val_limit = s['val_limit']
-    epochs_per_size = s['epochs_per_size']
+    steps_per_size = s['steps_per_size']
+    evals_per_size = s['evals_per_size']
+    eval_every = steps_per_size // evals_per_size
 
-    accelerator = Accelerator(mixed_precision='bf16')
-
-    # --- Experiment directories ---
     experiment_dir = os.path.dirname(os.path.abspath(__file__))
     checkpoint_dir = os.path.join(experiment_dir, 'checkpoints')
     tb_dir = os.path.join(experiment_dir, 'training_logs')
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(tb_dir, exist_ok=True)
 
-    # --- CSV setup (flush after every row for crash safety) ---
-    csv_path = os.path.join(experiment_dir, 'results.csv')
-    csv_file = open(csv_path, 'w', newline='')
-    csv_writer = csv.writer(csv_file)
-    csv_writer.writerow([
-        'train_size', 'epoch',
-        'train_loss', 'val_loss',
-        'val_f1', 'val_auroc', 'val_auprc', 'val_accuracy',
-        'steps_per_epoch', 'total_train_samples_seen',
-    ])
-    csv_file.flush()
+    num_gpus = torch.cuda.device_count()
+    world_size = min(num_gpus, len(train_sizes))
 
     print(f"Config: {config}")
     print(f"Train sizes: {train_sizes}")
-    print(f"Validation limit: {val_limit:,}")
-    print(f"Epochs per size: {epochs_per_size}")
+    print(f"Steps per size: {steps_per_size:,}")
+    print(f"Eval every {eval_every:,} steps ({evals_per_size} evals per size)")
+    print(f"GPUs available: {num_gpus}, using {world_size} workers")
 
-    # --- Main loop: iterate over training set sizes ---
-    for size_idx, train_size in enumerate(train_sizes):
-        print(f"\n{'='*60}")
-        print(f"Training size {size_idx+1}/{len(train_sizes)}: n={train_size:,}")
-        print(f"{'='*60}")
-
-        # Deterministic init: same model weights for every size.
-        set_seed(42)
-
-        # Compute KineticsNorm from this training subset.
-        norm_ds = LabeledMemmapDataset(
-            config['pos_data_train'], config['neg_data_train'],
-            limit=train_size
+    if world_size > 1:
+        mp.spawn(
+            worker_fn,
+            args=(world_size, train_sizes, config, c, steps_per_size,
+                  evals_per_size, eval_every, experiment_dir, checkpoint_dir, tb_dir),
+            nprocs=world_size,
         )
-        norm_fn = KineticsNorm(norm_ds, log_transform=True)
-        del norm_ds
-        print(f"  KineticsNorm means: {norm_fn.means}, stds: {norm_fn.stds}")
+    else:
+        # Fallback: sequential on single GPU.
+        worker_fn(0, 1, train_sizes, config, c, steps_per_size,
+                  evals_per_size, eval_every, experiment_dir, checkpoint_dir, tb_dir)
 
-        # Training dataset + dataloader.
-        train_ds = LabeledMemmapDataset(
-            config['pos_data_train'], config['neg_data_train'],
-            limit=train_size, norm_fn=norm_fn, balance=True
-        )
-        train_dl = DataLoader(
-            train_ds, batch_size=c['batch_size'], num_workers=2,
-            pin_memory=True, prefetch_factor=4, shuffle=True,
-            drop_last=False,
-        )
-
-        # Validation dataset + dataloader (fixed 1M, per-size norm).
-        val_ds = LabeledMemmapDataset(
-            config['pos_data_val'], config['neg_data_val'],
-            limit=val_limit, norm_fn=norm_fn
-        )
-        val_dl = DataLoader(
-            val_ds, batch_size=c['batch_size'], num_workers=2,
-            pin_memory=True, prefetch_factor=4, shuffle=False,
-        )
-
-        print(f"  Training samples: {len(train_ds)}")
-        print(f"  Validation samples: {len(val_ds)}")
-        print(f"  Steps per epoch: {len(train_dl)}")
-
-        # Fresh model.
-        model = DirectClassifier(
-            d_model=c['d_model'], n_layers=c['n_layers'],
-            n_head=c['n_head'], max_len=c['context'],
-        )
-        if size_idx == 0:
-            n_params = sum(p.numel() for p in model.parameters())
-            print(f"  Model parameters: {n_params:,}")
-            print(f"  CNN receptive field: {model.encoder.cnn.r0} bases  (ctx = {c['context']})")
-
-        # Fresh optimizer + schedule.
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=float(c['max_lr']),
-            weight_decay=c['weight_decay'],
-        )
-        criterion = nn.BCEWithLogitsLoss()
-
-        model, optimizer, train_dl, val_dl = accelerator.prepare(
-            model, optimizer, train_dl, val_dl
-        )
-
-        total_steps = len(train_dl) * epochs_per_size
-        scheduler = get_cosine_schedule_with_warmup(
-            optimizer, total_steps=total_steps, pct_start=c['pct_start']
-        )
-
-        print(f"  Total steps: {total_steps}")
-
-        # Metrics (fresh per size).
-        f1_metric = BinaryF1Score().to(accelerator.device)
-        auroc_metric = BinaryAUROC().to(accelerator.device)
-        auprc_metric = BinaryAveragePrecision().to(accelerator.device)
-        acc_metric = BinaryAccuracy().to(accelerator.device)
-
-        # TensorBoard writer for this training size.
-        writer = SummaryWriter(log_dir=os.path.join(tb_dir, f'n{train_size}'))
-        writer.add_text("config", f"```yaml\n{yaml.dump(config, indent=2)}\n```", 0)
-        writer.add_scalar("train_size", train_size, 0)
-
-        global_step = 0
-        avg_train_loss = 0.0
-        avg_val_loss = 0.0
-        epoch_f1 = epoch_auroc = epoch_auprc = epoch_acc = 0.0
-
-        # Training loop.
-        for epoch in range(epochs_per_size):
-            model.train()
-            epoch_loss = 0.0
-            progress = tqdm(
-                train_dl,
-                desc=f"n={train_size} epoch {epoch+1}/{epochs_per_size}",
-            )
-
-            for x, y in progress:
-                logits = model(x)
-                loss = criterion(logits, y.unsqueeze(1).to(torch.float32))
-
-                optimizer.zero_grad()
-                accelerator.backward(loss)
-                optimizer.step()
-                scheduler.step()
-
-                global_step += 1
-                loss_val = loss.item()
-                epoch_loss += loss_val
-
-                writer.add_scalar("train/loss", loss_val, global_step)
-                writer.add_scalar("train/lr", scheduler.get_last_lr()[0], global_step)
-                progress.set_postfix(loss=f"{loss_val:.4f}")
-
-            avg_train_loss = epoch_loss / max(len(train_dl), 1)
-            writer.add_scalar("train/epoch_avg_loss", avg_train_loss, global_step)
-
-            # --- Eval ---
-            model.eval()
-            val_loss_sum = 0.0
-            val_steps = 0
-            for x, y in tqdm(val_dl, desc=f"n={train_size} eval {epoch+1}"):
-                with torch.no_grad():
-                    logits = model(x)
-                    loss = criterion(logits, y.unsqueeze(1).to(torch.float32))
-                val_loss_sum += loss.item()
-                val_steps += 1
-                y_hat = (logits > 0).squeeze(-1)
-                y_int = y.long()
-                f1_metric.update(y_hat, y_int)
-                auroc_metric.update(logits.squeeze(-1), y_int)
-                auprc_metric.update(logits.squeeze(-1), y_int)
-                acc_metric.update(y_hat, y_int)
-
-            avg_val_loss = val_loss_sum / max(val_steps, 1)
-            epoch_f1 = f1_metric.compute().item()
-            epoch_auroc = auroc_metric.compute().item()
-            epoch_auprc = auprc_metric.compute().item()
-            epoch_acc = acc_metric.compute().item()
-
-            f1_metric.reset()
-            auroc_metric.reset()
-            auprc_metric.reset()
-            acc_metric.reset()
-
-            # TensorBoard
-            writer.add_scalar("eval/loss", avg_val_loss, global_step)
-            writer.add_scalar("eval/f1", epoch_f1, global_step)
-            writer.add_scalar("eval/auroc", epoch_auroc, global_step)
-            writer.add_scalar("eval/auprc", epoch_auprc, global_step)
-            writer.add_scalar("eval/accuracy", epoch_acc, global_step)
-
-            # CSV (flush for crash safety)
-            csv_writer.writerow([
-                train_size, epoch + 1,
-                f'{avg_train_loss:.6f}', f'{avg_val_loss:.6f}',
-                f'{epoch_f1:.6f}', f'{epoch_auroc:.6f}',
-                f'{epoch_auprc:.6f}', f'{epoch_acc:.6f}',
-                len(train_dl),
-                (epoch + 1) * len(train_ds),
-            ])
-            csv_file.flush()
-
-            print(f"  Epoch {epoch+1}: train_loss={avg_train_loss:.4f} "
-                  f"val_loss={avg_val_loss:.4f} acc={epoch_acc:.4f} "
-                  f"f1={epoch_f1:.4f} auroc={epoch_auroc:.4f}")
-
-        # Checkpoint after all epochs for this size.
-        unwrapped = accelerator.unwrap_model(model)
-        save_checkpoint(
-            unwrapped, config, train_size, epochs_per_size,
-            {'train_loss': avg_train_loss, 'val_loss': avg_val_loss,
-             'eval_f1': epoch_f1, 'eval_auroc': epoch_auroc,
-             'eval_auprc': epoch_auprc, 'eval_accuracy': epoch_acc},
-            norm_fn, checkpoint_dir,
-        )
-
-        writer.close()
-
-        # Free memory before next size.
-        del model, optimizer, scheduler, train_ds, train_dl, val_ds, val_dl
-        del norm_fn, f1_metric, auroc_metric, auprc_metric, acc_metric
-        torch.cuda.empty_cache()
-
-    csv_file.close()
-    print(f"\nResults saved to {csv_path}")
+    merge_csvs(experiment_dir, train_sizes)
     print(f"TensorBoard logs in {tb_dir}")
     print(f"Checkpoints in {checkpoint_dir}")
 
