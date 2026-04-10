@@ -25,6 +25,7 @@ __pycache__/
 *.py[codz]
 *$py.class
 *.svg
+*.parquet
 # C extensions
 *.so
 
