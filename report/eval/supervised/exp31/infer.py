@@ -8,7 +8,8 @@ the same style as the training configs under `scripts/experiments/*`. Use
 inference is single-GPU.
 
 Loads a per-epoch checkpoint from exp 31, runs the classifier on the memmap
-shards specified in the config, and writes a parquet with one row per sample:
+shards specified in the config, and streams results to a parquet file with one
+row per sample:
 
     input       — nested list [context, 4] of the normalized tensor the model
                   actually saw (post-KineticsNorm, i.e. log1p + z-score applied
@@ -22,6 +23,11 @@ shards specified in the config, and writes a parquet with one row per sample:
                   full path is cheap on disk.
     shard_row   — int32 row index within that shard. `np.load(shard_path)[row]`
                   recovers the pre-normalized sample.
+
+Results are written batch-by-batch via PyArrow's ParquetWriter — at no point
+does the script hold more than one batch of results in memory. This is
+necessary at full scale (~86M val samples × 128 floats/sample = ~44 GB if
+accumulated).
 
 The checkpoints live on Gefion, so this script is meant to run there. Locally
 it can only be smoke-tested — no data is loaded at import time.
@@ -49,7 +55,8 @@ import os
 import sys
 
 import numpy as np
-import polars as pl
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
 import yaml
 from torch.utils.data import DataLoader
@@ -71,6 +78,14 @@ DEFAULT_INFERENCE = {
     'limit': 0,
     'num_workers': 4,
 }
+
+PARQUET_SCHEMA = pa.schema([
+    ('input', pa.list_(pa.list_(pa.float32()))),
+    ('label', pa.float32()),
+    ('logit', pa.float32()),
+    ('shard_path', pa.string()),
+    ('shard_row', pa.int32()),
+])
 
 
 def load_model(checkpoint_path, device):
@@ -107,61 +122,28 @@ def load_model(checkpoint_path, device):
     return model, norm_fn, ckpt
 
 
-def build_provenance(ds):
-    """Precompute (shard_path, shard_row) for every sample in `ds`.
+def batch_provenance(ds, row_offset, batch_size):
+    """Compute (shard_path, shard_row) for dataset indices [row_offset, row_offset + batch_size).
 
-    Mirrors `LabeledMemmapDataset.__getitem__:103-105` but vectorized. The
-    dataset lays out positives at indices 0..pos_len-1 and negatives at
-    pos_len..pos_len+neg_len-1. Within each half, sample index `i` maps to
-    shard `paths[i // sz]` row `i % sz`, where `sz` is the first-shard size
-    (the last shard may be shorter, but the underlying divmod math handles
-    that cleanly — see the get_stats helper in dataset.py:67-70).
+    Mirrors `LabeledMemmapDataset.__getitem__:103-105`: positives live at
+    indices 0..pos_len-1, negatives at pos_len..len-1. Within each half,
+    `divmod(local_index, shard_size)` gives the shard and row.
 
-    The script iterates the loader with shuffle=False, so the returned
-    arrays are aligned 1:1 with the inference output rows.
+    Computed per-batch rather than precomputed for the full dataset to avoid
+    holding ~86M path references in memory at once.
     """
-    pos_n, neg_n = int(ds.pos_len), int(ds.neg_len)
-
-    if pos_n:
-        pos_shard_idx = np.arange(pos_n) // ds.pos_sz
-        pos_row = (np.arange(pos_n) %  ds.pos_sz).astype(np.int32)
-        pos_paths = [ds.pos_paths[i] for i in pos_shard_idx]
-    else:
-        pos_row = np.empty(0, dtype=np.int32)
-        pos_paths = []
-
-    if neg_n:
-        neg_shard_idx = np.arange(neg_n) // ds.neg_sz
-        neg_row = (np.arange(neg_n) %  ds.neg_sz).astype(np.int32)
-        neg_paths = [ds.neg_paths[i] for i in neg_shard_idx]
-    else:
-        neg_row = np.empty(0, dtype=np.int32)
-        neg_paths = []
-
-    shard_paths = pos_paths + neg_paths
-    shard_rows = np.concatenate([pos_row, neg_row])
-    return shard_paths, shard_rows
-
-
-@torch.no_grad()
-def run_inference(model, dataloader, device):
-    """Forward all batches, collect (inputs, labels, logits) as numpy arrays.
-
-    Inputs are the tensors as they come out of the dataset — i.e. already
-    normalized (LabeledMemmapDataset applies norm_fn inside __getitem__).
-    Logits are squeezed from [B, 1] to [B] for a flat parquet column.
-    """
-    all_x, all_y, all_logit = [], [], []
-    for x, y in tqdm(dataloader, desc='Inference'):
-        logits = model(x.to(device))
-        all_x.append(x.cpu().numpy())
-        all_y.append(y.cpu().numpy())
-        all_logit.append(logits.squeeze(-1).float().cpu().numpy())
-    return (
-        np.concatenate(all_x),
-        np.concatenate(all_y),
-        np.concatenate(all_logit),
-    )
+    paths = []
+    rows = np.empty(batch_size, dtype=np.int32)
+    for i in range(batch_size):
+        idx = row_offset + i
+        if idx < ds.pos_len:
+            s_idx, l_idx = divmod(idx, ds.pos_sz)
+            paths.append(ds.pos_paths[s_idx])
+        else:
+            s_idx, l_idx = divmod(idx - int(ds.pos_len), ds.neg_sz)
+            paths.append(ds.neg_paths[s_idx])
+        rows[i] = l_idx
+    return paths, rows
 
 
 def main():
@@ -201,35 +183,36 @@ def main():
     )
     print(f'Dataset: {len(ds)} samples ({ds.pos_len} pos, {ds.neg_len} neg)')
 
-    shard_paths, shard_rows = build_provenance(ds)
-    assert len(shard_paths) == len(ds), (
-        f'Provenance length {len(shard_paths)} != dataset length {len(ds)}'
-    )
-
     dl = DataLoader(
         ds, batch_size=c['batch_size'],
         num_workers=c['num_workers'], pin_memory=True, shuffle=False,
     )
 
-    inputs, labels, logits = run_inference(model, dl, device)
-    print(f'Inputs: {inputs.shape} {inputs.dtype}, '
-          f'labels: {labels.shape}, logits: {logits.shape}')
-
-    assert len(inputs) == len(shard_paths), (
-        f'Row count drift: inference={len(inputs)}, provenance={len(shard_paths)}'
-    )
-
-    df = pl.DataFrame({
-        'input': inputs.astype(np.float32).tolist(),
-        'label': labels.astype(np.float32),
-        'logit': logits.astype(np.float32),
-        'shard_path': shard_paths,
-        'shard_row': shard_rows,
-    })
-
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    df.write_parquet(output_path)
-    print(f'Wrote {len(df)} rows to {output_path}')
+    writer = pq.ParquetWriter(output_path, PARQUET_SCHEMA)
+
+    row_offset = 0
+    with torch.no_grad():
+        for x, y in tqdm(dl, desc='Inference'):
+            logits = model(x.to(device))
+
+            bs = x.shape[0]
+            b_paths, b_rows = batch_provenance(ds, row_offset, bs)
+
+            batch_table = pa.table({
+                'input': x.numpy().astype(np.float32).tolist(),
+                'label': pa.array(y.numpy(), type=pa.float32()),
+                'logit': pa.array(
+                    logits.squeeze(-1).float().cpu().numpy(), type=pa.float32()
+                ),
+                'shard_path': b_paths,
+                'shard_row': pa.array(b_rows, type=pa.int32()),
+            }, schema=PARQUET_SCHEMA)
+            writer.write_table(batch_table)
+            row_offset += bs
+
+    writer.close()
+    print(f'Wrote {row_offset} rows to {output_path}')
 
 
 if __name__ == '__main__':
