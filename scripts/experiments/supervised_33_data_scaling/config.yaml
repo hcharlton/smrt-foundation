@@ -1,0 +1,33 @@
+experiment_type: 'supervised'
+experiment_name: '33_data_scaling'
+run_message: >-
+  Data scaling experiment: train DirectClassifier from scratch at 10 training
+  set sizes (100 to 128k), 10 epochs each, fixed 1M validation set. Measures
+  how classification performance scales with training data volume. Single GPU.
+
+resources:
+  cores: 8
+  memory: 128gb
+  walltime: 8:00:00
+  gres: gpu:1
+  num_processes: 1
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+scaling:
+  train_sizes: [100, 500, 1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000]
+  val_limit: 1000000
+  epochs_per_size: 10
+
+classifier:
+  d_model: 128
+  n_head: 4
+  context: 32
+  n_layers: 4
+  weight_decay: 0.02
+  batch_size: 512
+  max_lr: 3e-3
+  pct_start: 0.1
