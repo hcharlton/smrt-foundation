@@ -69,10 +69,14 @@ def cycling_iter(dataloader):
 
 
 def train_one_size(rank, train_size, config, c, steps_per_size, eval_steps,
-                   experiment_dir, checkpoint_dir, tb_dir):
+                   experiment_dir, tb_dir):
     """Train a single training size on GPU `rank`."""
     torch.cuda.set_device(rank)
     device = torch.device(f'cuda:{rank}')
+
+    # Per-size output directory (CSV + checkpoints together).
+    size_dir = os.path.join(experiment_dir, f'n{train_size}')
+    os.makedirs(size_dir, exist_ok=True)
 
     tag = f"[GPU {rank} n={train_size:,}]"
     print(f"{tag} Starting")
@@ -142,7 +146,7 @@ def train_one_size(rank, train_size, config, c, steps_per_size, eval_steps,
     writer.add_scalar("train_size", train_size, 0)
 
     # Per-size CSV (no locking needed — one file per worker).
-    csv_path = os.path.join(experiment_dir, f'results_n{train_size}.csv')
+    csv_path = os.path.join(size_dir, 'results.csv')
     csv_file = open(csv_path, 'w', newline='')
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow([
@@ -247,36 +251,36 @@ def train_one_size(rank, train_size, config, c, steps_per_size, eval_steps,
                   f"loss={avg_train_loss:.4f} val={avg_val_loss:.4f} "
                   f"acc={eval_acc:.4f} f1={eval_f1:.4f} auroc={eval_auroc:.4f}")
 
+            # Checkpoint at every eval point.
+            ckpt_path = os.path.join(size_dir, f'step{step}.pt')
+            try:
+                torch.save({
+                    'model_state_dict': model.state_dict(),
+                    'encoder_state_dict': model.encoder.state_dict(),
+                    'config': config,
+                    'train_size': train_size,
+                    'step': step,
+                    'eval_point': eval_point,
+                    'metrics': {'train_loss': avg_train_loss, 'val_loss': avg_val_loss,
+                                'eval_f1': eval_f1, 'eval_auroc': eval_auroc,
+                                'eval_auprc': eval_auprc, 'eval_accuracy': eval_acc},
+                    **norm_fn.save_stats(),
+                }, ckpt_path)
+            except Exception as e:
+                print(f"{tag} ERROR saving checkpoint: {type(e).__name__}: {e}")
+                raise
+
     csv_file.close()
-
-    # Checkpoint.
-    save_path = os.path.join(checkpoint_dir, f'n{train_size}_final.pt')
-    try:
-        torch.save({
-            'model_state_dict': model.state_dict(),
-            'encoder_state_dict': model.encoder.state_dict(),
-            'config': config,
-            'train_size': train_size,
-            'step': steps_per_size,
-            'metrics': {'train_loss': avg_train_loss, 'val_loss': avg_val_loss,
-                        'eval_f1': eval_f1, 'eval_auroc': eval_auroc,
-                        'eval_auprc': eval_auprc, 'eval_accuracy': eval_acc},
-            **norm_fn.save_stats(),
-        }, save_path)
-        print(f"{tag} Saved checkpoint to {save_path}")
-    except Exception as e:
-        print(f"{tag} ERROR saving checkpoint: {type(e).__name__}: {e}")
-        raise
-
+    print(f"{tag} Done. {eval_point} checkpoints saved.")
     writer.close()
 
 
 def worker_fn(rank, world_size, train_sizes, config, c, steps_per_size,
-              eval_steps, experiment_dir, checkpoint_dir, tb_dir):
+              eval_steps, experiment_dir, tb_dir):
     """Worker entry point: handles all training sizes assigned to this rank."""
     for train_size in train_sizes[rank::world_size]:
         train_one_size(rank, train_size, config, c, steps_per_size, eval_steps,
-                       experiment_dir, checkpoint_dir, tb_dir)
+                       experiment_dir, tb_dir)
         torch.cuda.empty_cache()
 
 
@@ -287,7 +291,7 @@ def merge_csvs(experiment_dir, train_sizes):
     header = None
 
     for train_size in train_sizes:
-        per_size_path = os.path.join(experiment_dir, f'results_n{train_size}.csv')
+        per_size_path = os.path.join(experiment_dir, f'n{train_size}', 'results.csv')
         if not os.path.exists(per_size_path):
             print(f"WARNING: missing {per_size_path}")
             continue
@@ -297,7 +301,6 @@ def merge_csvs(experiment_dir, train_sizes):
             if header is None:
                 header = h
             rows.extend(list(reader))
-        os.remove(per_size_path)
 
     rows.sort(key=lambda r: (int(r[0]), int(r[1])))
 
@@ -334,9 +337,7 @@ def main():
     ))
 
     experiment_dir = os.path.dirname(os.path.abspath(__file__))
-    checkpoint_dir = os.path.join(experiment_dir, 'checkpoints')
     tb_dir = os.path.join(experiment_dir, 'training_logs')
-    os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(tb_dir, exist_ok=True)
 
     num_gpus = torch.cuda.device_count()
@@ -352,17 +353,16 @@ def main():
         mp.spawn(
             worker_fn,
             args=(world_size, train_sizes, config, c, steps_per_size,
-                  eval_steps, experiment_dir, checkpoint_dir, tb_dir),
+                  eval_steps, experiment_dir, tb_dir),
             nprocs=world_size,
         )
     else:
         # Fallback: sequential on single GPU.
         worker_fn(0, 1, train_sizes, config, c, steps_per_size,
-                  eval_steps, experiment_dir, checkpoint_dir, tb_dir)
+                  eval_steps, experiment_dir, tb_dir)
 
     merge_csvs(experiment_dir, train_sizes)
     print(f"TensorBoard logs in {tb_dir}")
-    print(f"Checkpoints in {checkpoint_dir}")
 
 
 if __name__ == "__main__":

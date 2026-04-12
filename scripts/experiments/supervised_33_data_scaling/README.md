@@ -6,22 +6,22 @@ Measure how CpG methylation classification performance scales with training data
 
 ## Design
 
-- **Training sizes**: 100, 500, 1k, 2k, 4k, 8k, 16k, 32k, 64k, 128k
+- **Training sizes**: 100, 500, 1k, 2k, 4k, 8k, 16k, 32k, 64k, 128k, 256k, 512k, 1M, 2M, 4M, 8M
 - **Steps per size**: 200k (fixed budget — smaller datasets see more epochs)
 - **Eval schedule**: 20 log-spaced points from step 100 to 200k (dense early to capture learning curve rise)
 - **Validation**: First 1M samples (deterministic, no shuffle)
-- **GPUs**: 8 (parallelised via `torch.multiprocessing.spawn`, 1 GPU per training size, no DDP)
+- **GPUs**: 16 (parallelised via `torch.multiprocessing.spawn`, 1 GPU per training size, no DDP)
 - **Controlled variables**: Seed (42), optimizer (AdamW lr=3e-3 wd=0.02), cosine schedule (pct_start=0.1), batch size (512)
 
 Each training size gets the same number of optimizer steps. For 100 samples this means 200k epochs; for 128k samples this means ~800 epochs. This intentionally lets small datasets overfit, revealing the full data scaling curve shape.
 
-All 10 sizes run in parallel across 8 GPUs (GPUs 0-1 handle 2 sizes sequentially, GPUs 2-7 handle 1 each). Each worker writes its own per-size CSV, which are merged into `results.csv` at the end. For each training size, the model is reinitialised from the same seed, KineticsNorm is recomputed from that training subset, and a fresh optimizer/schedule is created.
+All 16 sizes run in parallel across 16 GPUs (1 size per GPU). Each worker writes its own per-size CSV, which are merged into `results.csv` at the end. For each training size, the model is reinitialised from the same seed, KineticsNorm is recomputed from that training subset, and a fresh optimizer/schedule is created.
 
 ## Outputs
 
 ### CSV (`results.csv`)
 
-~200 rows (10 sizes x ~20 log-spaced eval points):
+~320 rows (16 sizes x ~20 log-spaced eval points):
 
 | Column | Description |
 |--------|-------------|
