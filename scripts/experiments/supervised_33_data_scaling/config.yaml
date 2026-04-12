@@ -6,10 +6,10 @@ run_message: >-
   how classification performance scales with training data volume. Single GPU.
 
 resources:
-  cores: 64
-  memory: 512gb
-  walltime: 10:00:00
-  gres: gpu:16
+  cores: 32
+  memory: 256gb
+  walltime: 24:00:00
+  gres: gpu:8
   num_processes: 1
 
 pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
