@@ -8,7 +8,7 @@ Measure how CpG methylation classification performance scales with training data
 
 - **Training sizes**: 100, 500, 1k, 2k, 4k, 8k, 16k, 32k, 64k, 128k
 - **Steps per size**: 200k (fixed budget — smaller datasets see more epochs)
-- **Evals per size**: 10 (every 20k steps)
+- **Eval schedule**: 20 log-spaced points from step 100 to 200k (dense early to capture learning curve rise)
 - **Validation**: First 1M samples (deterministic, no shuffle)
 - **GPUs**: 8 (parallelised via `torch.multiprocessing.spawn`, 1 GPU per training size, no DDP)
 - **Controlled variables**: Seed (42), optimizer (AdamW lr=3e-3 wd=0.02), cosine schedule (pct_start=0.1), batch size (512)
@@ -21,7 +21,7 @@ All 10 sizes run in parallel across 8 GPUs (GPUs 0-1 handle 2 sizes sequentially
 
 ### CSV (`results.csv`)
 
-100 rows (10 sizes x 10 eval points):
+~200 rows (10 sizes x ~20 log-spaced eval points):
 
 | Column | Description |
 |--------|-------------|

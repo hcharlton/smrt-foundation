@@ -24,6 +24,7 @@ import os
 import subprocess
 import yaml
 import csv
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.multiprocessing as mp
@@ -67,8 +68,8 @@ def cycling_iter(dataloader):
         yield from dataloader
 
 
-def train_one_size(rank, train_size, config, c, steps_per_size, evals_per_size,
-                   eval_every, experiment_dir, checkpoint_dir, tb_dir):
+def train_one_size(rank, train_size, config, c, steps_per_size, eval_steps,
+                   experiment_dir, checkpoint_dir, tb_dir):
     """Train a single training size on GPU `rank`."""
     torch.cuda.set_device(rank)
     device = torch.device(f'cuda:{rank}')
@@ -152,11 +153,17 @@ def train_one_size(rank, train_size, config, c, steps_per_size, evals_per_size,
     ])
     csv_file.flush()
 
-    # --- Step-based training with periodic eval ---
+    # --- Step-based training with log-spaced eval ---
+    eval_steps_set = set(eval_steps)
+    n_evals = len(eval_steps)
     train_iter = cycling_iter(train_dl)
     interval_loss = 0.0
+    steps_since_last_eval = 0
+    eval_point = 0
     avg_train_loss = avg_val_loss = 0.0
     eval_f1 = eval_auroc = eval_auprc = eval_acc = 0.0
+
+    print(f"{tag} Eval schedule ({n_evals} points): {eval_steps}")
 
     for step in tqdm(range(1, steps_per_size + 1), desc=f"n={train_size}",
                      position=rank, leave=True):
@@ -174,15 +181,17 @@ def train_one_size(rank, train_size, config, c, steps_per_size, evals_per_size,
         scheduler.step()
 
         interval_loss += loss.item()
+        steps_since_last_eval += 1
 
         writer.add_scalar("train/loss", loss.item(), step)
         writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
 
-        # --- Periodic eval ---
-        if step % eval_every == 0:
-            eval_point = step // eval_every
-            avg_train_loss = interval_loss / eval_every
+        # --- Log-spaced eval ---
+        if step in eval_steps_set:
+            eval_point += 1
+            avg_train_loss = interval_loss / steps_since_last_eval
             interval_loss = 0.0
+            steps_since_last_eval = 0
 
             writer.add_scalar("train/interval_avg_loss", avg_train_loss, step)
 
@@ -233,7 +242,7 @@ def train_one_size(rank, train_size, config, c, steps_per_size, evals_per_size,
             ])
             csv_file.flush()
 
-            print(f"{tag} [{eval_point}/{evals_per_size}] step={step:,} "
+            print(f"{tag} [{eval_point}/{n_evals}] step={step:,} "
                   f"({epochs_completed:.0f} ep) "
                   f"loss={avg_train_loss:.4f} val={avg_val_loss:.4f} "
                   f"acc={eval_acc:.4f} f1={eval_f1:.4f} auroc={eval_auroc:.4f}")
@@ -263,11 +272,11 @@ def train_one_size(rank, train_size, config, c, steps_per_size, evals_per_size,
 
 
 def worker_fn(rank, world_size, train_sizes, config, c, steps_per_size,
-              evals_per_size, eval_every, experiment_dir, checkpoint_dir, tb_dir):
+              eval_steps, experiment_dir, checkpoint_dir, tb_dir):
     """Worker entry point: handles all training sizes assigned to this rank."""
     for train_size in train_sizes[rank::world_size]:
-        train_one_size(rank, train_size, config, c, steps_per_size, evals_per_size,
-                       eval_every, experiment_dir, checkpoint_dir, tb_dir)
+        train_one_size(rank, train_size, config, c, steps_per_size, eval_steps,
+                       experiment_dir, checkpoint_dir, tb_dir)
         torch.cuda.empty_cache()
 
 
@@ -316,8 +325,13 @@ def main():
     s = config['scaling']
     train_sizes = s['train_sizes']
     steps_per_size = s['steps_per_size']
-    evals_per_size = s['evals_per_size']
-    eval_every = steps_per_size // evals_per_size
+    n_evals = s['n_evals']
+    first_eval_step = s['first_eval_step']
+
+    # Log-spaced eval schedule: dense early, sparse late.
+    eval_steps = sorted(set(
+        np.geomspace(first_eval_step, steps_per_size, n_evals).astype(int).tolist()
+    ))
 
     experiment_dir = os.path.dirname(os.path.abspath(__file__))
     checkpoint_dir = os.path.join(experiment_dir, 'checkpoints')
@@ -331,20 +345,20 @@ def main():
     print(f"Config: {config}")
     print(f"Train sizes: {train_sizes}")
     print(f"Steps per size: {steps_per_size:,}")
-    print(f"Eval every {eval_every:,} steps ({evals_per_size} evals per size)")
+    print(f"Eval schedule ({len(eval_steps)} points): {eval_steps}")
     print(f"GPUs available: {num_gpus}, using {world_size} workers")
 
     if world_size > 1:
         mp.spawn(
             worker_fn,
             args=(world_size, train_sizes, config, c, steps_per_size,
-                  evals_per_size, eval_every, experiment_dir, checkpoint_dir, tb_dir),
+                  eval_steps, experiment_dir, checkpoint_dir, tb_dir),
             nprocs=world_size,
         )
     else:
         # Fallback: sequential on single GPU.
         worker_fn(0, 1, train_sizes, config, c, steps_per_size,
-                  evals_per_size, eval_every, experiment_dir, checkpoint_dir, tb_dir)
+                  eval_steps, experiment_dir, checkpoint_dir, tb_dir)
 
     merge_csvs(experiment_dir, train_sizes)
     print(f"TensorBoard logs in {tb_dir}")

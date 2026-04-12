@@ -21,7 +21,8 @@ scaling:
   train_sizes: [100, 500, 1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000]
   val_limit: 1000000
   steps_per_size: 200000
-  evals_per_size: 10
+  n_evals: 20
+  first_eval_step: 100
 
 classifier:
   d_model: 128
