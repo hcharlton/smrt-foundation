@@ -6,11 +6,11 @@ Previous experiments (25, 26) pretrained on the same CpG data used for fine-tuni
 
 ## Key features
 
-- **Random cropping**: Each epoch, every 4096-position read yields a random 128-base window. Over 3000 epochs, the encoder sees diverse views of the same reads.
-- **Periodic checkpoints**: Every 100 epochs to `checkpoints/epoch_N.pt`. Allows post-hoc selection of best checkpoint and recovery from timeouts.
-- **Reduced probe frequency**: Every 100 epochs (not every epoch) to minimize overhead during the 5-day run.
-- **Long cosine schedule**: 1% warmup (30 epochs), cosine decay over 2970 epochs, min LR floor at 5%.
+- **Random cropping**: Each epoch, every 4096-position read yields a random 128-base window. Over 500 epochs, the encoder sees diverse views of the same reads.
+- **Eval-ready checkpoints**: Every 20 epochs to `checkpoints/epoch_N.pt`. Each checkpoint includes encoder weights AND normalization stats (`norm_means`, `norm_stds`, `norm_log_transform`), so downstream eval can reconstruct the normalizer via `KineticsNorm.load_stats(ckpt)` without access to the original training data.
+- **Linear probe evaluation**: Every 100 epochs (5 probes total) to track representation quality during pretraining.
+- **Cosine schedule**: 1% warmup (5 epochs), cosine decay over 495 epochs.
 
 ## Budget
 
-~1000 GPU hours on 8 H100s = ~125 wall hours = ~3000 epochs at ~2.5 min/epoch.
+~100 GPU hours on 8 H100s = ~24 wall hours = ~500 epochs at ~2.5 min/epoch.

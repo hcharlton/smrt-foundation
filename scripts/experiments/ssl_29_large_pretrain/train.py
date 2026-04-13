@@ -3,13 +3,13 @@ Large-scale masked autoencoder pretraining with random cropping.
 
 Tests the SSL value proposition: pretrain on all available unlabeled data
 (839K full reads, 32x augmented via random 128-base crops) then fine-tune
-on labeled CpG data. ~1000 GPU hour budget.
+on labeled CpG data. ~100 GPU hour budget (24hr walltime on 8 H100s).
 
 Key differences from exp 24/25:
   - Random cropping from 4096→128 (not fixed first-128 truncation)
-  - 3000 epochs with very long cosine schedule (1% warmup)
-  - Periodic checkpointing every 100 epochs
-  - Probe evaluation every 100 epochs (not every epoch)
+  - 500 epochs with cosine schedule (1% warmup = 5 epochs)
+  - Eval-ready checkpoints every 20 epochs (includes norm stats)
+  - Probe evaluation every 100 epochs (5 probes total)
 """
 
 import sys
@@ -275,6 +275,7 @@ def main():
                     'encoder_state_dict': unwrapped.encoder.state_dict(),
                     'config': config,
                     'epoch': epoch + 1,
+                    **ssl_norm.save_stats(),
                 }, save_path)
                 print(f"Saved checkpoint to {save_path}")
             accelerator.wait_for_everyone()
@@ -288,6 +289,7 @@ def main():
             'encoder_state_dict': unwrapped.encoder.state_dict(),
             'config': config,
             'epoch': c['epochs'],
+            **ssl_norm.save_stats(),
         }, save_path)
         print(f"Saved final checkpoint to {save_path}")
 
