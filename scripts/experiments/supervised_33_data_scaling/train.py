@@ -21,6 +21,7 @@ data scaling curve shape.
 
 import sys
 import os
+import math
 import subprocess
 import yaml
 import csv
@@ -28,7 +29,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.multiprocessing as mp
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from accelerate.utils import set_seed
@@ -62,10 +63,20 @@ def get_git_revision_hash():
         return "unknown"
 
 
-def cycling_iter(dataloader):
-    """Infinite iterator that cycles through a DataLoader."""
-    while True:
-        yield from dataloader
+class CyclingSampler(Sampler):
+    """Yields shuffled indices in epoch-sized chunks, cycling indefinitely.
+
+    Unlike cycling a DataLoader (which kills and respawns workers at each
+    epoch boundary), this keeps the DataLoader iterator alive for the entire
+    training run. For n=500 with batch_size=512 this avoids 400k worker
+    respawns — the root cause of 4s/step on small datasets.
+    """
+    def __init__(self, dataset_size):
+        self.dataset_size = dataset_size
+
+    def __iter__(self):
+        while True:
+            yield from torch.randperm(self.dataset_size).tolist()
 
 
 def train_one_size(rank, train_size, config, c, steps_per_size, eval_steps,
@@ -98,8 +109,9 @@ def train_one_size(rank, train_size, config, c, steps_per_size, eval_steps,
         limit=train_size, norm_fn=norm_fn, balance=True
     )
     train_dl = DataLoader(
-        train_ds, batch_size=c['batch_size'], num_workers=2,
-        pin_memory=True, prefetch_factor=4, shuffle=True, drop_last=False,
+        train_ds, batch_size=c['batch_size'],
+        sampler=CyclingSampler(len(train_ds)),
+        num_workers=2, pin_memory=True, prefetch_factor=4, drop_last=False,
     )
     val_ds = LabeledMemmapDataset(
         config['pos_data_val'], config['neg_data_val'],
@@ -110,7 +122,7 @@ def train_one_size(rank, train_size, config, c, steps_per_size, eval_steps,
         pin_memory=True, prefetch_factor=4, shuffle=False,
     )
 
-    steps_per_epoch = len(train_dl)
+    steps_per_epoch = math.ceil(len(train_ds) / c['batch_size'])
     print(f"{tag} Train: {len(train_ds)}, Val: {len(val_ds)}, "
           f"Steps/epoch: {steps_per_epoch}, "
           f"Total epochs: {steps_per_size / max(steps_per_epoch, 1):.1f}")
@@ -160,7 +172,7 @@ def train_one_size(rank, train_size, config, c, steps_per_size, eval_steps,
     # --- Step-based training with log-spaced eval ---
     eval_steps_set = set(eval_steps)
     n_evals = len(eval_steps)
-    train_iter = cycling_iter(train_dl)
+    train_iter = iter(train_dl)
     interval_loss = 0.0
     steps_since_last_eval = 0
     eval_point = 0
@@ -184,11 +196,13 @@ def train_one_size(rank, train_size, config, c, steps_per_size, eval_steps,
         optimizer.step()
         scheduler.step()
 
-        interval_loss += loss.item()
+        loss_val = loss.item()
+        interval_loss += loss_val
         steps_since_last_eval += 1
 
-        writer.add_scalar("train/loss", loss.item(), step)
-        writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
+        if step % 100 == 0:
+            writer.add_scalar("train/loss", loss_val, step)
+            writer.add_scalar("train/lr", scheduler.get_last_lr()[0], step)
 
         # --- Log-spaced eval ---
         if step in eval_steps_set:
