@@ -181,8 +181,7 @@ def train_one_size(rank, train_size, config, c, steps_per_size, eval_steps,
 
     print(f"{tag} Eval schedule ({n_evals} points): {eval_steps}")
 
-    for step in tqdm(range(1, steps_per_size + 1), desc=f"n={train_size}",
-                     position=rank, leave=True):
+    for step in range(1, steps_per_size + 1):
         model.train()
         x, y = next(train_iter)
         x, y = x.to(device), y.to(device)
