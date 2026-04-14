@@ -313,7 +313,7 @@ def process_dataset(name, data):
             config_path=CONFIG['data_config'],
             profile=True,
             normalize=False,
-            shards=50
+            shards=0
         )
     )
 
