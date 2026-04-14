@@ -7,7 +7,7 @@ run_message: >-
   then 300k steps unfrozen with differential LR (encoder=3e-4, head=3e-3).
   Same grid as exp 33 for direct comparison of pretrained vs random init.
 
-pretrained_checkpoint: 'scripts/experiments/ssl_29_large_pretrain/checkpoints/final_model.pt'
+pretrained_checkpoint: 'scripts/experiments/ssl_29_large_pretrain/checkpoints_run1/final_model.pt'
 
 resources:
   cores: 32
