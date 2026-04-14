@@ -12,7 +12,7 @@ pretrained_checkpoint: 'scripts/experiments/ssl_29_large_pretrain/checkpoints/fi
 resources:
   cores: 32
   memory: 256gb
-  walltime: 24:00:00
+  walltime: 12:00:00
   gres: gpu:8
   num_processes: 1
 
