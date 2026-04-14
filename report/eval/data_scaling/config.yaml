@@ -1,0 +1,10 @@
+title: ''
+x_label: 'Training dataset size'
+y_label: 'Top-1 Accuracy (Val 1m)'
+
+width: 800
+height: 600
+
+data_path: 'data/02_analysis/33_results.csv'
+
+
