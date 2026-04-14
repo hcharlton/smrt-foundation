@@ -1,15 +1,20 @@
 """
-Large-scale masked autoencoder pretraining with random cropping.
+Large-scale masked autoencoder pretraining with multi-crop sampling.
 
 Tests the SSL value proposition: pretrain on all available unlabeled data
-(839K full reads, 32x augmented via random 128-base crops) then fine-tune
-on labeled CpG data. ~100 GPU hour budget (24hr walltime on 8 H100s).
+(839K full reads) then fine-tune on labeled CpG data. ~100 GPU hour budget
+(24hr walltime on 8 H100s).
 
-Key differences from exp 24/25:
-  - Random cropping from 4096→128 (not fixed first-128 truncation)
-  - 500 epochs with cosine schedule (1% warmup = 5 epochs)
-  - Eval-ready checkpoints every 20 epochs (includes norm stats)
-  - Probe evaluation every 100 epochs (5 probes total)
+Key design choices:
+  - Multi-crop dataset: __len__ = 32 * n_reads, each __getitem__ yields a
+    random 128-base crop of its assigned read. One pass = 32 views per read,
+    amortising disk I/O across many gradient updates (warm-cache memmap hits).
+  - 100 epochs with cosine schedule (1% warmup). Each epoch is 32x larger
+    than single-crop, so 100 epochs ≈ 3200 single-crop-equivalent passes.
+  - DataLoader: 8 workers/rank + persistent_workers to keep GPUs fed.
+    Requires cores=64 (8 cores/rank) at the SLURM level.
+  - Eval-ready checkpoints every 20 epochs (includes norm stats).
+  - Probe evaluation every 20 epochs (5 probes total).
 """
 
 import sys
@@ -108,10 +113,11 @@ def main():
 
     DEFAULT = {
         'd_model': 128, 'n_layers': 4, 'n_head': 4, 'context': 128,
-        'batch_size': 512, 'epochs': 3000, 'ds_limit': 0,
+        'batch_size': 512, 'epochs': 100, 'ds_limit': 0,
         'max_lr': 3e-4, 'p_mask': 0.15, 'mask_size': 10,
         'weight_decay': 0.02, 'pct_start': 0.01,
-        'checkpoint_every': 100, 'probe_every': 100,
+        'checkpoint_every': 20, 'probe_every': 20,
+        'crops_per_read': 32,
     }
 
     c = DEFAULT | config.get('autoencoder', {})
@@ -160,6 +166,7 @@ def main():
     context = c['context']
 
     class RandomCropNormedDataset(torch.utils.data.Dataset):
+        """Single random 128-base crop per read per epoch (exp 29 original)."""
         def __init__(self, inner, norm_fn, context):
             self.inner = inner
             self.norm_fn = norm_fn
@@ -168,7 +175,6 @@ def main():
             return len(self.inner)
         def __getitem__(self, idx):
             x = self.inner[idx]
-            # Random crop from full-length segment
             max_start = x.shape[0] - self.context
             if max_start > 0:
                 start = torch.randint(0, max_start, (1,)).item()
@@ -177,9 +183,32 @@ def main():
                 x = x[:self.context]
             return self.norm_fn(x)
 
-    normed_ds = RandomCropNormedDataset(ds, ssl_norm, context)
-    dl = DataLoader(normed_ds, batch_size=c['batch_size'], num_workers=2,
-                    pin_memory=True, prefetch_factor=4, shuffle=True)
+    class MultiCropNormedDataset(torch.utils.data.Dataset):
+        """Inflates __len__ by crops_per_read. Each access returns a fresh
+        random 128-base crop from its assigned read. Consecutive indices map
+        to the same underlying read, so warm-cache memmap hits amortise the
+        disk read cost across many gradient updates."""
+        def __init__(self, inner, norm_fn, context, crops_per_read=32):
+            self.inner = inner
+            self.norm_fn = norm_fn
+            self.context = context
+            self.crops_per_read = crops_per_read
+        def __len__(self):
+            return len(self.inner) * self.crops_per_read
+        def __getitem__(self, idx):
+            x = self.inner[idx // self.crops_per_read]
+            max_start = x.shape[0] - self.context
+            if max_start > 0:
+                start = torch.randint(0, max_start, (1,)).item()
+                x = x[start:start + self.context]
+            else:
+                x = x[:self.context]
+            return self.norm_fn(x)
+
+    normed_ds = MultiCropNormedDataset(ds, ssl_norm, context, crops_per_read=c['crops_per_read'])
+    dl = DataLoader(normed_ds, batch_size=c['batch_size'], num_workers=8,
+                    pin_memory=True, prefetch_factor=4, shuffle=True,
+                    persistent_workers=True)
 
     model = SmrtAutoencoder(
         d_model=c['d_model'], n_layers=c['n_layers'], n_head=c['n_head'],
