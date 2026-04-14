@@ -1,0 +1,39 @@
+experiment_type: 'supervised'
+experiment_name: '36_pretrained_matched_schedule'
+run_message: >-
+  Data scaling with pretrained encoder (exp 25) using the exact same training
+  schedule as exp 33 (single AdamW lr=3e-3 for all params, single cosine over
+  400k steps). The only difference from exp 33 is encoder init — cleanest
+  possible comparison to isolate the effect of pretraining.
+
+pretrained_checkpoint: 'scripts/experiments/ssl_25_cpg_autoencoder/checkpoints/final_model.pt'
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: 24:00:00
+  gres: gpu:8
+  num_processes: 1
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+scaling:
+  train_sizes: [100, 500, 1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000,
+                256000, 512000, 1000000, 2000000, 4000000, 8000000]
+  val_limit: 1000000
+  steps_per_size: 400000
+  n_evals: 20
+  first_eval_step: 100
+
+classifier:
+  d_model: 128
+  n_head: 4
+  context: 32
+  n_layers: 4
+  weight_decay: 0.02
+  batch_size: 512
+  max_lr: 3e-3
+  pct_start: 0.1
