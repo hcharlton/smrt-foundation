@@ -1,0 +1,13 @@
+title: ''
+x_label: 'Step'
+y_label: 'Learning rate'
+
+width: 800
+height: 400
+
+total_steps: 400000
+step_interval: 100
+min_lr_plot_floor: 1.0e-6
+
+exp_37_config: 'scripts/experiments/supervised_37_ob007_matched_schedule/config.yaml'
+exp_38_config: 'scripts/experiments/supervised_38_ob007_gradual_unfreeze/config.yaml'

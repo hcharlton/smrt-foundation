@@ -1,7 +1,8 @@
 """
-Compares directly trained model against finetuned
-pretrained encoder at different training dataset sizes.
-The validation dataset is the same across each run.
+Plot residuals of best top-1 accuracy against a baseline series, as a
+function of training dataset size. For each (series, train_size) take
+the best val_accuracy, then subtract the baseline's best at the same
+train_size. Only train_sizes present in the baseline are included.
 """
 
 import os
@@ -22,6 +23,7 @@ def load_best(path, label):
         .sort('val_accuracy', descending=True)
         .group_by('train_size')
         .first()
+        .select('train_size', 'val_accuracy')
         .with_columns(pl.lit(label).alias('model'))
     )
 
@@ -31,14 +33,29 @@ def main(output_path):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
-    df = pl.concat([
-        load_best(config['data_path_1'], config.get('label_1', 'Series 1')),
-        load_best(config['data_path_2'], config.get('label_2', 'Series 2')),
-    ]).sort('model', 'train_size')
+    df_all = pl.concat([
+        load_best(s['path'], s['label']) for s in config['series']
+    ])
 
+    baseline = (
+        df_all.filter(pl.col('model') == config['baseline'])
+        .select('train_size', pl.col('val_accuracy').alias('baseline_accuracy'))
+    )
+
+    df = (
+        df_all.join(baseline, on='train_size', how='inner')
+        .with_columns((pl.col('val_accuracy') - pl.col('baseline_accuracy')).alias('residual'))
+        .sort('model', 'train_size')
+    )
+
+    train_sizes = sorted(df['train_size'].unique().to_list())
     chart = alt.Chart(df).mark_line().encode(
-        alt.X('train_size:Q', scale=alt.Scale(type='log', base=2)).title(config.get('x_label', 'x')),
-        alt.Y('val_accuracy:Q', scale=alt.Scale(zero=False)).title(config.get('y_label', 'y')),
+        alt.X(
+            'train_size:Q',
+            scale=alt.Scale(type='log', base=2),
+            axis=alt.Axis(values=train_sizes),
+        ).title(config.get('x_label', 'x')),
+        alt.Y('residual:Q', scale=alt.Scale(zero=True)).title(config.get('y_label', 'y')),
         alt.Color('model:N').title('Model'),
     ).properties(
         width=config.get('width', 500),

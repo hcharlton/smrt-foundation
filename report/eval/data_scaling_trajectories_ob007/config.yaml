@@ -1,0 +1,13 @@
+title: ''
+x_label: 'Step'
+y_label: 'Top-1 Accuracy'
+
+facet_width: 200
+facet_height: 150
+columns: 4
+
+series:
+  - path: 'data/02_analysis/37_results.csv'
+    label: '37: ob007 matched'
+  - path: 'data/02_analysis/38_results.csv'
+    label: '38: ob007 gradual unfreeze'

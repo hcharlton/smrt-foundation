@@ -1,0 +1,16 @@
+title: ''
+x_label: 'Training dataset size'
+y_label: 'Top-1 Accuracy − Baseline (exp 33)'
+
+width: 800
+height: 600
+
+baseline: '33: Baseline'
+
+series:
+  - path: 'data/02_analysis/33_results.csv'
+    label: '33: Baseline'
+  - path: 'data/02_analysis/37_results.csv'
+    label: '37: ob007 matched'
+  - path: 'data/02_analysis/38_results.csv'
+    label: '38: ob007 gradual unfreeze'

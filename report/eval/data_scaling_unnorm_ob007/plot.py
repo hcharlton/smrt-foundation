@@ -1,7 +1,6 @@
 """
-Compares directly trained model against finetuned
-pretrained encoder at different training dataset sizes.
-The validation dataset is the same across each run.
+Overlay best top-1 accuracy curves from the series listed in
+config.yaml as a function of training dataset size. One curve per CSV.
 """
 
 import os
@@ -22,6 +21,7 @@ def load_best(path, label):
         .sort('val_accuracy', descending=True)
         .group_by('train_size')
         .first()
+        .select('train_size', 'val_accuracy')
         .with_columns(pl.lit(label).alias('model'))
     )
 
@@ -32,12 +32,16 @@ def main(output_path):
         config = yaml.safe_load(f)
 
     df = pl.concat([
-        load_best(config['data_path_1'], config.get('label_1', 'Series 1')),
-        load_best(config['data_path_2'], config.get('label_2', 'Series 2')),
+        load_best(s['path'], s['label']) for s in config['series']
     ]).sort('model', 'train_size')
 
+    train_sizes = sorted(df['train_size'].unique().to_list())
     chart = alt.Chart(df).mark_line().encode(
-        alt.X('train_size:Q', scale=alt.Scale(type='log', base=2)).title(config.get('x_label', 'x')),
+        alt.X(
+            'train_size:Q',
+            scale=alt.Scale(type='log', base=2),
+            axis=alt.Axis(values=train_sizes),
+        ).title(config.get('x_label', 'x')),
         alt.Y('val_accuracy:Q', scale=alt.Scale(zero=False)).title(config.get('y_label', 'y')),
         alt.Color('model:N').title('Model'),
     ).properties(

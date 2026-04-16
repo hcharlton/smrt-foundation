@@ -5,6 +5,9 @@ y_label: 'Top-1 Accuracy (Val 1m)'
 width: 800
 height: 600
 
-data_path: 'data/02_analysis/33_results.csv'
+data_path_1: 'data/02_analysis/33_results.csv'
+label_1: 'Supervised'
+data_path_2: 'data/02_analysis/37_results.csv'
+label_2: 'Finetuned'
 
 
