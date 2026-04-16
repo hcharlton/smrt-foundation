@@ -194,6 +194,7 @@ def main():
 
     model, optimizer, train_dl, val_dl = accelerator.prepare(model, optimizer, train_dl, val_dl)
     total_steps = len(train_dl) * c['epochs']
+    print(total_steps) # for debugging
 
     if accelerator.is_main_process:
         print(f"Steps per epoch: {len(train_dl)}")
