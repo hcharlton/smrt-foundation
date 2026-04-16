@@ -173,15 +173,17 @@ def train_one_size(rank, train_size, config, c, experiment_dir, tb_dir):
     train_dl = DataLoader(
         train_ds, batch_size=c['batch_size'],
         sampler=CyclingSampler(len(train_ds)),
-        num_workers=2, pin_memory=True, prefetch_factor=4, drop_last=False,
+        num_workers=4, pin_memory=True, prefetch_factor=4,
+        persistent_workers=True, drop_last=False,
     )
     val_ds = LabeledMemmapDataset(
         config['pos_data_val'], config['neg_data_val'],
         limit=config['scaling']['val_limit'], norm_fn=norm_fn,
     )
     val_dl = DataLoader(
-        val_ds, batch_size=c['batch_size'], num_workers=2,
-        pin_memory=True, prefetch_factor=4, shuffle=False,
+        val_ds, batch_size=c['batch_size'], num_workers=4,
+        pin_memory=True, prefetch_factor=4, persistent_workers=True,
+        shuffle=False,
     )
 
     total_steps, steps_per_epoch, eval_steps = compute_step_budget(
@@ -207,6 +209,7 @@ def train_one_size(rank, train_size, config, c, experiment_dir, tb_dir):
     )
     load_pretrained_encoder(config['pretrained_checkpoint'], model)
     model = model.to(device)
+    model = torch.compile(model)
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"{tag} Parameters: {n_params:,}, "
