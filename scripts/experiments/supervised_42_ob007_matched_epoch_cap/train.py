@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.multiprocessing as mp
-from torch.utils.data import DataLoader, Sampler
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from accelerate.utils import set_seed
 from torchmetrics.classification import (
@@ -74,13 +74,15 @@ def load_pretrained_encoder(checkpoint_path, model):
     return model
 
 
-class CyclingSampler(Sampler):
-    def __init__(self, dataset_size):
-        self.dataset_size = dataset_size
-
-    def __iter__(self):
-        while True:
-            yield from torch.randperm(self.dataset_size).tolist()
+def preload_to_gpu(dataset, device, batch_size=8192, num_workers=4):
+    """Load entire dataset into GPU tensors for zero-overhead batching."""
+    loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers,
+                        pin_memory=True, shuffle=False)
+    xs, ys = [], []
+    for x, y in loader:
+        xs.append(x)
+        ys.append(y)
+    return torch.cat(xs).to(device), torch.cat(ys).to(device)
 
 
 def compute_step_budget(train_size, batch_size, scaling_config):
@@ -105,12 +107,14 @@ def build_metrics(device):
     }
 
 
-def evaluate(model, val_dl, metrics, device, criterion):
+def evaluate(model, val_x, val_y, batch_size, metrics, criterion):
+    """Run eval, return metrics dict + avg val loss."""
     model.eval()
     val_loss_sum = 0.0
     val_batches = 0
-    for vx, vy in val_dl:
-        vx, vy = vx.to(device), vy.to(device)
+    for i in range(0, len(val_x), batch_size):
+        vx = val_x[i:i+batch_size]
+        vy = val_y[i:i+batch_size]
         with torch.no_grad(), torch.amp.autocast('cuda', dtype=torch.bfloat16):
             vlogits = model(vx)
             vloss = criterion(vlogits, vy.unsqueeze(1))
@@ -149,32 +153,30 @@ def train_one_size(rank, train_size, config, c, experiment_dir, tb_dir):
     del norm_ds
     print(f"{tag} KineticsNorm means: {norm_fn.means}, stds: {norm_fn.stds}")
 
+    # Datasets — created then preloaded to GPU tensors.
     train_ds = LabeledMemmapDataset(
         config['pos_data_train'], config['neg_data_train'],
         limit=train_size, norm_fn=norm_fn, balance=True,
-    )
-    train_dl = DataLoader(
-        train_ds, batch_size=c['batch_size'],
-        sampler=CyclingSampler(len(train_ds)),
-        num_workers=4, pin_memory=True, prefetch_factor=4,
-        persistent_workers=True, drop_last=False,
     )
     val_ds = LabeledMemmapDataset(
         config['pos_data_val'], config['neg_data_val'],
         limit=config['scaling']['val_limit'], norm_fn=norm_fn,
     )
-    val_dl = DataLoader(
-        val_ds, batch_size=c['batch_size'], num_workers=4,
-        pin_memory=True, prefetch_factor=4, persistent_workers=True,
-        shuffle=False,
-    )
+
+    print(f"{tag} Preloading training data ({len(train_ds)} samples) to GPU...")
+    train_x, train_y = preload_to_gpu(train_ds, device)
+    n_train = len(train_x)
+    print(f"{tag} Preloading validation data ({len(val_ds)} samples) to GPU...")
+    val_x, val_y = preload_to_gpu(val_ds, device)
+    print(f"{tag} Preloaded — train: {train_x.shape}, val: {val_x.shape}")
+    del train_ds, val_ds
 
     total_steps, steps_per_epoch, eval_steps = compute_step_budget(
-        len(train_ds), c['batch_size'], config['scaling'],
+        n_train, c['batch_size'], config['scaling'],
     )
     warmup_steps = int(total_steps * c['pct_start'])
 
-    print(f"{tag} Train: {len(train_ds)}, Val: {len(val_ds)}, "
+    print(f"{tag} Train: {n_train}, Val: {len(val_x)}, "
           f"Steps/epoch: {steps_per_epoch}, Total steps: {total_steps:,}, "
           f"Epochs: {total_steps / max(steps_per_epoch, 1):.1f}, "
           f"Warmup: {warmup_steps:,} steps")
@@ -219,7 +221,6 @@ def train_one_size(rank, train_size, config, c, experiment_dir, tb_dir):
 
     eval_steps_set = set(eval_steps)
     n_evals = len(eval_steps)
-    train_iter = iter(train_dl)
     interval_loss = 0.0
     steps_since_last_eval = 0
     eval_point = 0
@@ -228,8 +229,9 @@ def train_one_size(rank, train_size, config, c, experiment_dir, tb_dir):
 
     for step in range(1, total_steps + 1):
         model.train()
-        x, y = next(train_iter)
-        x, y = x.to(device), y.to(device)
+        idx = torch.randint(0, n_train, (c['batch_size'],), device=device)
+        x = train_x[idx]
+        y = train_y[idx]
 
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             logits = model(x)
@@ -255,7 +257,9 @@ def train_one_size(rank, train_size, config, c, experiment_dir, tb_dir):
 
             writer.add_scalar("train/interval_avg_loss", avg_train_loss, step)
 
-            eval_results, avg_val_loss = evaluate(model, val_dl, metrics, device, criterion)
+            eval_results, avg_val_loss = evaluate(
+                model, val_x, val_y, c['batch_size'], metrics, criterion,
+            )
 
             writer.add_scalar("eval/loss", avg_val_loss, step)
             for name, val in eval_results.items():
