@@ -254,6 +254,8 @@ def train_one_size(rank, train_size, config, c, experiment_dir, tb_dir):
     steps_since_last_eval = 0
     eval_point = 0
 
+    effective_bs = min(c['batch_size'], n_train)
+    print(f"{tag} Effective batch size: {effective_bs} (config: {c['batch_size']}, n_train: {n_train})")
     print(f"{tag} Eval schedule ({n_evals} points): {eval_steps}")
 
     for step in range(1, total_steps + 1):
@@ -286,7 +288,7 @@ def train_one_size(rank, train_size, config, c, experiment_dir, tb_dir):
                   f"head lr={ft['head_lr']}, {stage2_steps:,} steps total")
 
         model.train()
-        idx = torch.randint(0, n_train, (c['batch_size'],), device=device)
+        idx = torch.randint(0, n_train, (effective_bs,), device=device)
         x = train_x[idx]
         y = train_y[idx]
 
