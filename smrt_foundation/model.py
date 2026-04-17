@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import math
 import torch.nn.functional as F
+from typing import Optional
 
 
 class PositionalEncoding(nn.Module):
@@ -771,3 +772,124 @@ class SmrtAutoencoderSmallRF(SmrtAutoencoder):
     self.decoder = SmrtDecoder(d_model)
     self.p_mask = p_mask
     self.mask_size = mask_size
+
+
+### SimCLR v1 wrapper
+#
+# SimCLRSmrt composes the existing SmrtEncoder with a small nonlinear
+# projection head and exposes a two-view forward that pairs with NTXent
+# from loss.py. The encoder sub-module is shared with DirectClassifier so
+# a pretrained SimCLR checkpoint's `.encoder.state_dict()` transfers
+# directly into a supervised fine-tune with no key remapping.
+#
+# Design choices (traceable to the SimCLR v1 paper):
+#   - 2-layer MLP projection head with GELU (SimCLR v1 §4.2): Linear
+#     → GELU → Linear. Output dim default 128.
+#   - Global masked-mean pooling over non-pad latent positions, giving a
+#     single [d_model] representation per view. SimCLR pools to a single
+#     vector before projection; the encoder's per-position latents go
+#     through mean-pool.
+#   - forward(view1, view2) runs both views in a single concat'd forward
+#     pass to share GPU work and BN-like statistics, then splits the
+#     projections back to [B, proj_dim] tensors. Matches SimCLR §2.2 (no
+#     memory bank; positives are simply the other branch).
+#
+# Not yet implemented (explicit v2 deferrals per the plan): deeper
+# projection head with fine-tune-from-middle, MoCo momentum encoder +
+# memory buffer, distillation.
+
+
+class MLPProjectionHead(nn.Module):
+  """Configurable MLP projection head.
+
+  Sequence: Linear(d_in, d_hidden) → GELU → ... → Linear(d_hidden, d_proj).
+  `n_layers` counts fully-connected layers total; n_layers=2 is the SimCLR v1
+  default (one hidden layer). `d_hidden` defaults to `d_in` for a standard
+  expand-and-project shape.
+  """
+  def __init__(self, d_in: int, d_proj: int = 128, n_layers: int = 2, d_hidden: Optional[int] = None):
+    super().__init__()
+    assert n_layers >= 1, f"n_layers must be >= 1, got {n_layers}"
+    d_hidden = d_hidden if d_hidden is not None else d_in
+    layers = []
+    in_dim = d_in
+    for _ in range(n_layers - 1):
+      layers.append(nn.Linear(in_dim, d_hidden))
+      layers.append(nn.GELU())
+      in_dim = d_hidden
+    layers.append(nn.Linear(in_dim, d_proj))
+    self.net = nn.Sequential(*layers)
+
+  def forward(self, x):
+    return self.net(x)
+
+
+def _masked_mean_pool(c: torch.Tensor, z_pad: torch.Tensor) -> torch.Tensor:
+  """Mean-pool transformer latents c over non-pad positions.
+
+  c: [B, T, d], z_pad: [B, T] with 1.0 = pad, 0.0 = real (downsampled
+  mask from CNN). Returns [B, d]. If a sample has zero non-pad positions
+  (should not happen in practice), falls back to a plain mean to avoid
+  division by zero.
+  """
+  active = (z_pad == 0.0).to(c.dtype)            # [B, T]
+  denom = active.sum(dim=1, keepdim=True)        # [B, 1]
+  denom = torch.clamp(denom, min=1.0)
+  pooled = (c * active.unsqueeze(-1)).sum(dim=1) / denom
+  return pooled
+
+
+class SimCLRSmrt(nn.Module):
+  """SimCLR v1 contrastive pretraining wrapper over SmrtEncoder.
+
+  Args:
+    d_model, n_layers, n_head, max_len: forwarded to SmrtEncoder.
+    projection_dim: output dimensionality of the projection head (default 128).
+    projection_layers: number of Linear layers in the head (default 2).
+    projection_hidden: hidden dim in the head (default d_model).
+
+  The encoder is trained but the projection head is discarded for
+  downstream use (per SimCLR §4.2 — the representation h before projection
+  transfers better than the projection z). `self.encoder.state_dict()` is
+  key-compatible with `DirectClassifier.encoder.state_dict()`, so a
+  fine-tune loads without remapping.
+  """
+  def __init__(
+      self,
+      d_model: int = 128,
+      n_layers: int = 4,
+      n_head: int = 4,
+      max_len: int = 32,
+      projection_dim: int = 128,
+      projection_layers: int = 2,
+      projection_hidden: Optional[int] = None,
+  ):
+    super().__init__()
+    self.d_model = d_model
+    self.encoder = SmrtEncoder(d_model, n_layers, n_head, max_len)
+    self.projection = MLPProjectionHead(
+        d_in=d_model,
+        d_proj=projection_dim,
+        n_layers=projection_layers,
+        d_hidden=projection_hidden,
+    )
+
+  def _encode_pool_project(self, x: torch.Tensor) -> torch.Tensor:
+    """x: [B, T, C] → z: [B, projection_dim]."""
+    z, z_pad, _ = self.encoder.get_latents(x)
+    z = self.encoder.add_pe(z)
+    c = self.encoder.forward_transformer(z, z_pad)
+    h = _masked_mean_pool(c, z_pad)
+    return self.projection(h)
+
+  def forward(self, view1: torch.Tensor, view2: torch.Tensor):
+    """Returns (z1, z2), each [B, projection_dim].
+
+    Runs both views through the encoder in a single concatenated batch
+    so attention/CNN/BN-like ops see a larger effective batch and GPU
+    work is amortised. Splits the projections back before returning.
+    """
+    x = torch.cat([view1, view2], dim=0)
+    z = self._encode_pool_project(x)
+    B = view1.shape[0]
+    return z[:B], z[B:]

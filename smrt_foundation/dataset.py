@@ -128,6 +128,55 @@ def compute_log_normalization_stats(df, features, epsilon=1):
     stds = {col: clean(col).std() for col in features}
     return means, stds
 
+class PairedViewDataset(Dataset):
+    """Wrap any Dataset that yields a single tensor and return (view1, view2).
+
+    For SimCLR-style contrastive pretraining. On each __getitem__ call, the
+    inner dataset is read once (one disk/memmap hit), then `policy(x)` is
+    invoked, returning a pair of independently-augmented views of the same
+    sample. Each pair shares the same underlying read — that shared origin
+    is what makes them a positive in the contrastive task.
+
+    The inner dataset is expected to return either a bare tensor `[T, C]`
+    or a tuple whose first element is such a tensor; if a labelled dataset
+    is passed by mistake the label is dropped (contrastive SSL discards
+    labels during pretraining).
+
+    The `policy` object must be callable with a single tensor argument and
+    must return a `(view1, view2)` tuple. See
+    `smrt_foundation.augment.AugmentationPolicy` for the canonical
+    implementation.
+
+    Usage:
+        inner = ShardedMemmapDataset(ob007_memmap_path, limit=200_000)
+        policy = AugmentationPolicy(target_len=32, ...)
+        ds = PairedViewDataset(inner, policy=policy, norm_fn=ssl_norm)
+        dl = DataLoader(ds, batch_size=512, num_workers=8, pin_memory=True)
+
+    If `norm_fn` is provided it is applied to the raw sample *before* the
+    augmentation policy. That matches the convention in ssl_26 / ssl_29
+    (KineticsNorm applied dataset-side) and means augmentations operate in
+    z-scored space, where a kinetic value of 0 = per-channel mean.
+    """
+
+    def __init__(self, inner: Dataset, policy, norm_fn=None):
+        self.inner = inner
+        self.policy = policy
+        self.norm_fn = norm_fn
+
+    def __len__(self):
+        return len(self.inner)
+
+    def __getitem__(self, idx):
+        x = self.inner[idx]
+        if isinstance(x, (tuple, list)):
+            x = x[0]
+        if self.norm_fn is not None:
+            x = self.norm_fn(x)
+        v1, v2 = self.policy(x)
+        return v1, v2
+
+
 class LegacyMethylDataset(IterableDataset):
     def __init__(self, data_path, means, stds, context, restrict_row_groups=100, single_strand=False, inference=False, norm=True):
         super().__init__()
