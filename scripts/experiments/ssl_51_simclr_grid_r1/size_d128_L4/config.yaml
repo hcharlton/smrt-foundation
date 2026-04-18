@@ -12,7 +12,7 @@ resources:
   gres: gpu:8
   num_processes: 8
 
-ssl_dataset: 'ob007_raw_small.memmap'
+ssl_dataset: 'ob007_raw.memmap'
 
 probe_pos_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
 probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
