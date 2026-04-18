@@ -34,7 +34,7 @@ simclr:
   projection_layers: 2
   temperature: 0.1
   epochs: 100
-  ds_limit: 0
+  ds_limit: 20000000
   batch_size: 512
   optimizer: 'AdamW'
   max_lr: 3.0e-4
