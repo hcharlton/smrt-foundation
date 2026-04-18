@@ -127,7 +127,7 @@ def linear_probe_eval(encoder, probe_config, config, accelerator, norm_fn):
     )
     val_ds = LabeledMemmapDataset(
         config.get('probe_pos_val'), config.get('probe_neg_val'),
-        limit=probe_limit, norm_fn=norm_fn
+        limit=probe_limit, norm_fn=norm_fn, balance=True
     )
 
     train_dl = DataLoader(train_ds, batch_size=pc.get('batch_size', 512), shuffle=True, num_workers=2)
