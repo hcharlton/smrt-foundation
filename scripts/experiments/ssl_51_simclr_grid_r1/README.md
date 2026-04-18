@@ -103,6 +103,51 @@ which trains a single `Linear(d → 1)` on the center latent of labelled
 CpG windows and reports `probe_top1` / `probe_auroc`. That metric — not
 the NT-Xent training loss — is the pass criterion below.
 
+## Checkpointing and resume
+
+Two checkpoint kinds, written to `checkpoints/` inside each size subdir:
+
+- **`latest/`** — Accelerate state directory, overwritten every
+  `simclr.resume_every` epochs. Captures model, optimizer, scheduler, RNG,
+  and a `ProgressState` (epoch + global_step) via
+  `accelerator.register_for_checkpointing`. Accompanied by two sidecars:
+  `run_metadata.yaml` (the full config + git hash at checkpoint time) and
+  `norm_stats.pt` (KineticsNorm means/stds, so the post-norm data
+  distribution stays identical across resumes rather than resampling).
+- **`epoch_N.pt`** — single-file `torch.save` bundle written every
+  `simclr.checkpoint_every` epochs. Contains only what downstream scripts
+  (supervised_53, future R2) need: `encoder_state_dict`, `config`, `epoch`,
+  and the norm stats. Not used for resume.
+
+Per-size `resume_every` is sized so no crashed run loses more than ~5 h
+of wall time:
+
+| subdir | est. h/epoch | resume_every | max h lost |
+|---|---:|---:|---:|
+| size_d128_L4 | 0.2 | 25 | ~5.0 |
+| size_d256_L8 | 0.8 | 6 | ~4.8 |
+| size_d512_L8 | 1.9 | 2 | ~3.8 |
+| size_d768_L8 | 3.8 | 1 | ~3.8 |
+
+### Resuming after a crash or preemption
+
+Resume is explicit — set `resume_from:` in that size's `config.yaml` to
+the checkpoint directory from the interrupted run, then re-submit:
+
+```yaml
+# scripts/experiments/ssl_51_simclr_grid_r1/size_d768_L8/config.yaml
+resume_from: 'scripts/experiments/ssl_51_simclr_grid_r1/size_d768_L8/checkpoints/latest'
+```
+
+On startup the loop:
+1. reads `run_metadata.yaml` and verifies `simclr.{d_model, n_layers, n_head, context, projection_*}` match (aborts with a clear error on mismatch; warns on git-hash drift but continues);
+2. loads `norm_stats.pt` into `KineticsNorm`, so normalization is identical to pre-crash;
+3. calls `accelerator.load_state(resume_from)`, restoring model + optimizer + scheduler + RNG + `ProgressState`;
+4. continues the training loop from `range(progress_state.epoch, simclr.epochs)`.
+
+After a successful full run, clear `resume_from` back to `''` before
+launching a new fresh run against the same directory.
+
 ## Layout
 
 `_shared_train.py` holds the full training loop (SimCLRSmrt + NTXent + linear

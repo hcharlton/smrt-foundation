@@ -14,6 +14,10 @@ non-decreasing over the last 3 probe evaluations. 0.63 matches ssl_26's
 contrastive-on-CpG result; a pilot that falls below that reproduces a
 known failure mode (declining probe) and indicates the augmentation
 policy is destroying methylation signal.
+
+Supports explicit resume via the top-level `resume_from` config key
+(point at a prior `checkpoints/latest/` directory). See
+ssl_51_simclr_grid_r1/README.md for the resume-cadence rationale.
 """
 
 import os
@@ -45,6 +49,65 @@ def get_git_revision_hash():
         return subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
     except Exception:
         return "unknown"
+
+
+class ProgressState:
+    """Tracks training progress across interrupted runs.
+
+    Registered with `accelerator.register_for_checkpointing(...)` so the
+    epoch counter and global_step are part of the Accelerate state
+    directory and restore atomically alongside model / optimizer /
+    scheduler / RNG state. `epoch` records the number of fully-completed
+    epochs (so the training loop resumes at `range(progress_state.epoch,
+    c['epochs'])`).
+    """
+
+    def __init__(self):
+        self.epoch = 0
+        self.global_step = 0
+
+    def state_dict(self):
+        return {'epoch': int(self.epoch), 'global_step': int(self.global_step)}
+
+    def load_state_dict(self, sd):
+        self.epoch = int(sd.get('epoch', 0))
+        self.global_step = int(sd.get('global_step', 0))
+
+
+def _check_resume_compatible(resume_dir, config):
+    """Refuse to resume if the stored architecture differs from the current
+    config. Emits a warning (not an error) on git hash mismatch; code
+    drift that preserves the architecture is usually fine to resume into.
+
+    Reads `{resume_dir}/run_metadata.yaml`, which the training loop writes
+    alongside every `latest/` checkpoint. Returns the stored metadata dict.
+    """
+    sidecar = os.path.join(resume_dir, 'run_metadata.yaml')
+    if not os.path.exists(sidecar):
+        raise RuntimeError(
+            f"Resume target {resume_dir} has no run_metadata.yaml sidecar; "
+            f"refusing to resume (cannot verify architecture match)."
+        )
+    with open(sidecar, 'r') as f:
+        stored = yaml.safe_load(f)
+    cur = config.get('simclr', {})
+    prev = stored.get('simclr', {})
+    arch_keys = ('d_model', 'n_layers', 'n_head', 'context',
+                 'projection_dim', 'projection_layers')
+    for k in arch_keys:
+        if cur.get(k) != prev.get(k):
+            raise RuntimeError(
+                f"Refusing to resume: simclr.{k} differs "
+                f"(stored={prev.get(k)}, current={cur.get(k)}). Architecture "
+                f"must match for Accelerate state_dict to load."
+            )
+    if stored.get('git_hash') and config.get('git_hash') and stored['git_hash'] != config['git_hash']:
+        print(
+            f"[resume] WARNING: git hash differs "
+            f"(stored={stored['git_hash'][:12]}, current={config['git_hash'][:12]}). "
+            f"Architecture matches so resume will proceed."
+        )
+    return stored
 
 
 def linear_probe_eval(encoder, probe_config, config, accelerator, norm_fn):
@@ -142,15 +205,35 @@ def main():
     DEFAULT = {
         'd_model': 128, 'n_layers': 4, 'n_head': 4, 'context': 32,
         'projection_dim': 128, 'projection_layers': 2,
-        'temperature': 0.1, 'max_negatives': None,
+        'temperature': 0.1,
         'epochs': 100, 'ds_limit': 200000,
         'batch_size': 512, 'max_lr': 3e-4,
         'weight_decay': 1e-4, 'pct_start': 0.05,
         'checkpoint_every': 20, 'probe_every': 5,
+        # How often to overwrite the `latest/` Accelerate state dir (in
+        # epochs). This is the resume cadence — bounded wall-time loss on a
+        # crashed/preempted run. Defaults to `checkpoint_every` when unset
+        # (so current behaviour is preserved). Per-size grid configs set a
+        # smaller number so the largest model never loses more than ~5 h.
+        'resume_every': None,
     }
     c = DEFAULT | config.get('simclr', {})
+    if c['resume_every'] is None:
+        c['resume_every'] = c['checkpoint_every']
     config['simclr'] = c
     config['git_hash'] = get_git_revision_hash()
+
+    # Resolve and validate the resume target early so we fail fast (before
+    # spinning up the dataset) if the user pointed at a missing or
+    # incompatible checkpoint.
+    resume_from = config.get('resume_from') or None
+    if resume_from:
+        resume_from = os.path.abspath(os.path.expandvars(str(resume_from)))
+        if not os.path.isdir(resume_from):
+            raise FileNotFoundError(
+                f"resume_from={resume_from!r} is not a directory. It should point "
+                f"to an Accelerate state directory (e.g. <exp>/checkpoints/latest)."
+            )
 
     # Pass the active context through to the augmentation policy so the
     # target_len stays in one place (simclr.context) rather than duplicated
@@ -191,9 +274,28 @@ def main():
     if accelerator.is_main_process:
         print(f"SSL dataset: {len(ds)} reads from {memmap_path}")
 
-    ssl_norm = KineticsNorm(ds, max_samples=16_384)
-    if accelerator.is_main_process:
-        print(f"SSL norm — means: {ssl_norm.means}, stds: {ssl_norm.stds}")
+    # On a fresh run we compute normalisation stats from the dataset; on
+    # resume we load them from the checkpoint sidecar so the post-norm
+    # data distribution is identical to pre-crash (the KineticsNorm
+    # constructor draws a random subset of the dataset and would otherwise
+    # produce a slightly different distribution on every restart).
+    if resume_from:
+        _check_resume_compatible(resume_from, config)
+        norm_path = os.path.join(resume_from, 'norm_stats.pt')
+        if not os.path.exists(norm_path):
+            raise FileNotFoundError(
+                f"resume_from is set but {norm_path} is missing. "
+                f"The checkpoint was produced by an older training loop; "
+                f"recompute will skew the data distribution."
+            )
+        ssl_norm = KineticsNorm.load_stats(torch.load(norm_path, map_location='cpu'))
+        if accelerator.is_main_process:
+            print(f"[resume] loaded norm stats from {norm_path}")
+            print(f"SSL norm — means: {ssl_norm.means}, stds: {ssl_norm.stds}")
+    else:
+        ssl_norm = KineticsNorm(ds, max_samples=16_384)
+        if accelerator.is_main_process:
+            print(f"SSL norm — means: {ssl_norm.means}, stds: {ssl_norm.stds}")
 
     policy = build_policy(aug_cfg, config.get('data_config', 'configs/data.yaml'))
     paired_ds = PairedViewDataset(ds, policy=policy, norm_fn=ssl_norm)
@@ -221,7 +323,7 @@ def main():
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=float(c['max_lr']), weight_decay=float(c['weight_decay'])
     )
-    criterion = NTXent(temperature=float(c['temperature']), max_negatives=c.get('max_negatives'))
+    criterion = NTXent(temperature=float(c['temperature']))
 
     model, optimizer, dl = accelerator.prepare(model, optimizer, dl)
 
@@ -229,18 +331,37 @@ def main():
     scheduler = get_cosine_schedule_with_warmup(optimizer, total_steps=total_steps, pct_start=c['pct_start'])
     scheduler = accelerator.prepare(scheduler)
 
+    # Register a tiny counter object so Accelerate includes our epoch /
+    # global_step inside its save_state snapshot. `register_for_checkpointing`
+    # must be called before `load_state`.
+    progress_state = ProgressState()
+    accelerator.register_for_checkpointing(progress_state)
+
+    if resume_from:
+        accelerator.load_state(resume_from)
+        if accelerator.is_main_process:
+            print(
+                f"[resume] restored from {resume_from}: "
+                f"epoch={progress_state.epoch}, global_step={progress_state.global_step}"
+            )
+
     if accelerator.is_main_process:
         print(f"Steps per epoch: {len(dl)}, Total steps: {total_steps}")
         print(f"Warmup steps: {int(total_steps * c['pct_start'])}")
-        print(f"Probe every {c['probe_every']} epochs, checkpoint every {c['checkpoint_every']} epochs")
+        print(
+            f"Probe every {c['probe_every']} epochs, "
+            f"milestone ckpt every {c['checkpoint_every']} epochs, "
+            f"resume ckpt every {c['resume_every']} epochs"
+        )
 
     checkpoint_dir = os.path.join(os.path.dirname(config_path), 'checkpoints')
     os.makedirs(checkpoint_dir, exist_ok=True)
+    latest_dir = os.path.join(checkpoint_dir, 'latest')
 
-    global_step = 0
+    global_step = progress_state.global_step
     probe_history = []
 
-    for epoch in range(c['epochs']):
+    for epoch in range(progress_state.epoch, c['epochs']):
         model.train()
         epoch_loss = 0.0
 
@@ -288,7 +409,22 @@ def main():
         elif accelerator.is_main_process and (epoch + 1) % 10 == 0:
             print(f"Epoch {epoch + 1}: ntxent_loss={avg_loss:.4f}")
 
-        # --- Checkpoint ---
+        # Keep progress_state current *before* saving either checkpoint
+        # kind, so a resume lands at the start of the next unfinished epoch.
+        progress_state.epoch = epoch + 1
+        progress_state.global_step = global_step
+
+        # --- Resume checkpoint (Accelerate state dir; overwritten each tick) ---
+        if (epoch + 1) % c['resume_every'] == 0:
+            accelerator.save_state(latest_dir)
+            if accelerator.is_main_process:
+                with open(os.path.join(latest_dir, 'run_metadata.yaml'), 'w') as f:
+                    yaml.dump(config, f)
+                torch.save(ssl_norm.save_stats(), os.path.join(latest_dir, 'norm_stats.pt'))
+                print(f"[resume] saved latest/ at epoch {epoch + 1}")
+            accelerator.wait_for_everyone()
+
+        # --- Milestone checkpoint (portable single-file for downstream use) ---
         if (epoch + 1) % c['checkpoint_every'] == 0 and accelerator.is_main_process:
             unwrapped = accelerator.unwrap_model(model)
             save_path = os.path.join(checkpoint_dir, f'epoch_{epoch + 1}.pt')
@@ -299,7 +435,7 @@ def main():
                 'epoch': epoch + 1,
                 **ssl_norm.save_stats(),
             }, save_path)
-            print(f"Saved checkpoint to {save_path}")
+            print(f"Saved milestone checkpoint to {save_path}")
         accelerator.wait_for_everyone()
 
     # --- Final checkpoint + pass-criterion summary ---

@@ -21,6 +21,10 @@ probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
 
 data_config: 'configs/data.yaml'
 
+# Resume target (empty = fresh run). Point at a prior run's
+# `checkpoints/latest/` Accelerate state dir to resume.
+resume_from: ''
+
 simclr:
   d_model: 128
   n_head: 2
@@ -29,7 +33,6 @@ simclr:
   projection_dim: 128
   projection_layers: 2
   temperature: 0.1
-  max_negatives: null
   epochs: 100
   ds_limit: 200000
   batch_size: 512
@@ -37,7 +40,8 @@ simclr:
   max_lr: 3.0e-4
   weight_decay: 1.0e-4
   pct_start: 0.05
-  checkpoint_every: 25
+  checkpoint_every: 25       # portable epoch_N.pt milestones
+  resume_every: 25           # ~0.2 h/epoch × 25 = ~5 h max wall loss
   probe_every: 5
 
 augment:

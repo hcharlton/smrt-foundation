@@ -75,20 +75,21 @@ class NTXent(nn.Module):
     batches via differentiable all-gather (same pattern as `AgInfoNCE`).
     Gradients flow only through this rank's local slice of the gathered
     tensors, so the loss remains per-rank while the negative pool grows
-    with world_size.
+    with world_size. Each query sees 2 · world_size · B − 2 negatives,
+    the SimCLR-canonical count.
 
     Temperature 0.1 matches SimCLR §5.1's near-optimal setting for
-    L2-normalised logits. `max_negatives` (optional) subsamples the global
-    key pool after all-gather to cap the similarity-matrix memory; the
-    default of None uses the full pool (2 * world_size * local_B - 2
-    negatives per positive), which is the SimCLR-canonical choice.
+    L2-normalised logits. A previous version of this class supported an
+    optional `max_negatives` subsample of the key pool after all-gather;
+    that path never ran (the full [2B, 2·world_size·B] matrix is ~8 MB
+    at our largest R1 size) and has been archived in
+    `archive/ntxent_max_negatives.py` for reference.
     """
 
-    def __init__(self, temperature: float = 0.1, max_negatives: int | None = None):
+    def __init__(self, temperature: float = 0.1):
         super().__init__()
         self.cross_entropy = nn.CrossEntropyLoss()
         self.temperature = float(temperature)
-        self.max_negatives = max_negatives
 
     def forward(self, z1: torch.Tensor, z2: torch.Tensor) -> torch.Tensor:
         z1 = F.normalize(z1, dim=-1)
@@ -111,41 +112,13 @@ class NTXent(nn.Module):
         queries = torch.cat([z1, z2], dim=0)          # [2 * local_B, d]
         keys = torch.cat([z1_all, z2_all], dim=0)     # [2 * global_B, d]
 
-        # Optional subsample of the negative pool (kept rarely — only for very
-        # large global batches where the [2*local_B, 2*global_B] matrix blows
-        # past GPU memory).
-        if self.max_negatives is not None and keys.shape[0] > self.max_negatives:
-            # Always keep the slots that hold self and positive for each query.
-            offset1_slot = rank * local_B + torch.arange(local_B, device=device)
-            offset2_slot = global_B + rank * local_B + torch.arange(local_B, device=device)
-            must_keep = torch.cat([offset1_slot, offset2_slot], dim=0)
-            remaining = max(self.max_negatives - must_keep.shape[0], 0)
-            if remaining > 0:
-                all_idx = torch.arange(keys.shape[0], device=device)
-                pool_mask = torch.ones(keys.shape[0], dtype=torch.bool, device=device)
-                pool_mask[must_keep] = False
-                pool = all_idx[pool_mask]
-                sample = pool[torch.randperm(pool.shape[0], device=device)[:remaining]]
-                sel = torch.cat([must_keep, sample], dim=0)
-            else:
-                sel = must_keep
-            sort_order = torch.argsort(sel)
-            sel = sel[sort_order]
-            # Rebuild offsets into the subsampled key matrix.
-            keys = keys[sel]
-            # Map old global indices → new positions.
-            new_pos = torch.full((2 * global_B,), -1, dtype=torch.long, device=device)
-            new_pos[sel] = torch.arange(sel.shape[0], device=device)
-            self_z1 = new_pos[rank * local_B + torch.arange(local_B, device=device)]
-            self_z2 = new_pos[global_B + rank * local_B + torch.arange(local_B, device=device)]
-            pos_z1 = self_z2
-            pos_z2 = self_z1
-        else:
-            arange = torch.arange(local_B, device=device)
-            self_z1 = rank * local_B + arange
-            self_z2 = global_B + rank * local_B + arange
-            pos_z1 = self_z2
-            pos_z2 = self_z1
+        # Each local query's own slot in the global key pool (to mask out),
+        # and its positive — the matching view of the same sample.
+        arange = torch.arange(local_B, device=device)
+        self_z1 = rank * local_B + arange               # z1-side self
+        self_z2 = global_B + rank * local_B + arange    # z2-side self
+        pos_z1 = self_z2                                # z1 query's positive is z2 slot
+        pos_z2 = self_z1                                # z2 query's positive is z1 slot
 
         sim = queries @ keys.T / self.temperature
 
