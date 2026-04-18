@@ -204,7 +204,7 @@ def main():
         'd_model': 128, 'n_layers': 4, 'n_head': 4, 'context': 32,
         'projection_dim': 128, 'projection_layers': 2,
         'temperature': 0.1,
-        'epochs': 100, 'ds_limit': 200000,
+        'epochs': 100, 'ds_limit': 0,
         'batch_size': 512, 'max_lr': 3e-4,
         'weight_decay': 1e-4, 'pct_start': 0.05,
         'checkpoint_every': 20, 'probe_every': 5,
