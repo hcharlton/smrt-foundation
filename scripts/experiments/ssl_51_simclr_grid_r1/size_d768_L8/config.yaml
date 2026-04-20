@@ -10,7 +10,7 @@ run_message: >
 resources:
   cores: 64
   memory: 448gb
-  walltime: 38:00:00       # ~48 h training
+  walltime: 30:00:00       # ~48 h training
   gres: gpu:8
   num_processes: 8
 
