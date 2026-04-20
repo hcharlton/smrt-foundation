@@ -1,0 +1,49 @@
+experiment_type: 'supervised'
+experiment_name: '45_ob007_gradual_small_bs'
+run_message: >-
+  Rerun of exp 43 with a small global batch size (64) across every
+  training-dataset size. Smallest train_size is 100, so bs=64 keeps
+  every batch a strict random subset and restores SGD noise at all
+  sizes. All LRs are scaled by sqrt(64/4096)=1/8 from exp 43's values
+  to keep per-step update magnitudes comparable under Adam.
+
+pretrained_checkpoint: 'scripts/experiments/ssl_29_large_pretrain/checkpoints/final_model.pt'
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: 04:00:00
+  gres: gpu:8
+  num_processes: 1
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+scaling:
+  train_sizes: [100, 500, 1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000,
+                256000, 512000, 1000000, 2000000, 4000000, 8000000]
+  val_limit: 1000000
+  max_epochs: 200
+  min_steps: 10000
+  max_steps: 400000
+  n_evals: 40
+  first_eval_step: 100
+
+classifier:
+  d_model: 128
+  n_head: 4
+  context: 32
+  n_layers: 4
+  weight_decay: 0.02
+  batch_size: 64
+  pct_start: 0.1
+
+finetune:
+  frozen_frac: 0.25
+  frozen_lr: 4e-4
+  encoder_lr: 4e-5
+  encoder_start_lr: 1e-6
+  encoder_warmup_frac: 0.333
+  head_lr: 4e-4
