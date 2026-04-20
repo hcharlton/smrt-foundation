@@ -21,6 +21,7 @@ randnn_images_neylon.ipynb
 CLAUDE.md
 .claude/
 \.claude
+checkpoints_*/
 checkpoints/
 .gwf/
 # Byte-compiled / optimized / DLL files
