@@ -21,6 +21,7 @@ randnn_images_neylon.ipynb
 CLAUDE.md
 .claude/
 \.claude
+checkpoints/
 .gwf/
 # Byte-compiled / optimized / DLL files
 __pycache__/
