@@ -370,6 +370,9 @@ def main():
 
             optimizer.zero_grad()
             accelerator.backward(loss)
+            # Unclipped total grad L2 norm for instability diagnosis.
+            # max_norm=inf = report only; swap in a finite value to clip.
+            grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
             optimizer.step()
             scheduler.step()
 
@@ -377,10 +380,25 @@ def main():
             current_loss = accelerator.reduce(loss, reduction='mean').item()
             epoch_loss += current_loss
 
+            # Dimensional-collapse diagnostics on projection outputs before
+            # F.normalize inside NTXent. `embed_z_std` is the mean over
+            # channels of per-channel std across the batch — drops toward 0
+            # when channels collapse. `embed_z_norm` tracks overall scale.
+            with torch.no_grad():
+                z_all = torch.cat([z1, z2], dim=0)
+                z_std_local = z_all.std(dim=0).mean()
+                z_norm_local = z_all.norm(dim=1).mean()
+            grad_norm_r = accelerator.reduce(grad_norm, reduction='mean').item()
+            z_std = accelerator.reduce(z_std_local, reduction='mean').item()
+            z_norm = accelerator.reduce(z_norm_local, reduction='mean').item()
+
             accelerator.log({
                 'train_loss': current_loss,
                 'learning_rate': scheduler.get_last_lr()[0],
                 'epoch': epoch,
+                'grad_norm': grad_norm_r,
+                'embed_z_std': z_std,
+                'embed_z_norm': z_norm,
             }, step=global_step)
 
             if accelerator.is_main_process:

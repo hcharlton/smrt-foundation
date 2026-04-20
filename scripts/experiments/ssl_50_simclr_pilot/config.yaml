@@ -48,7 +48,7 @@ simclr:
   # Training
   epochs: 100
   ds_limit: 200000
-  batch_size: 512       # per-rank; global = 512 * num_processes = 4096
+  batch_size: 512       # per-rank; global = 512 * num_processes = 4096, num_processes := 8
   optimizer: 'AdamW'
   max_lr: 3e-4
   weight_decay: 1.0e-4
