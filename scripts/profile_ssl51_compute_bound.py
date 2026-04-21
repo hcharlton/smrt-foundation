@@ -60,7 +60,7 @@ SIZES = [
 ]
 
 WARMUP = 5
-N_TIMED = 20
+N_TIMED = 100
 CONTEXT = 32
 MEMMAP_PATH = 'data/01_processed/ssl_sets/ob007_raw.memmap'
 
