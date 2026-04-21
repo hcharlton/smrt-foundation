@@ -26,9 +26,9 @@ scaling:
   train_sizes: [100, 500, 1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000,
                 256000, 512000, 1000000, 2000000, 4000000, 8000000]
   val_limit: 1000000
-  max_epochs: 200
+  max_epochs: 400
   min_steps: 10000
-  max_steps: 400000
+  max_steps: 800000
   n_evals: 40
   first_eval_step: 100
 

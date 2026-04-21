@@ -97,7 +97,7 @@ def make_cosine_warmup_lambda(total_steps, warmup_steps, min_lr_ratio=0.0):
 
 
 def preload_to_gpu(dataset, device, batch_size=8192, num_workers=4):
-    """Load entire dataset into GPU tensors for zero-overhead batching."""
+    """Load entire dataset into GPU tensors for zero-overhead batching (preferred for small datasets)."""
     loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers,
                         pin_memory=True, shuffle=False)
     xs, ys = [], []
@@ -190,7 +190,7 @@ def train_one_size(rank, train_size, config, c, experiment_dir, tb_dir):
     )
     val_ds = LabeledMemmapDataset(
         config['pos_data_val'], config['neg_data_val'],
-        limit=config['scaling']['val_limit'], norm_fn=norm_fn,
+        limit=config['scaling']['val_limit'], norm_fn=norm_fn, balance=True
     )
 
     print(f"{tag} Preloading training data ({len(train_ds)} samples) to GPU...")
