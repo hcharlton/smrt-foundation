@@ -1,0 +1,14 @@
+experiment_type: 'diagnostic'
+experiment_name: 'profile_ssl51_dataloader_grid'
+run_message: >
+  Follow-up to profile_ssl51_compute_bound. Grid-sweep DataLoader
+  (num_workers, prefetch_factor, persistent_workers) at d128_L4 and
+  d768_L8 to find a config that closes the +31%/+311% real-loop
+  dataloader penalty. ~10 min expected.
+
+resources:
+  cores: 64
+  memory: 448gb
+  walltime: 00:30:00
+  gres: gpu:8
+  num_processes: 8
