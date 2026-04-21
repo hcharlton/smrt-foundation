@@ -1,0 +1,13 @@
+title: ''
+x_label: 'Step'
+y_label: 'Top-1 Accuracy'
+
+facet_width: 200
+facet_height: 150
+columns: 4
+
+series:
+  - path: 'data/02_analysis/43_results.csv'
+    label: '43: bs=4096'
+  - path: 'data/02_analysis/44_results.csv'
+    label: '44: bs scaled with n'
