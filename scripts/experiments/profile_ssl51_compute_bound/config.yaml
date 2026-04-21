@@ -1,0 +1,14 @@
+experiment_type: 'diagnostic'
+experiment_name: 'profile_ssl51_compute_bound'
+run_message: >
+  Diagnostic: attribute SSL-51 SimCLR per-step wall time to I/O / forward /
+  NTXent all_gather / backward all_reduce / optimizer / real-loop dataloader
+  overhead, across all four ssl_51_simclr_grid_r1 sizes. Not a training run —
+  prints a decomposition table to stdout and exits. ~12 min expected.
+
+resources:
+  cores: 64
+  memory: 448gb           # sized to d768_L8 (matches size_d768_L8/config.yaml)
+  walltime: 00:30:00      # 30 min cap; ~12 min expected
+  gres: gpu:8
+  num_processes: 8
