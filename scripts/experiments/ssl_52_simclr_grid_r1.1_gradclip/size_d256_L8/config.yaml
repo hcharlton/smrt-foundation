@@ -1,0 +1,61 @@
+experiment_type: 'ssl'
+experiment_name: '51_simclr_grid_r1_d256_L8'
+run_message: >
+  R1 grid — modest scale-up (~4M params). Halfway between d128_L4 anchor
+  and d512_L8 ResNet-50/2 point.
+
+grad_clip: 5.0
+
+resources:
+  cores: 64
+  memory: 256gb
+  walltime: 12:00:00       # ~7.5 h training + overhead
+  gres: gpu:8
+  num_processes: 8
+
+ssl_dataset: 'ob007_raw.memmap'
+
+probe_pos_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+data_config: 'configs/data.yaml'
+
+# Resume target (empty = fresh run). Point at a prior run's
+# `checkpoints/latest/` Accelerate state dir to resume.
+resume_from: ''
+
+simclr:
+  d_model: 256
+  n_head: 4               # head_dim = 64
+  n_layers: 8
+  context: 32
+  projection_dim: 128
+  projection_layers: 2
+  temperature: 0.1
+  epochs: 100
+  ds_limit: 20000000
+  batch_size: 512
+  optimizer: 'AdamW'
+  max_lr: 3.0e-4
+  weight_decay: 1.0e-4
+  pct_start: 0.05
+  checkpoint_every: 25       # portable epoch_N.pt milestones
+  resume_every: 6            # ~0.8 h/epoch × 6 = ~4.8 h max wall loss
+  probe_every: 5
+
+augment:
+  revcomp_p: 0.0
+  channel_dropout_p: 0.2
+  gaussian_noise_p: 0.8
+  gaussian_noise_sigma: 0.1
+  blur_p: 0.5
+  blur_sigma_range: [0.2, 2.0]
+
+probe:
+  context: 32
+  batch_size: 512
+  epochs: 3
+  lr: 3.0e-3
+  ds_limit: 500000
