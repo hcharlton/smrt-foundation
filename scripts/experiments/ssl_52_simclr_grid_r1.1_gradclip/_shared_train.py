@@ -211,6 +211,7 @@ def main():
         'epochs': 100, 'ds_limit': 0,
         'batch_size': 512, 'max_lr': 3e-4,
         'weight_decay': 1e-4, 'pct_start': 0.05,
+        'grad_clip': float('inf'),
         'checkpoint_every': 20, 'probe_every': 5,
         # How often to overwrite the `latest/` Accelerate state dir (in
         # epochs). This is the resume cadence — bounded wall-time loss on a
@@ -380,9 +381,9 @@ def main():
 
             optimizer.zero_grad()
             accelerator.backward(loss)
-            # Unclipped total grad L2 norm for instability diagnosis.
-            # max_norm=inf = report only; swap in a finite value to clip.
-            grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
+            # Also reports pre-clip L2 norm for instability diagnosis.
+            # simclr.grad_clip defaults to inf (no-op) when unset.
+            grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_norm=float(c['grad_clip']))
             optimizer.step()
             scheduler.step()
 

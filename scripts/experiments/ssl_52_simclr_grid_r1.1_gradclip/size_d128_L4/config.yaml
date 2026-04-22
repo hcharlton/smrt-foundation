@@ -1,11 +1,9 @@
 experiment_type: 'ssl'
-experiment_name: '51_simclr_grid_r1_d128_L4'
+experiment_name: '52_simclr_grid_r1.1_d128_L4'
 run_message: >
   R1 grid — smallest size (~0.5M params). Anchor that matches current
   SSL experiments' architectural scale. Pass criterion: probe_top1 >= 0.63
   AND non-decreasing over last 3 evals.
-
-grad_clip: 5.0
 
 resources:
   cores: 64
@@ -42,6 +40,7 @@ simclr:
   max_lr: 3.0e-4
   weight_decay: 1.0e-4
   pct_start: 0.05
+  grad_clip: 5.0
   checkpoint_every: 25       # portable epoch_N.pt milestones
   resume_every: 25           # ~0.2 h/epoch × 25 = ~5 h max wall loss
   probe_every: 5

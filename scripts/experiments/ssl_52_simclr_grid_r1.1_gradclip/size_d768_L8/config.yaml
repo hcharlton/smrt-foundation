@@ -1,13 +1,11 @@
 experiment_type: 'ssl'
-experiment_name: '51_simclr_grid_r1_d768_L8'
+experiment_name: '52_simclr_grid_r1.1_d768_L8'
 run_message: >
   R1 grid — largest size that fits under the 400 H100-hour per-request
   cap at 100 epochs. 102M params measured (the plan's 54M estimate
   undercounted the fixed 11-ResBlock CNN, which dominates at high
   d_model). Tests the scaling regime that Round 2 would push further
   once the per-request cap is raised.
-
-grad_clip: 5.0
 
 resources:
   cores: 64
@@ -44,6 +42,7 @@ simclr:
   max_lr: 3.0e-4
   weight_decay: 1.0e-4
   pct_start: 0.05
+  grad_clip: 5.0
   checkpoint_every: 25       # portable epoch_N.pt milestones
   resume_every: 1            # ~3.8 h/epoch × 1 = ~3.8 h max wall loss
   probe_every: 5
