@@ -21,14 +21,18 @@ destroying methylation signal.
 import os
 import sys
 import subprocess
+import time
+from datetime import datetime
 import yaml
 import torch
 import torch.nn as nn
-from tqdm import tqdm
 from torch.utils.data import DataLoader
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import set_seed
 from torchmetrics.classification import BinaryAccuracy, BinaryAUROC
+
+
+LOG_EVERY = 100  # steps between stdout status lines
 
 module_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 if module_path not in sys.path:
@@ -247,6 +251,10 @@ def main():
         kwargs_handlers=[ddp_kwargs],
     )
 
+    def log(msg):
+        if accelerator.is_main_process:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
     if accelerator.is_main_process:
         print(config)
 
@@ -299,7 +307,7 @@ def main():
     paired_ds = PairedViewDataset(ds, policy=policy, norm_fn=ssl_norm)
 
     dl = DataLoader(
-        paired_ds, batch_size=c['batch_size'], num_workers=8,
+        paired_ds, batch_size=c['batch_size'], num_workers=4,
         pin_memory=True, prefetch_factor=4, shuffle=True,
         persistent_workers=True,
     )
@@ -362,9 +370,11 @@ def main():
     for epoch in range(progress_state.epoch, c['epochs']):
         model.train()
         epoch_loss = 0.0
+        log(f"=== epoch {epoch+1}/{c['epochs']} start "
+            f"({len(dl)} steps, global_step={global_step}) ===")
+        _prev_t = time.perf_counter()
 
-        bar = tqdm(dl, desc=f"Epoch {epoch + 1}/{c['epochs']}", disable=not accelerator.is_main_process)
-        for v1, v2 in bar:
+        for step_in_epoch, (v1, v2) in enumerate(dl):
             z1, z2 = model(v1, v2)
             loss = criterion(z1, z2)
 
@@ -392,6 +402,11 @@ def main():
             z_std = accelerator.reduce(z_std_local, reduction='mean').item()
             z_norm = accelerator.reduce(z_norm_local, reduction='mean').item()
 
+            _now = time.perf_counter()
+            step_ms = (_now - _prev_t) * 1000.0
+            _prev_t = _now
+            its = 1000.0 / step_ms if step_ms > 0 else 0.0
+
             accelerator.log({
                 'train_loss': current_loss,
                 'learning_rate': scheduler.get_last_lr()[0],
@@ -399,13 +414,22 @@ def main():
                 'grad_norm': grad_norm_r,
                 'embed_z_std': z_std,
                 'embed_z_norm': z_norm,
+                'step_time_ms': step_ms,
+                'iters_per_sec': its,
             }, step=global_step)
 
-            if accelerator.is_main_process:
-                bar.set_postfix(loss=f"{current_loss:.4f}")
+            if global_step % LOG_EVERY == 0:
+                log(f"ep {epoch+1}/{c['epochs']} "
+                    f"step {global_step}/{total_steps} "
+                    f"({step_in_epoch+1}/{len(dl)}) | "
+                    f"loss={current_loss:.4f} "
+                    f"lr={scheduler.get_last_lr()[0]:.2e} "
+                    f"{its:.1f} it/s "
+                    f"grad={grad_norm_r:.2f}")
 
         avg_loss = epoch_loss / max(len(dl), 1)
         accelerator.log({'epoch_avg_loss': avg_loss}, step=global_step)
+        log(f"=== epoch {epoch+1}/{c['epochs']} end | avg_loss={avg_loss:.4f} ===")
 
         # --- Probe ---
         if (epoch + 1) % c['probe_every'] == 0 and config.get('probe_pos_train'):
