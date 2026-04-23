@@ -428,14 +428,32 @@ def train_one_size(rank, train_size, config, experiment_dir, tb_dir):
 # Dispatch
 # ---------------------------------------------------------------------------
 
-def worker_fn(rank, sizes, counter, config, experiment_dir, tb_dir):
-    while True:
-        with counter.get_lock():
-            idx = counter.value
-            counter.value += 1
-        if idx >= len(sizes):
-            break
-        train_one_size(rank, sizes[idx], config, experiment_dir, tb_dir)
+def assign_sizes(train_sizes, world_size, config):
+    """Greedy load-balanced assignment: assign each size (largest first) to the
+    GPU with the least total work so far, estimated by step budget."""
+    c = config['classifier']
+    has_batch_scaling = 'bs_floor' in c and 'bs_k' in c
+
+    assignments = [[] for _ in range(world_size)]
+    workloads = [0] * world_size
+
+    for size in sorted(train_sizes, reverse=True):
+        if has_batch_scaling:
+            bs = compute_batch_size(size, c['batch_size'], c['bs_floor'], c['bs_k'])
+        else:
+            bs = min(c['batch_size'], size)
+        steps = compute_step_budget(size, bs, config['scaling'])[0]
+
+        gpu = min(range(world_size), key=lambda i: workloads[i])
+        assignments[gpu].append(size)
+        workloads[gpu] += steps
+
+    return assignments
+
+
+def worker_fn(rank, assignments, config, experiment_dir, tb_dir):
+    for train_size in assignments[rank]:
+        train_one_size(rank, train_size, config, experiment_dir, tb_dir)
         torch.cuda.empty_cache()
 
 
@@ -509,18 +527,19 @@ def main(config_path):
 
     print(f"GPUs available: {num_gpus}, using {world_size} workers")
 
-    # Sort largest-first for load balancing
-    sizes_sorted = sorted(train_sizes, reverse=True)
-    counter = mp.Value('i', 0)
+    # Greedy load-balanced assignment (no shared state, spawn-safe)
+    assignments = assign_sizes(train_sizes, world_size, config)
+    for i, sizes in enumerate(assignments):
+        print(f"  GPU {i}: {sizes}")
 
     if world_size > 1:
         mp.spawn(
             worker_fn,
-            args=(sizes_sorted, counter, config, experiment_dir, tb_dir),
+            args=(assignments, config, experiment_dir, tb_dir),
             nprocs=world_size,
         )
     else:
-        worker_fn(0, sizes_sorted, counter, config, experiment_dir, tb_dir)
+        worker_fn(0, assignments, config, experiment_dir, tb_dir)
 
     merge_csvs(experiment_dir, train_sizes)
     print(f"TensorBoard logs in {tb_dir}")
