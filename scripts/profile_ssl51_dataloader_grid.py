@@ -63,7 +63,7 @@ FULL_READ_LEN = 4096    # native stored context in ob007_raw memmap
 CHUNK_SIZE = 2048       # for ChunkedRandomSampler cells
 NUM_WORKERS = 4         # rank 1 from the prior CPU-scheduling grid
 PREFETCH_FACTOR = 4
-WARMUP_SECS = 20
+N_WARMUP_STEPS = 30     # fixed step count (never wall-clock — see timed_sustained)
 MEASURE_SECS = 60
 N_SUB_WINDOWS = 4       # 15-sec sub-windows for drift detection
 
@@ -164,40 +164,35 @@ def build_dl(paired_ds, batch_size, sampler_kind):
 PRE_TIME_STEPS = 20
 
 
-def timed_sustained(step_fn, warmup_secs, measure_secs, n_sub_windows, accelerator):
+def timed_sustained(step_fn, measure_secs, n_sub_windows, accelerator):
     """Sustained-throughput measurement that is safe under DDP.
 
-    step_fn may contain DDP collectives (NTXent's dist_nn.all_gather,
-    DDP's gradient all_reduce in backward). A wall-clock-bounded loop
-    would let different ranks execute different iteration counts, so
-    one rank's collective would block waiting for another rank that
-    already moved on → NCCL timeout. Instead:
+    `step_fn` may contain DDP collectives (NTXent's dist_nn.all_gather
+    in the loss, DDP's gradient all_reduce in backward) and Accelerate's
+    DataLoaderShard may fire a broadcast at batch boundaries in some
+    paths. *Any* wall-clock-bounded loop would let different ranks run
+    different step counts, which makes rank N post collective K while
+    rank M posts a different collective K — NCCL hangs 10 minutes then
+    kills the job.
 
-      1. Warm for warmup_secs (no count synchronization needed; no
-         collectives are ordered across the warmup boundary).
-      2. Run PRE_TIME_STEPS on every rank to estimate step time. This
-         is a fixed count, so collectives stay in lockstep.
-      3. Compute target_steps = int(measure_secs / est_step_time) on
-         every rank; broadcast rank 0's value so any float roundoff
-         doesn't cause ranks to disagree.
-      4. Run exactly target_steps. Record wall time per equal-sized
-         sub-window for drift detection.
-
-    Returns (total_its, sub_window_its_list) where total_its is the
-    wall-clock sustained rate (target_steps / elapsed) averaged nothing
-    — caller is expected to cross-rank-reduce as needed.
+    Every phase uses a fixed step count identical across ranks:
+      1. Warmup: N_WARMUP_STEPS — absorbs worker spawn and cache warm.
+      2. Pre-time: PRE_TIME_STEPS — estimate step_time.
+      3. Broadcast rank 0's `target_steps = measure_secs / step_time`
+         so all ranks agree.
+      4. Measurement: exactly `target_steps`, timed end-to-end, with
+         equal-sized sub-windows for drift detection.
     """
     def _sync():
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
-    _sync()
-    warm_end = time.perf_counter() + warmup_secs
-    while time.perf_counter() < warm_end:
+    # Fixed-count warmup
+    for _ in range(N_WARMUP_STEPS):
         step_fn()
     _sync()
 
-    # Pre-time: fixed count on all ranks to estimate step time.
+    # Fixed-count pre-timing
     pre_t0 = time.perf_counter()
     for _ in range(PRE_TIME_STEPS):
         step_fn()
@@ -207,32 +202,47 @@ def timed_sustained(step_fn, warmup_secs, measure_secs, n_sub_windows, accelerat
 
     # Decide target on rank 0, broadcast so everyone agrees despite
     # per-rank roundoff in est_step.
-    target_local = max(PRE_TIME_STEPS * 2, int(measure_secs / est_step) if est_step > 0 else PRE_TIME_STEPS * 2)
+    target_local = max(
+        PRE_TIME_STEPS * 2,
+        int(measure_secs / est_step) if est_step > 0 else PRE_TIME_STEPS * 2,
+    )
     target_tensor = torch.tensor([int(target_local)], device=accelerator.device, dtype=torch.long)
     if dist.is_initialized():
         dist.broadcast(target_tensor, src=0)
     target_steps = int(target_tensor[0].item())
 
+    if accelerator.is_main_process:
+        print(
+            f"    pre-time: est {est_step*1000:.1f} ms/step, target {target_steps} steps "
+            f"(expected ~{target_steps * est_step:.0f}s)",
+            flush=True,
+        )
+
+    # Fixed-count measurement with sub-window drift tracking
     window_size = max(1, target_steps // n_sub_windows)
     sub_its = []
     _sync()
     t0 = time.perf_counter()
     cur_window_start = t0
     steps_in_window = 0
-    for step_i in range(target_steps):
+    for _ in range(target_steps):
         step_fn()
         steps_in_window += 1
         if steps_in_window >= window_size and len(sub_its) < n_sub_windows - 1:
-            # Don't sync per-window — adding a sync is not a collective
-            # but it'd perturb the steady-state we're trying to measure.
             now = time.perf_counter()
-            sub_its.append(steps_in_window / (now - cur_window_start) if now > cur_window_start else 0.0)
+            sub_its.append(
+                steps_in_window / (now - cur_window_start)
+                if now > cur_window_start else 0.0
+            )
             cur_window_start = now
             steps_in_window = 0
     _sync()
     total_end = time.perf_counter()
     if steps_in_window > 0:
-        sub_its.append(steps_in_window / (total_end - cur_window_start) if total_end > cur_window_start else 0.0)
+        sub_its.append(
+            steps_in_window / (total_end - cur_window_start)
+            if total_end > cur_window_start else 0.0
+        )
     while len(sub_its) < n_sub_windows:
         sub_its.append(0.0)
     sub_its = sub_its[:n_sub_windows]
@@ -278,7 +288,9 @@ def run_cell(label, sampler_kind, read_len, norm, accelerator):
     def _a():
         next(it)
 
-    A_its_raw, A_sub_raw = timed_sustained(_a, WARMUP_SECS, MEASURE_SECS, N_SUB_WINDOWS, accelerator)
+    if accelerator.is_main_process:
+        print("  phase A (pure next(it))", flush=True)
+    A_its_raw, A_sub_raw = timed_sustained(_a, MEASURE_SECS, N_SUB_WINDOWS, accelerator)
 
     # Drop the phase-A iterator, rebuild a fresh DL for phase B5 so its
     # measurement doesn't start with a phase-A-drained prefetch queue.
@@ -296,7 +308,9 @@ def run_cell(label, sampler_kind, read_len, norm, accelerator):
         accelerator.backward(loss)
         optimizer.step()
 
-    B5_its_raw, B5_sub_raw = timed_sustained(_b5, WARMUP_SECS, MEASURE_SECS, N_SUB_WINDOWS, accelerator)
+    if accelerator.is_main_process:
+        print("  phase B5 (real training step)", flush=True)
+    B5_its_raw, B5_sub_raw = timed_sustained(_b5, MEASURE_SECS, N_SUB_WINDOWS, accelerator)
 
     # Cross-rank means
     A_its = reduce_scalar(accelerator, A_its_raw)
@@ -334,8 +348,11 @@ def main():
             flush=True,
         )
         print(
-            f"Per cell: {WARMUP_SECS}s warmup + {MEASURE_SECS}s sustained "
-            f"(split into {N_SUB_WINDOWS} sub-windows for drift)",
+            f"Per cell: {N_WARMUP_STEPS} warmup steps + {PRE_TIME_STEPS} pre-time steps "
+            f"+ {MEASURE_SECS}s-targeted measurement "
+            f"(split into {N_SUB_WINDOWS} sub-windows for drift). "
+            f"All phases use fixed step counts identical across ranks to keep "
+            f"DDP collective ordering in lockstep.",
             flush=True,
         )
         print(
