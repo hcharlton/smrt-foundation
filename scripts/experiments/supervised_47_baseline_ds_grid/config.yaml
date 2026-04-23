@@ -1,0 +1,38 @@
+experiment_type: 'supervised'
+experiment_name: '47_baseline_ds_grid'
+run_message: >-
+  Reproduces exp 41 (random-init baseline with epoch-capped step budget)
+  using the unified ds_grid trainer. No pretrained checkpoint, single-stage
+  AdamW at lr=3e-3, fixed batch size 4096.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: 12:00:00
+  gres: gpu:8
+  num_processes: 1
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+scaling:
+  train_sizes: [100, 500, 1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000,
+                256000, 512000, 1000000, 2000000, 4000000, 8000000]
+  val_limit: 1000000
+  max_epochs: 200
+  min_steps: 10000
+  max_steps: 400000
+  n_evals: 40
+  first_eval_step: 100
+
+classifier:
+  d_model: 128
+  n_head: 4
+  context: 32
+  n_layers: 4
+  weight_decay: 0.02
+  batch_size: 4096
+  max_lr: 3e-3
+  pct_start: 0.1
