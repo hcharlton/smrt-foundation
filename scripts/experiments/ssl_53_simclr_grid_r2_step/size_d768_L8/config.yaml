@@ -11,7 +11,7 @@ run_message: >
 resources:
   cores: 64
   memory: 448gb
-  walltime: 48:00:00
+  walltime: 15:00:00
   gres: gpu:8
   num_processes: 8
 
