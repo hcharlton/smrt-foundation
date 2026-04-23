@@ -34,6 +34,7 @@ from collections import OrderedDict
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import set_seed
@@ -160,45 +161,84 @@ def build_dl(paired_ds, batch_size, sampler_kind):
     )
 
 
-def timed_sustained(step_fn, warmup_secs, measure_secs, n_sub_windows):
-    """Run step_fn in a tight loop. Warm for `warmup_secs`, then
-    measure for `measure_secs` and count steps in each of
-    `n_sub_windows` equal-width sub-windows of the measurement.
+PRE_TIME_STEPS = 20
 
-    Returns (total_its, sub_window_its_list), where total_its is the
-    wall-clock sustained rate and sub_window_its_list lets you see
-    whether throughput drifted over the measurement window (monotone
-    downward drift is a page-cache-thrashing signature).
+
+def timed_sustained(step_fn, warmup_secs, measure_secs, n_sub_windows, accelerator):
+    """Sustained-throughput measurement that is safe under DDP.
+
+    step_fn may contain DDP collectives (NTXent's dist_nn.all_gather,
+    DDP's gradient all_reduce in backward). A wall-clock-bounded loop
+    would let different ranks execute different iteration counts, so
+    one rank's collective would block waiting for another rank that
+    already moved on → NCCL timeout. Instead:
+
+      1. Warm for warmup_secs (no count synchronization needed; no
+         collectives are ordered across the warmup boundary).
+      2. Run PRE_TIME_STEPS on every rank to estimate step time. This
+         is a fixed count, so collectives stay in lockstep.
+      3. Compute target_steps = int(measure_secs / est_step_time) on
+         every rank; broadcast rank 0's value so any float roundoff
+         doesn't cause ranks to disagree.
+      4. Run exactly target_steps. Record wall time per equal-sized
+         sub-window for drift detection.
+
+    Returns (total_its, sub_window_its_list) where total_its is the
+    wall-clock sustained rate (target_steps / elapsed) averaged nothing
+    — caller is expected to cross-rank-reduce as needed.
     """
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    def _sync():
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+    _sync()
     warm_end = time.perf_counter() + warmup_secs
     while time.perf_counter() < warm_end:
         step_fn()
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    _sync()
 
-    t0 = time.perf_counter()
-    deadline = t0 + measure_secs
-    window_width = measure_secs / n_sub_windows
-    window_boundaries = [t0 + (i + 1) * window_width for i in range(n_sub_windows)]
-    sub_counts = [0] * n_sub_windows
-    sub_idx = 0
-    total_count = 0
-    while True:
-        now = time.perf_counter()
-        if now >= deadline:
-            break
-        while sub_idx < n_sub_windows - 1 and now >= window_boundaries[sub_idx]:
-            sub_idx += 1
+    # Pre-time: fixed count on all ranks to estimate step time.
+    pre_t0 = time.perf_counter()
+    for _ in range(PRE_TIME_STEPS):
         step_fn()
-        total_count += 1
-        sub_counts[sub_idx] += 1
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    elapsed = time.perf_counter() - t0
-    total_its = total_count / elapsed if elapsed > 0 else 0.0
-    sub_its = [c / window_width for c in sub_counts]
+    _sync()
+    pre_elapsed = time.perf_counter() - pre_t0
+    est_step = pre_elapsed / PRE_TIME_STEPS if pre_elapsed > 0 else 0.1
+
+    # Decide target on rank 0, broadcast so everyone agrees despite
+    # per-rank roundoff in est_step.
+    target_local = max(PRE_TIME_STEPS * 2, int(measure_secs / est_step) if est_step > 0 else PRE_TIME_STEPS * 2)
+    target_tensor = torch.tensor([int(target_local)], device=accelerator.device, dtype=torch.long)
+    if dist.is_initialized():
+        dist.broadcast(target_tensor, src=0)
+    target_steps = int(target_tensor[0].item())
+
+    window_size = max(1, target_steps // n_sub_windows)
+    sub_its = []
+    _sync()
+    t0 = time.perf_counter()
+    cur_window_start = t0
+    steps_in_window = 0
+    for step_i in range(target_steps):
+        step_fn()
+        steps_in_window += 1
+        if steps_in_window >= window_size and len(sub_its) < n_sub_windows - 1:
+            # Don't sync per-window — adding a sync is not a collective
+            # but it'd perturb the steady-state we're trying to measure.
+            now = time.perf_counter()
+            sub_its.append(steps_in_window / (now - cur_window_start) if now > cur_window_start else 0.0)
+            cur_window_start = now
+            steps_in_window = 0
+    _sync()
+    total_end = time.perf_counter()
+    if steps_in_window > 0:
+        sub_its.append(steps_in_window / (total_end - cur_window_start) if total_end > cur_window_start else 0.0)
+    while len(sub_its) < n_sub_windows:
+        sub_its.append(0.0)
+    sub_its = sub_its[:n_sub_windows]
+
+    total_elapsed = total_end - t0
+    total_its = target_steps / total_elapsed if total_elapsed > 0 else 0.0
     return total_its, sub_its
 
 
@@ -238,7 +278,7 @@ def run_cell(label, sampler_kind, read_len, norm, accelerator):
     def _a():
         next(it)
 
-    A_its_raw, A_sub_raw = timed_sustained(_a, WARMUP_SECS, MEASURE_SECS, N_SUB_WINDOWS)
+    A_its_raw, A_sub_raw = timed_sustained(_a, WARMUP_SECS, MEASURE_SECS, N_SUB_WINDOWS, accelerator)
 
     # Drop the phase-A iterator, rebuild a fresh DL for phase B5 so its
     # measurement doesn't start with a phase-A-drained prefetch queue.
@@ -256,7 +296,7 @@ def run_cell(label, sampler_kind, read_len, norm, accelerator):
         accelerator.backward(loss)
         optimizer.step()
 
-    B5_its_raw, B5_sub_raw = timed_sustained(_b5, WARMUP_SECS, MEASURE_SECS, N_SUB_WINDOWS)
+    B5_its_raw, B5_sub_raw = timed_sustained(_b5, WARMUP_SECS, MEASURE_SECS, N_SUB_WINDOWS, accelerator)
 
     # Cross-rank means
     A_its = reduce_scalar(accelerator, A_its_raw)
