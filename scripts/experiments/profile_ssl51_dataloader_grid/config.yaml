@@ -1,10 +1,15 @@
 experiment_type: 'diagnostic'
 experiment_name: 'profile_ssl51_dataloader_grid'
 run_message: >
-  Follow-up to profile_ssl51_compute_bound. Grid-sweep DataLoader
-  (num_workers, prefetch_factor, persistent_workers) at d128_L4 and
-  d768_L8 to find a config that closes the +31%/+311% real-loop
-  dataloader penalty. ~10 min expected.
+  IO intervention sweep (d128_L4 only). Tests whether reducing bytes-
+  per-sample at __getitem__ time (SubcropShardedMemmapDataset with
+  read_len in {4096,256,64,32}) and/or ChunkedRandomSampler recovers
+  the ~17x gap between the profile's projection and real-training
+  throughput. Sustained measurement: 20s warmup + 60s timed per phase
+  (A and B5), 4 sub-windows for drift detection. ~25 min expected.
+  Prior-version results (CPU-scheduling sweep at num_workers x
+  prefetch_factor x persistent_workers) preserved in
+  docs/experiment_log.md under the earlier pending row.
 
 resources:
   cores: 64

@@ -374,6 +374,7 @@ def main():
         log(f"=== epoch {epoch+1}/{c['epochs']} start "
             f"({len(dl)} steps, global_step={global_step}) ===")
         _prev_t = time.perf_counter()
+        _window_start_t = _prev_t
 
         for step_in_epoch, (v1, v2) in enumerate(dl):
             z1, z2 = model(v1, v2)
@@ -420,12 +421,20 @@ def main():
             }, step=global_step)
 
             if global_step % LOG_EVERY == 0:
+                # Window-averaged it/s over the last LOG_EVERY steps.
+                # `its` (single-step) goes to TB above for fine-grained analysis,
+                # but instantaneous readings of one step in 100 are misleading
+                # in stdout when the pipeline is bursty — so stdout shows the
+                # true sustained rate instead.
+                window_secs = _now - _window_start_t
+                window_its = LOG_EVERY / window_secs if window_secs > 0 else 0.0
+                _window_start_t = _now
                 log(f"ep {epoch+1}/{c['epochs']} "
                     f"step {global_step}/{total_steps} "
                     f"({step_in_epoch+1}/{len(dl)}) | "
                     f"loss={current_loss:.4f} "
                     f"lr={scheduler.get_last_lr()[0]:.2e} "
-                    f"{its:.1f} it/s "
+                    f"{window_its:.2f} it/s "
                     f"grad={grad_norm_r:.2f}")
 
         avg_loss = epoch_loss / max(len(dl), 1)

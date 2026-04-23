@@ -1,9 +1,24 @@
-# ssl_51_simclr_grid_r1
+# ssl_52_simclr_grid_r1
 
 Round-1 SimCLR scoping grid, but with grad clipping, 4 workers, and prefetch=4. 
 Same NT-Xent objective, augmentation policy, data, and step budget as `ssl_50_simclr_pilot`; 
 only the encoder shape varies across the four subdirectories below. Each subdir is an 
 independent SLURM submission.
+
+## The SimCLR task
+
+Self-supervised contrastive pretraining on unlabeled PacBio reads. Two augmented views
+of each read pass through a shared `SmrtEncoder`; NT-Xent pulls positives (two views
+of the same read) together and pushes all other in-batch views apart. The bet:
+kinetic-feature augmentations (subcrop, channel dropout, Gaussian noise, temporal blur)
+preserve methylation identity, so an encoder invariant to them should expose
+methylation state as a linearly-separable latent direction — which the linear probe on
+CpG pos/neg windows then measures.
+
+Prior SSL attempts in this repo all used input-level masking as the pretext task —
+probe accuracy either declined (exps 21/23) or plateaued around 66% (exps 24–26).
+SimCLR's augmentation-based positive pairing is the open alternative; this grid tests
+whether it scales with model size (2M → 102M params) before committing Round-2 compute.
 
 | subdir          | d_model | n_layers | n_head | measured params | est. H100-hours |
 |-----------------|--------:|---------:|-------:|----------------:|----------------:|
