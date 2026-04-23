@@ -1,0 +1,63 @@
+experiment_type: 'ssl'
+experiment_name: '53_simclr_grid_r2_step_d768_L8'
+run_message: >
+  R2 step-metric grid — d768_L8 (~102M params), the largest size in
+  the grid. bs=256 (halved vs other sizes) to keep per-rank
+  activation memory in bounds. Full SSL epoch (ds_limit=0),
+  ChunkedRandomSampler, step-based probe + milestone checkpoints
+  every 10k steps. Walltime-capped at 48h; cosine horizon set by
+  `epochs=50`.
+
+resources:
+  cores: 64
+  memory: 448gb
+  walltime: 48:00:00
+  gres: gpu:8
+  num_processes: 8
+
+ssl_dataset: 'ob007_raw.memmap'
+
+probe_pos_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+data_config: 'configs/data.yaml'
+
+resume_from: ''
+
+simclr:
+  d_model: 768
+  n_head: 12              # head_dim = 64
+  n_layers: 8
+  context: 32
+  projection_dim: 128
+  projection_layers: 2
+  temperature: 0.1
+  epochs: 50
+  ds_limit: 0
+  batch_size: 256         # halved to keep per-rank activation memory in bounds
+  optimizer: 'AdamW'
+  max_lr: 3.0e-4
+  weight_decay: 1.0e-4
+  pct_start: 0.05
+  grad_clip: 5.0
+  probe_every_steps: 10000
+  checkpoint_every_steps: 10000
+  resume_every_steps: 10000
+  chunk_size: 2048
+
+augment:
+  revcomp_p: 0.0
+  channel_dropout_p: 0.2
+  gaussian_noise_p: 0.8
+  gaussian_noise_sigma: 0.1
+  blur_p: 0.5
+  blur_sigma_range: [0.2, 2.0]
+
+probe:
+  context: 32
+  batch_size: 512
+  epochs: 3
+  lr: 3.0e-3
+  ds_limit: 500000

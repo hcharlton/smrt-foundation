@@ -4,3 +4,5 @@ Same architecture and task as experiment 53, but now using step based metrics in
 1. full epoch (ds_limit=0)
 2. step based metrics 
     - save an artifact capapable of being used to finetune every 10k steps 
+    - evaluate every 10k steps
+3. implmemented the chunkedrandomsampler fix to improve iteration steps
