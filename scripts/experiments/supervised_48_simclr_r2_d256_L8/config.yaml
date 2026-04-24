@@ -1,0 +1,48 @@
+experiment_type: 'supervised'
+experiment_name: '48_simclr_r2_d256_L8'
+run_message: >-
+  Fine-tune the ssl_53 SimCLR d256_L8 encoder (Round-2 step-metric grid,
+  full-data epochs, ChunkedRandomSampler) on CpG methylation classification
+  via the unified ds_grid trainer. Matched single-stage schedule (AdamW
+  lr=3e-3 for all params) with per-size batch scaling, mirroring exp 46.
+  Classifier architecture widened to d=256 / L=8 / h=4 so the head sits on
+  top of the SimCLR encoder without a PE or block-count mismatch. Directly
+  comparable to exp 47 (random-init baseline on the same ds_grid) and exp 46
+  (exp 29 autoencoder encoder at d=128 / L=4) — any delta isolates the
+  contribution of the larger, SimCLR-pretrained encoder.
+
+pretrained_checkpoint: 'scripts/experiments/ssl_53_simclr_grid_r2_step/size_d256_L8/checkpoints/step_290000.pt'
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "08:00:00"
+  gres: gpu:8
+  num_processes: 1
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+scaling:
+  train_sizes: [100, 500, 1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000,
+                256000, 512000, 1000000, 2000000, 4000000, 8000000]
+  val_limit: 1000000
+  max_epochs: 200
+  min_steps: 10000
+  max_steps: 400000
+  n_evals: 40
+  first_eval_step: 100
+
+classifier:
+  d_model: 256
+  n_head: 4
+  context: 32
+  n_layers: 8
+  weight_decay: 0.02
+  batch_size: 4096     # bs_cap
+  bs_floor: 64
+  bs_k: 8
+  max_lr: 3e-3
+  pct_start: 0.1
