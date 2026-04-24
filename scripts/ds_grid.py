@@ -10,6 +10,19 @@ Behaviour is controlled entirely by the experiment's config.yaml:
   pretrained_checkpoint   present -> load pretrained encoder
   finetune section        present -> two-stage (frozen -> gradual unfreeze)
   classifier.bs_floor/k   present -> per-size batch scaling
+  size_overrides          present -> per-train_size overrides of
+                                     classifier / scaling knobs
+
+Per-size overrides have the shape:
+
+  size_overrides:
+    100:   {max_lr: 3e-4, max_epochs: 50}
+    500:   {max_lr: 3e-4, max_epochs: 60}
+    # sizes absent from the map inherit the flat classifier/scaling values
+
+Each override key must match an existing key in either the `classifier`
+or `scaling` section; unknown keys raise at load time. Only `classifier`
+and `scaling` are resolvable — `finetune` is intentionally out of scope.
 
 Usage (via thin per-experiment train.py wrapper):
   bash run.sh scripts/experiments/supervised_NN_name/
@@ -72,8 +85,78 @@ def load_config(config_path):
             "Single-stage experiments require classifier.max_lr"
     c = DEFAULT_CLASSIFIER | config.get('classifier', {})
     config['classifier'] = c
+    _validate_size_overrides(config)
     config['git_hash'] = get_git_revision_hash()
     return config, c
+
+
+def _validate_size_overrides(config):
+    """Fail-loud normalization + schema check for `size_overrides`.
+
+    Mutates `config['size_overrides']` to use int keys (PyYAML parses
+    `'100':` as str, which would silently no-op at lookup time). Rejects
+    unknown override keys, sizes not present in `scaling.train_sizes`,
+    and any classifier/scaling key collision that would make the
+    resolver ambiguous.
+    """
+    raw = config.get('size_overrides')
+    if raw is None:
+        return
+
+    normalized = {}
+    for k, v in raw.items():
+        try:
+            normalized[int(k)] = v
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"size_overrides key {k!r} must be an integer (a train_size)"
+            )
+    config['size_overrides'] = normalized
+
+    classifier_keys = set(config['classifier'].keys())
+    scaling_keys = set(config['scaling'].keys())
+    collisions = classifier_keys & scaling_keys
+    if collisions:
+        raise ValueError(
+            f"classifier and scaling share keys {sorted(collisions)}; "
+            f"size_overrides cannot resolve them unambiguously"
+        )
+
+    train_sizes_set = set(config['scaling']['train_sizes'])
+    valid_keys = classifier_keys | scaling_keys
+    for size, overrides in normalized.items():
+        if size not in train_sizes_set:
+            raise ValueError(
+                f"size_overrides[{size}]: not in scaling.train_sizes"
+            )
+        unknown = set(overrides) - valid_keys
+        if unknown:
+            raise ValueError(
+                f"size_overrides[{size}]: unknown keys {sorted(unknown)}. "
+                f"Valid: {sorted(valid_keys)}"
+            )
+
+
+def resolve_size_config(config, train_size):
+    """Return a config whose classifier/scaling sections have any
+    `size_overrides[train_size]` entries merged in.
+
+    Returns the original config unchanged if no overrides apply to this
+    size. Otherwise returns a shallow copy — the original dict is not
+    mutated. Collision-free by the `_validate_size_overrides` invariant.
+    """
+    overrides = config.get('size_overrides', {}).get(train_size, {})
+    if not overrides:
+        return config
+    resolved = dict(config)
+    resolved['classifier'] = {**config['classifier']}
+    resolved['scaling'] = {**config['scaling']}
+    for k, v in overrides.items():
+        if k in resolved['classifier']:
+            resolved['classifier'][k] = v
+        else:
+            resolved['scaling'][k] = v
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +257,8 @@ def evaluate(model, val_x, val_y, batch_size, metrics, criterion):
 # ---------------------------------------------------------------------------
 
 def train_one_size(rank, train_size, config, experiment_dir, tb_dir):
+    active_overrides = config.get('size_overrides', {}).get(train_size, {})
+    config = resolve_size_config(config, train_size)
     c = config['classifier']
     ft = config.get('finetune')
     has_pretrained = 'pretrained_checkpoint' in config
@@ -188,6 +273,8 @@ def train_one_size(rank, train_size, config, experiment_dir, tb_dir):
 
     tag = f"[GPU {rank} n={train_size:,}]"
     print(f"{tag} Starting")
+    if active_overrides:
+        print(f"{tag} size_overrides applied: {active_overrides}")
 
     set_seed(42)
 
@@ -288,16 +375,20 @@ def train_one_size(rank, train_size, config, experiment_dir, tb_dir):
               f"warmup={warmup_steps:,} steps")
 
     # -- Logging --
+    resolved_max_lr = c.get('max_lr', '')
+
     writer = SummaryWriter(log_dir=os.path.join(tb_dir, f'n{train_size}'))
     writer.add_text("config", f"```yaml\n{yaml.dump(config, indent=2)}\n```", 0)
     writer.add_scalar("train_size", train_size, 0)
     writer.add_scalar("train_bs", train_bs, 0)
+    if resolved_max_lr != '':
+        writer.add_scalar("max_lr", float(resolved_max_lr), 0)
 
     csv_path = os.path.join(size_dir, 'results.csv')
     csv_file = open(csv_path, 'w', newline='')
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow([
-        'train_size', 'train_bs', 'eval_point', 'step', 'stage',
+        'train_size', 'train_bs', 'max_lr', 'eval_point', 'step', 'stage',
         'train_loss', 'val_loss',
         'val_f1', 'val_auroc', 'val_auprc', 'val_accuracy',
         'epochs_completed',
@@ -386,7 +477,8 @@ def train_one_size(rank, train_size, config, experiment_dir, tb_dir):
             epochs_completed = step / max(steps_per_epoch, 1)
 
             csv_writer.writerow([
-                train_size, train_bs, eval_point, step, stage,
+                train_size, train_bs, resolved_max_lr,
+                eval_point, step, stage,
                 f'{avg_train_loss:.6f}', f'{avg_val_loss:.6f}',
                 f'{eval_results["f1"]:.6f}', f'{eval_results["auroc"]:.6f}',
                 f'{eval_results["auprc"]:.6f}', f'{eval_results["accuracy"]:.6f}',
@@ -430,19 +522,21 @@ def train_one_size(rank, train_size, config, experiment_dir, tb_dir):
 
 def assign_sizes(train_sizes, world_size, config):
     """Greedy load-balanced assignment: assign each size (largest first) to the
-    GPU with the least total work so far, estimated by step budget."""
-    c = config['classifier']
-    has_batch_scaling = 'bs_floor' in c and 'bs_k' in c
-
+    GPU with the least total work so far, estimated by step budget. Resolves
+    `size_overrides` per size so the estimate reflects per-size tweaks to
+    `max_epochs` / `batch_size` / etc."""
     assignments = [[] for _ in range(world_size)]
     workloads = [0] * world_size
 
     for size in sorted(train_sizes, reverse=True):
+        sc = resolve_size_config(config, size)
+        c = sc['classifier']
+        has_batch_scaling = 'bs_floor' in c and 'bs_k' in c
         if has_batch_scaling:
             bs = compute_batch_size(size, c['batch_size'], c['bs_floor'], c['bs_k'])
         else:
             bs = min(c['batch_size'], size)
-        steps = compute_step_budget(size, bs, config['scaling'])[0]
+        steps = compute_step_budget(size, bs, sc['scaling'])[0]
 
         gpu = min(range(world_size), key=lambda i: workloads[i])
         assignments[gpu].append(size)
@@ -524,6 +618,12 @@ def main(config_path):
               f"floor={c['bs_floor']}, k={c['bs_k']})")
     else:
         print(f"Batch size: fixed {c['batch_size']}")
+
+    overrides_map = config.get('size_overrides') or {}
+    if overrides_map:
+        print(f"size_overrides ({len(overrides_map)} sizes):")
+        for size in sorted(overrides_map):
+            print(f"  n={size}: {overrides_map[size]}")
 
     print(f"GPUs available: {num_gpus}, using {world_size} workers")
 
