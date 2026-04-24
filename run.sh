@@ -29,15 +29,25 @@ fi
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Read a resource value from config.yaml, with a default fallback
+# Read a resource value from config.yaml, with a default fallback.
+# Auto-quotes `walltime:` values so PyYAML (YAML 1.1) can't read an unquoted
+# HH:MM:SS as a base-60 int (e.g. 15:00:00 → 54000, which sbatch then reads
+# as 54000 minutes = 37.5 days).
 read_resource() {
-    python3 -c "
-import yaml
-with open('${CONFIG}') as f:
-    c = yaml.safe_load(f)
+    python3 - "$CONFIG" "$1" "$2" <<'PYEOF'
+import re, sys, yaml
+config_path, key, default = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(config_path) as f:
+    text = f.read()
+text = re.sub(
+    r'(?m)^(\s*walltime:[ \t]+)(?!["\'])([^\s#]+)',
+    r'\1"\2"',
+    text,
+)
+c = yaml.safe_load(text)
 r = c.get('resources', {})
-print(r.get('$1', '$2'))
-"
+print(r.get(key, default))
+PYEOF
 }
 
 CORES=$(read_resource cores 16)
