@@ -1,0 +1,70 @@
+experiment_type: 'ssl'
+experiment_name: '54_simclr_grid_yoran_d128_L4'
+run_message: >
+  R2 step-metric grid — d128_L4 anchor (~2M params). Full SSL epoch
+  (ds_limit=0, ~100M reads/epoch), ChunkedRandomSampler, step-based
+  probe + milestone checkpoints every 10k steps. Walltime-capped at
+  48h; cosine horizon set by `epochs=50` so the schedule decays over
+  the whole wall budget. Pass criterion (unchanged from R1/R1.1):
+  probe_top1 >= 0.63 AND non-decreasing over last 3 evals. Uses the 
+  yoran dataset.
+
+resources:
+  cores: 64
+  memory: 256gb
+  walltime: "15:00:00"
+  gres: gpu:8
+  num_processes: 8
+
+ssl_dataset: 'yoran_raw.memmap'
+
+probe_pos_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+data_config: 'configs/data.yaml'
+
+# Resume target (empty = fresh run). Point at a prior run's
+# `checkpoints/latest/` Accelerate state dir to resume.
+resume_from: ''
+
+simclr:
+  d_model: 128
+  n_head: 2
+  n_layers: 4
+  context: 32
+  projection_dim: 128
+  projection_layers: 2
+  temperature: 0.1
+  epochs: 50
+  ds_limit: 0
+  batch_size: 512
+  optimizer: 'AdamW'
+  max_lr: 3.0e-4
+  weight_decay: 1.0e-4
+  pct_start: 0.05
+  grad_clip: 5.0
+  # Step-based metrics (R2) — probe, portable encoder ckpt, and
+  # Accelerate resume state all fire on step multiples so crash loss
+  # is bounded regardless of epoch length. At ~5 it/s the 10k cadence
+  # is ~30 min between saves.
+  probe_every_steps: 10000
+  checkpoint_every_steps: 10000
+  resume_every_steps: 10000
+  chunk_size: 2048
+
+augment:
+  revcomp_p: 0.0
+  channel_dropout_p: 0.2
+  gaussian_noise_p: 0.8
+  gaussian_noise_sigma: 0.1
+  blur_p: 0.5
+  blur_sigma_range: [0.2, 2.0]
+
+probe:
+  context: 32
+  batch_size: 512
+  epochs: 3
+  lr: 3.0e-3
+  ds_limit: 500000
