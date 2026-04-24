@@ -1,0 +1,20 @@
+title: ''
+
+x_label: 'Training dataset size'
+y_label: 'Top-1 Accuracy (Val 1m)'
+residual_y_label: 'Top-1 Accuracy − Supervised baseline'
+trajectories_x_label: 'Step'
+trajectories_y_label: 'Top-1 Accuracy'
+
+width: 800
+height: 600
+facet_width: 200
+facet_height: 150
+columns: 4
+
+baseline:
+  path: 'data/02_analysis/33_results.csv'
+  label: 'Supervised'
+finetuned:
+  path: 'data/02_analysis/37_results.csv'
+  label: 'Finetuned'
