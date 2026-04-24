@@ -1,0 +1,64 @@
+experiment_type: 'supervised'
+experiment_name: '49_simclr_r2_d256_L8_persize'
+run_message: >-
+  Exp 48 redux with per-size schedule control. Same ssl_53 SimCLR d256_L8
+  encoder, same large-n schedule — but the small-n bucket (n <= 4000)
+  now uses shorter epoch caps and lower learning rates via the new
+  `size_overrides` mechanism in ds_grid.py. The previous exp 48 run
+  silently trained every n <= 32000 for 10000 steps because
+  `scaling.min_steps: 10000` overrode the nominal `max_epochs: 200` cap;
+  at n=8000 that meant 1250 epochs rather than 200, and val_loss
+  bottomed at ~3% of the run. Here min_steps is dropped to 100 (so
+  max_epochs governs) and the smallest sizes get shorter schedules that
+  aim for val_loss minimum near mid-run.
+
+pretrained_checkpoint: 'scripts/experiments/ssl_53_simclr_grid_r2_step/size_d256_L8/checkpoints/step_290000.pt'
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "08:00:00"
+  gres: gpu:8
+  num_processes: 1
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+scaling:
+  train_sizes: [100, 500, 1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000,
+                256000, 512000, 1000000, 2000000, 4000000, 8000000]
+  val_limit: 1000000
+  max_epochs: 200
+  min_steps: 100         # was 10000 in exp 48; dropped to near-floor so
+                         # max_epochs governs the step budget at small n
+  max_steps: 400000
+  n_evals: 40
+  first_eval_step: 100
+
+classifier:
+  d_model: 256
+  n_head: 4
+  context: 32
+  n_layers: 8
+  weight_decay: 0.02
+  batch_size: 4096       # bs_cap
+  bs_floor: 64
+  bs_k: 8
+  max_lr: 3e-3
+  pct_start: 0.1
+
+size_overrides:
+  # Target: push val_loss minimum from ~3% through the run (exp 48) to
+  # near mid-run. Calibration from exp 48 n=8000, where peak val_f1 hit
+  # at step 464 of 10000 — bringing total_steps closer to ~1000 and
+  # halving max_lr puts the peak near 50%.
+  100:   {max_lr: 3e-4, max_epochs: 50}
+  500:   {max_lr: 3e-4, max_epochs: 60}
+  1000:  {max_lr: 5e-4, max_epochs: 80}
+  2000:  {max_lr: 1e-3, max_epochs: 100}
+  4000:  {max_lr: 1e-3, max_epochs: 150}
+  # n >= 8000: defaults apply (max_lr=3e-3, max_epochs=200). At these
+  # sizes the nominal 200-epoch cap already fires without min_steps
+  # clamping it, so no override is needed as a first pass.
