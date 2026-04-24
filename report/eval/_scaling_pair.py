@@ -14,9 +14,8 @@ import polars as pl
 import altair as alt
 
 
-SCALING_FILENAME = 'data_scaling.svg'
-RESIDUALS_FILENAME = 'data_scaling_residuals.svg'
-TRAJECTORIES_FILENAME = 'data_scaling_trajectories.svg'
+RESIDUALS_SUFFIX = '_residuals'
+TRAJECTORIES_SUFFIX = '_trajectories'
 
 
 def load_rows(path, label):
@@ -115,7 +114,12 @@ def build_trajectories_chart(df_all, cfg):
     )
 
 
-def main(config_path, output_dir):
+def _sibling_path(output_path, suffix):
+    stem, ext = os.path.splitext(output_path)
+    return f'{stem}{suffix}{ext}'
+
+
+def main(config_path, output_path):
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
 
@@ -128,13 +132,14 @@ def main(config_path, output_dir):
     ])
     df_best = best_per_train_size(df_all)
 
-    os.makedirs(output_dir, exist_ok=True)
+    parent = os.path.dirname(output_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     charts = [
-        (SCALING_FILENAME, build_scaling_chart(df_best, cfg)),
-        (RESIDUALS_FILENAME, build_residuals_chart(df_best, baseline_cfg['label'], cfg)),
-        (TRAJECTORIES_FILENAME, build_trajectories_chart(df_all, cfg)),
+        (output_path, build_scaling_chart(df_best, cfg)),
+        (_sibling_path(output_path, RESIDUALS_SUFFIX), build_residuals_chart(df_best, baseline_cfg['label'], cfg)),
+        (_sibling_path(output_path, TRAJECTORIES_SUFFIX), build_trajectories_chart(df_all, cfg)),
     ]
-    for filename, chart in charts:
-        path = os.path.join(output_dir, filename)
+    for path, chart in charts:
         chart.save(path)
         print(f'Saved to {path}')

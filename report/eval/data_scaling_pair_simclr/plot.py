@@ -17,7 +17,7 @@ from report.eval._scaling_pair import main
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output_dir", type=str, required=True)
+    parser.add_argument("--output_path", type=str, required=True)
     args = parser.parse_args()
     config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
-    main(config_path, args.output_dir)
+    main(config_path, args.output_path)
