@@ -893,3 +893,90 @@ class SimCLRSmrt(nn.Module):
     z = self._encode_pool_project(x)
     B = view1.shape[0]
     return z[:B], z[B:]
+
+
+### EXPERIMENTAL (ssl_55) — projection head with internal LayerNorm
+#
+# Sibling of MLPProjectionHead / SimCLRSmrt above. Addresses the
+# magnitude-runaway failure observed in ssl_54 at d_model=768, where the
+# unbounded MLPProjectionHead output drove F.normalize gradients into
+# 1/||z|| damping over ~150k steps and then exploded to non-finite values
+# in a single optimiser step, dropping probe accuracy from 0.65 (epoch 1)
+# to 0.50 (random) for the rest of training. LN placement mirrors SimCLR
+# v1 §4.2's BN placement (Chen et al. 2020). LN rather than BN to avoid
+# DDP sync semantics. State-dict-compatible with DirectClassifier on the
+# encoder side (only the projection head differs from SimCLRSmrt).
+
+
+class MLPProjectionHeadLN(nn.Module):
+  """Projection head with LayerNorm between Linear and GELU on hidden
+  layers, plus a final LayerNorm after the last Linear.
+
+  Sequence for n_layers=2:
+    Linear(d_in, d_hidden) → LayerNorm(d_hidden) → GELU
+    → Linear(d_hidden, d_proj) → LayerNorm(d_proj)
+
+  The final LN is the load-bearing one for the ssl_54 failure mode. It
+  bounds the per-channel scale of the output going into NTXent's
+  F.normalize, eliminating the unbounded magnitude drift that drove the
+  gradient damping. The hidden-layer LN matches the BN-on-hidden pattern
+  in SimCLR v1's projection head.
+  """
+  def __init__(self, d_in: int, d_proj: int = 128, n_layers: int = 2, d_hidden: Optional[int] = None):
+    super().__init__()
+    assert n_layers >= 1, f"n_layers must be >= 1, got {n_layers}"
+    d_hidden = d_hidden if d_hidden is not None else d_in
+    layers = []
+    in_dim = d_in
+    for _ in range(n_layers - 1):
+      layers.append(nn.Linear(in_dim, d_hidden))
+      layers.append(nn.LayerNorm(d_hidden))
+      layers.append(nn.GELU())
+      in_dim = d_hidden
+    layers.append(nn.Linear(in_dim, d_proj))
+    layers.append(nn.LayerNorm(d_proj))
+    self.net = nn.Sequential(*layers)
+
+  def forward(self, x):
+    return self.net(x)
+
+
+class SimCLRSmrtLN(nn.Module):
+  """SimCLRSmrt sibling using MLPProjectionHeadLN instead of
+  MLPProjectionHead. Constructor signature, forward signature, and the
+  SmrtEncoder under the hood are identical to SimCLRSmrt, so a checkpoint
+  produced here is encoder-state-dict-compatible with both
+  DirectClassifier and SimCLRSmrt for downstream fine-tuning.
+  """
+  def __init__(
+      self,
+      d_model: int = 128,
+      n_layers: int = 4,
+      n_head: int = 4,
+      max_len: int = 32,
+      projection_dim: int = 128,
+      projection_layers: int = 2,
+      projection_hidden: Optional[int] = None,
+  ):
+    super().__init__()
+    self.d_model = d_model
+    self.encoder = SmrtEncoder(d_model, n_layers, n_head, max_len)
+    self.projection = MLPProjectionHeadLN(
+        d_in=d_model,
+        d_proj=projection_dim,
+        n_layers=projection_layers,
+        d_hidden=projection_hidden,
+    )
+
+  def _encode_pool_project(self, x: torch.Tensor) -> torch.Tensor:
+    z, z_pad, _ = self.encoder.get_latents(x)
+    z = self.encoder.add_pe(z)
+    c = self.encoder.forward_transformer(z, z_pad)
+    h = _masked_mean_pool(c, z_pad)
+    return self.projection(h)
+
+  def forward(self, view1: torch.Tensor, view2: torch.Tensor):
+    x = torch.cat([view1, view2], dim=0)
+    z = self._encode_pool_project(x)
+    B = view1.shape[0]
+    return z[:B], z[B:]

@@ -49,3 +49,26 @@
 **Observation:** Probe accuracy still declines over training epochs, same pattern as experiment 21.
 
 **Conclusion:** Length mismatch is not the dominant blocker. Task misalignment (contrastive objective vs. classification signal) is likely the primary cause. This motivates the switch to autoencoder pretraining (experiment 24), which directly targets kinetics reconstruction rather than position discrimination.
+
+## 2026-04-27: SimCLR Projection-Head Magnitude Runaway at d_model >= 768
+
+**Hypothesis:** ssl_54's d=768 SimCLR run scales monotonically from d=512. Same architecture family, same hyperparameters, same data — only `d_model` and `n_head` change (head_dim=64 fixed) and `batch_size` halves to 256 for activation memory.
+
+**Experimental Setup:** ssl_54_simclr_grid_yoran/size_d768_L8. SimCLRSmrt with `MLPProjectionHead` (Linear → GELU → Linear, no internal normalization), d_model=768, n_head=12, n_layers=8, ctx=32, batch_size=256, max_lr=3e-4, weight_decay=1e-4, pct_start=0.05, grad_clip=5.0, temperature=0.1, ds_limit=0, epochs=50, yoran dataset. Trained ~970k steps observed.
+
+**Observation:** Two-phase failure.
+
+- **Phase 1 (steps 0 → ~150k): slow magnitude drift.** `embed_z_std` (per-channel std of pre-`F.normalize` projection output) climbed from ~0 to ~50. `grad_norm` stayed bounded at ~0.4 throughout — the `clip_grad_norm_=5.0` threshold never engaged. `probe_top1` peaked at **0.65 in epoch 1** (matching d=512's plateau) then began drifting down.
+- **Phase 2 (~step 150k–200k): single-step catastrophic explosion.** `grad_norm` spiked to ~6.5×10¹⁷ then transitioned to **Infinity** for the remaining ~770k steps. `embed_z_std` jumped to ~3.6M and plateaued. `probe_top1` collapsed to **0.50 (random)** and stayed there.
+
+`d=512_L8` with the identical architecture family (only width differs) bumped to z_std ≈ 60 around step 100k and decayed back to ~50, with probe stable at ~0.65. Phase 2 never triggered at d=512.
+
+**Conclusion:** `MLPProjectionHead` without internal normalization is unsafe at `d_model >= 768`. Mechanism: `F.normalize`'s Jacobian scales with `1/||z||`, so as the projection head drifts to high-magnitude outputs the gradient flowing back through the contrastive loss is damped proportionally. The model can't pull magnitudes back down because the very thing that would supply that gradient is what's being damped. Eventually a single batch produces non-finite gradients; `clip_grad_norm_` cannot recover from this (when `total_norm = Inf`, `clip_coef = 5/Inf = 0`, but `0 × Inf = NaN`, so the clip itself can introduce NaNs into the parameters). After that point every forward produces non-finite values and `grad_norm` is pinned at `Inf` permanently — a zombie run.
+
+The failure is **width-dependent and tied to projection-head capacity**: the head has `O(d_model²)` parameters, so d=768's head has ~21× the capacity of d=128's head. Smaller heads can't drift as easily into the high-magnitude attractor. The encoder is briefly capable at d=768 (epoch 1 probe = 0.65 = d=512's plateau), so this is a head-dynamics problem rather than a fundamental encoder-capacity limit.
+
+**Fix tested in ssl_55:**
+1. Cause-side: `MLPProjectionHeadLN` with LayerNorm between Linear→GELU on hidden layers and a final LayerNorm after the last Linear (immediately before `F.normalize`). Bounds the per-channel scale of the projection output. LN placement mirrors SimCLR v1 §4.2's BN placement (Chen et al. 2020).
+2. Defensive: `_shared_train.py` skips both `optimizer.step()` and `scheduler.step()` when `clip_grad_norm_` returns a non-finite value, with a `nonfinite_skip_count` TB counter. Converts a single bad batch from "permanently corrupts the run" into "one lost step." Should not engage if the LN fix is doing its job.
+
+**Reading:** Wang & Isola, "Understanding Contrastive Representation Learning through Alignment and Uniformity on the Hypersphere" (ICML 2020). Jing et al., "Understanding Dimensional Collapse in Contrastive Self-Supervised Learning" (ICLR 2022). Chen et al., SimCLR v1 §4.2 and Appendix B (NeurIPS 2020) for the original BN-in-projection-head empirical justification.
