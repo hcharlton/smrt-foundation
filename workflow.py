@@ -27,6 +27,19 @@ CONFIG = {
         'chunk_stride': 5,
         'idx_stride': 20,
     },
+    # Build parameters for `scripts/build_ssl_pair_val.py`. Datasets with
+    # an `ssl_pair_val` path entry (below) get a corresponding target
+    # that consumes their raw memmap and produces a frozen pair set with
+    # known gap distances. The 19 default gaps (0..512 in 32-bp steps
+    # plus 1024 and 2048) are the build script's own DEFAULT_GAPS_BP
+    # tuple — overriding them here would hand a `--gaps` flag to the
+    # script. target_len=32 matches the SSL training ctx.
+    'ssl_pair_val': {
+        'target_len': 32,
+        'total_cap': 10_000_000,
+        'shard_size': 100_000,
+        'seed': 42,
+    },
     'datasets': {
         # not on gefion yet
         # 'da1': {
@@ -42,6 +55,7 @@ CONFIG = {
             'memmap': 'data/01_processed/ssl_sets/ob007.memmap',
             'memmap_raw':  'data/01_processed/ssl_sets/ob007_raw.memmap',
             'memmap_filter_qual':  'data/01_processed/ssl_sets/ob007_filter_qual.memmap',
+            'ssl_pair_val': 'data/01_processed/val_sets/ssl_pair_val_ob007_v1.memmap',
             'optional_tags': ['sm', 'sx'],
             'n_reads': 0,
         },
@@ -51,6 +65,7 @@ CONFIG = {
             'memmap': 'data/01_processed/ssl_sets/yoran.memmap',
             'memmap_raw':  'data/01_processed/ssl_sets/yoran_raw.memmap',
             'memmap_filter_qual':  'data/01_processed/ssl_sets/yoran_filter_qual.memmap',
+            'ssl_pair_val': 'data/01_processed/val_sets/ssl_pair_val_yoran_v1.memmap',
             'optional_tags': ['sm', 'sx'],
             'n_reads': 0,
         },
@@ -190,6 +205,50 @@ def memmap_conversion(
         {rc_flag} \
         {norm_flag} \
         {filter_qual_flag}
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+
+def ssl_pair_val_conversion(
+    memmap_path,
+    output_path,
+    target_len=32,
+    total_cap=10_000_000,
+    shard_size=100_000,
+    seed=42,
+):
+    """SSL pair validation set: pre-extracted positive pairs at known
+    non-overlapping gap distances. Source is a raw SSL memmap (e.g.,
+    `yoran_raw.memmap`); output is a frozen pair set sharded by
+    `scripts/build_ssl_pair_val.py`. Used as the held-out diagnostic
+    for any contrastive SSL encoder — `PairedGapMemmapDataset` loads
+    the result and returns `(view1, view2, gap_bp)` per item, the
+    encoder produces embeddings, and per-gap top-1 accuracy /
+    cosine-similarity-vs-gap correlation fall out of the eval pass.
+
+    Per-gap target = total_cap / 19 (the script's DEFAULT_GAPS_BP has 19
+    entries: 0..512 in 32-bp steps plus 1024 and 2048). The script
+    skips per-(read, gap) combinations where the source read's
+    unpadded length can't fit `2*target_len + gap_bp` real bases, so
+    actual per-gap counts may be lower than the target for the
+    largest gaps when the source has many short reads.
+    """
+    inputs = {'in_file': memmap_path}
+    outputs = {'out_file': output_path}
+    options = {'cores': 4, 'memory': '32gb', 'walltime': '04:00:00'}
+
+    spec = f"""
+    source $(conda info --base)/etc/profile.d/conda.sh
+    conda activate data_prep
+    cd {p('')}
+
+    python -m scripts.build_ssl_pair_val \
+        --source_memmap {memmap_path} \
+        --output_path {output_path} \
+        --target_len {target_len} \
+        --total_cap {total_cap} \
+        --shard_size {shard_size} \
+        --seed {seed}
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
@@ -337,6 +396,19 @@ def process_dataset(name, data):
             config_path=CONFIG['data_config']
         )
     )
+
+    if 'ssl_pair_val' in data:
+        gwf.target_from_template(
+            name=f'{name}_to_ssl_pair_val',
+            template=ssl_pair_val_conversion(
+                memmap_path=memmap_target_raw.outputs['out_file'],
+                output_path=data['ssl_pair_val'],
+                target_len=CONFIG['ssl_pair_val']['target_len'],
+                total_cap=CONFIG['ssl_pair_val']['total_cap'],
+                shard_size=CONFIG['ssl_pair_val']['shard_size'],
+                seed=CONFIG['ssl_pair_val']['seed'],
+            )
+        )
 
     if name == 'ob007':
         gwf.target_from_template(
