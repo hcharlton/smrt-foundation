@@ -219,3 +219,114 @@ class AugmentationPolicy:
 
     def __call__(self, x: torch.Tensor):
         return self._one_view(x), self._one_view(x)
+
+
+### Experimental (ssl_56) — neighbor-invariance augmentation
+#
+# Sibling primitive and policy for ssl_56_simclr_neighbor_invariance.
+# Diagnoses the ssl_54/55 failure where the encoder learned same-read
+# membership (global polymerase / kinetic statistics) as its discrimination
+# signal because random_subcrop pairs arbitrary distant windows from the
+# same read. neighbor_pair_subcrop forces positives to share local context:
+# two non-overlapping target_len windows separated by gap_bp real bases on
+# the same molecule. The invariant the encoder is asked to learn becomes
+# short-range neighbor invariance over local kinetic dynamics — aligned
+# with the locality the methylation signal lives at.
+
+
+def neighbor_pair_subcrop(x: torch.Tensor, target_len: int, gap_bp: int):
+    """Sample a pair of non-overlapping `target_len` windows from x's
+    unpadded prefix, with `gap_bp` real (non-pad) bases between view1's end
+    and view2's start.
+
+    Both views are returned together (sharing one anchor draw), which is
+    what makes them a positive in the neighbor-invariance contrastive task.
+
+    Three regimes mirror `random_subcrop`'s behaviour:
+      - unpadded >= 2*target_len + gap_bp: pick a uniform anchor in
+        [0, unpadded - 2*target_len - gap_bp], return view1 from
+        [anchor, anchor + target_len) and view2 from
+        [anchor + target_len + gap_bp, anchor + 2*target_len + gap_bp).
+      - unpadded in [1, 2*target_len + gap_bp): the read is too short for
+        a valid neighbor pair; return two all-pad views (zeros over real
+        channels, 1.0 on the pad channel) so the policy is robust at the
+        short tail of the distribution. This matches the spirit of
+        `random_subcrop`'s short-read fallback.
+      - unpadded == 0: same all-pad fallback.
+    """
+    _, C = x.shape
+    unpadded = _unpadded_length(x)
+    required = 2 * target_len + gap_bp
+
+    if unpadded >= required:
+        max_start = unpadded - required
+        anchor = int(torch.randint(0, max_start + 1, (1,)).item()) if max_start > 0 else 0
+        v1_start = anchor
+        v2_start = anchor + target_len + gap_bp
+        view1 = x[v1_start:v1_start + target_len, :].clone()
+        view2 = x[v2_start:v2_start + target_len, :].clone()
+        return view1, view2
+
+    # Short-read fallback: two all-pad views.
+    out1 = torch.zeros(target_len, C, dtype=x.dtype)
+    out1[:, CH_PAD] = 1.0
+    out2 = torch.zeros(target_len, C, dtype=x.dtype)
+    out2[:, CH_PAD] = 1.0
+    return out1, out2
+
+
+class NeighborPairAugmentationPolicy:
+    """Two-view SimCLR policy where positives are non-overlapping
+    `target_len`-base windows separated by `gap_bp` real bases on the same
+    molecule.
+
+    The invariant the encoder is asked to learn: nearby local kinetic
+    contexts on the same polymerase trace should embed similarly. Per-view
+    perturbations (kinetic channel dropout, Gaussian noise, temporal blur,
+    optional reverse-complement) are applied independently to view1 and
+    view2 with the same per-primitive probabilities as
+    `AugmentationPolicy`. Only the *pair-selection* differs — instead of
+    two independent `random_subcrop` calls, one `neighbor_pair_subcrop`
+    call samples both views together with a shared anchor.
+
+    Constructor signature mirrors `AugmentationPolicy` plus one extra
+    required kwarg `gap_bp`.
+    """
+
+    def __init__(
+        self,
+        target_len: int,
+        gap_bp: int,
+        *,
+        rc_lookup=None,
+        revcomp_p: float = 0.0,
+        channel_dropout_p: float = 0.2,
+        gaussian_noise_p: float = 0.8,
+        gaussian_noise_sigma: float = 0.1,
+        blur_p: float = 0.5,
+        blur_sigma_range=(0.2, 2.0),
+    ):
+        self.target_len = int(target_len)
+        self.gap_bp = int(gap_bp)
+        self.rc_lookup = rc_lookup if rc_lookup is None or torch.is_tensor(rc_lookup) else torch.as_tensor(rc_lookup, dtype=torch.long)
+        self.revcomp_p = float(revcomp_p)
+        self.channel_dropout_p = float(channel_dropout_p)
+        self.gaussian_noise_p = float(gaussian_noise_p)
+        self.gaussian_noise_sigma = float(gaussian_noise_sigma)
+        self.blur_p = float(blur_p)
+        self.blur_sigma_range = tuple(blur_sigma_range)
+
+    def _apply_perview(self, v: torch.Tensor) -> torch.Tensor:
+        if self.rc_lookup is not None and self.revcomp_p > 0 and float(torch.rand(1).item()) < self.revcomp_p:
+            v = reverse_complement(v, self.rc_lookup)
+        if self.channel_dropout_p > 0 and float(torch.rand(1).item()) < self.channel_dropout_p:
+            v = kinetics_channel_dropout(v, p_drop=1.0)
+        if self.gaussian_noise_p > 0 and float(torch.rand(1).item()) < self.gaussian_noise_p:
+            v = kinetics_gaussian_noise(v, self.gaussian_noise_sigma)
+        if self.blur_p > 0 and float(torch.rand(1).item()) < self.blur_p:
+            v = kinetics_temporal_blur(v, self.blur_sigma_range)
+        return v
+
+    def __call__(self, x: torch.Tensor):
+        v1, v2 = neighbor_pair_subcrop(x, self.target_len, self.gap_bp)
+        return self._apply_perview(v1), self._apply_perview(v2)

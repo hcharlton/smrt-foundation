@@ -1,0 +1,65 @@
+experiment_type: 'ssl'
+experiment_name: '56_simclr_neighbor_invariance_gap32'
+run_message: >
+  ssl_56 — gap_32 sub-experiment. Positives are two non-overlapping
+  32-base windows separated by 32 real bases on the same molecule
+  (gap = window length, total span 96 bases). Mid-tight in the
+  four-way sweep; tests whether windows ~one window apart produce a
+  good locality scale for CpG-aware features. d=128 L=4 anchor only;
+  4 GPUs × bs=1024 preserves ssl_55_d128's effective negative count.
+  SimCLRSmrtLN encoder + non-finite-grad skip. Yoran dataset.
+
+resources:
+  cores: 32
+  memory: 128gb
+  walltime: "30:00:00"
+  gres: gpu:4
+  num_processes: 4
+
+ssl_dataset: 'yoran_raw.memmap'
+
+probe_pos_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+data_config: 'configs/data.yaml'
+
+resume_from: ''
+
+simclr:
+  d_model: 128
+  n_head: 2
+  n_layers: 4
+  context: 32
+  projection_dim: 128
+  projection_layers: 2
+  temperature: 0.1
+  epochs: 50
+  ds_limit: 0
+  batch_size: 1024
+  optimizer: 'AdamW'
+  max_lr: 3.0e-4
+  weight_decay: 1.0e-4
+  pct_start: 0.05
+  grad_clip: 5.0
+  probe_every_steps: 10000
+  checkpoint_every_steps: 10000
+  resume_every_steps: 10000
+  chunk_size: 2048
+
+augment:
+  gap_bp: 32
+  revcomp_p: 0.0
+  channel_dropout_p: 0.2
+  gaussian_noise_p: 0.8
+  gaussian_noise_sigma: 0.1
+  blur_p: 0.5
+  blur_sigma_range: [0.2, 2.0]
+
+probe:
+  context: 32
+  batch_size: 512
+  epochs: 3
+  lr: 3.0e-3
+  ds_limit: 500000

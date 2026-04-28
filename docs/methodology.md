@@ -201,3 +201,23 @@ with torch.no_grad():
 - *Bit-exact reproducibility.* Verified end-to-end: `train_norm_fn(x)` and `KineticsNorm.load_stats(ckpt)(x)` produce identical outputs at float32 precision, not "within sampling noise". This matters because a 1e-4 shift in normalization is enough to nudge near-boundary CpG classifications across threshold.
 - *No training data required at inference.* Re-instantiating `KineticsNorm(ds)` needs the full training dataset on disk to sample from. `load_stats(ckpt)` only needs the checkpoint file, which is useful for deployment, cross-cluster reproducibility, and sharing a model without shipping the corpus.
 - *Symmetric API.* `save_stats()` on the training side pairs 1:1 with `load_stats()` on the inference side. Any code reviewer can read a single line (`**norm_fn.save_stats()`) and immediately know what's in the checkpoint and how to load it back.
+
+## 2026-04-28: Contrastive SSL experiments named for the invariant encoded
+
+**Decision:** Contrastive (SimCLR-family) SSL experiments are named for the *invariant the encoder is being asked to learn*, not the architectural mechanism. The invariant is the property of the input that the encoder is trained to ignore — equivalently, the property that defines what makes two views a positive pair.
+
+Examples:
+- `ssl_56_simclr_neighbor_invariance` — positives are nearby windows on the same molecule; encoder asked to be invariant to small position shifts.
+- A future `ssl_NN_simclr_strand_invariance` — positives are fwd and rev kinetic passes of the same molecule; encoder asked to be invariant to which strand the polymerase traversed.
+- *Not:* `ssl_56_simclr_localpair` (mechanism description), `ssl_56_simclr_lnhead_v2` (architectural revision label).
+
+Sub-experiment subdirectories within a single contrastive experiment can describe the *parameter being varied* (e.g., `gap_16/`, `gap_32/` in ssl_56) — that's a property of the sweep design and doesn't violate the convention.
+
+Architectural tweaks orthogonal to the invariant (e.g., `ssl_55_simclr_grid_lnhead` — a LayerNorm fix to the projection head) keep the mechanism-based naming, since they're testing a fix to the architecture given the invariant, not exploring a different invariant.
+
+**Justification:**
+- *Experiment log readability.* The log becomes a record of which invariants did or didn't transfer to the downstream task (CpG methylation classification), not a list of loss formulations or architectural revisions. Two contrastive runs with the same architecture but different positive-pair definitions are testing fundamentally different hypotheses about what features transfer; the directory name should make that explicit.
+- *Future-proofing.* When the project moves on from contrastive SSL or adds non-SimCLR contrastive methods (e.g., MoCo, DINO), the invariant-named directories still describe what was learned. A method-named directory (`ssl_NN_simclr_*`) becomes meaningless if the method is later replaced.
+- *Discoverability.* When asking "have we already tested whether the encoder should be position-invariant within a read?", the answer is in the directory name, not in the README of one of N similarly-named runs.
+
+**Scope:** This convention applies to *contrastive* (positive/negative pair) SSL only. Masked-prediction SSL (Smrt2Vec, autoencoder lineages) names by mechanism since the invariant framing doesn't directly apply — there's no positive/negative pair, only "predict the masked thing." Supervised experiments name by what they're testing (data scaling, baseline control, etc.).
