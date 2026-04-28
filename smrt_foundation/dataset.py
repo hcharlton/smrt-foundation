@@ -128,6 +128,115 @@ def compute_log_normalization_stats(df, features, epsilon=1):
     stds = {col: clean(col).std() for col in features}
     return means, stds
 
+class PairedGapMemmapDataset(Dataset):
+    """Frozen SSL pair validation set with known gap distances.
+
+    Loads positive pairs from a directory written by
+    `scripts/build_ssl_pair_val.py`. Each pair is a (view1, view2) tuple
+    of non-overlapping `target_len`-base windows from the same molecule,
+    separated by a known number of real (non-pad) bases. The integer gap
+    label is exposed alongside the views so the eval loop can compute
+    per-gap top-k accuracy / cosine-sim correlation without any extra
+    bookkeeping.
+
+    Directory layout (mirrors the build script):
+        <data_dir>/
+            pairs/
+                shard_00000.npy    # shape (shard_size, 2, T, n_features) float16
+                shard_00001.npy
+                ...
+            gaps.npy                # shape (N_total,) int32
+            metadata.yaml           # gaps used, target_len, source, etc.
+
+    Args:
+        data_dir: Path to the val set directory.
+        norm_fn: Optional normalization callable (e.g. KineticsNorm). When
+            provided it is applied independently to view1 and view2 — same
+            semantics as `LabeledMemmapDataset.norm_fn`.
+        cache_size: Max number of shard memmaps held open at once. LRU.
+        gap_filter: Optional iterable of gap_bp values to restrict the
+            dataset to (useful for evaluating one gap at a time without
+            loading the rest). When None, all pairs are exposed.
+        limit: If > 0, cap the total number of pairs returned.
+
+    `__getitem__(idx)` returns `(view1, view2, gap_bp)` where view1 and
+    view2 are float tensors of shape `(target_len, n_features)` and
+    `gap_bp` is a Python int.
+    """
+
+    def __init__(self, data_dir, norm_fn=None, cache_size=100, gap_filter=None, limit=0):
+        self.data_dir = os.path.expandvars(data_dir)
+        self.pairs_dir = os.path.join(self.data_dir, "pairs")
+        self.shard_paths = sorted(glob.glob(os.path.join(self.pairs_dir, "*.npy")))
+        if not self.shard_paths:
+            raise FileNotFoundError(f"No pair shards found in {self.pairs_dir}")
+
+        # Load gap sidecar.
+        gaps_path = os.path.join(self.data_dir, "gaps.npy")
+        if not os.path.exists(gaps_path):
+            raise FileNotFoundError(f"Missing gaps sidecar at {gaps_path}")
+        self.gaps_all = np.load(gaps_path)
+
+        # Compute shard sizes from the actual files (last shard may be partial).
+        first_shard = np.load(self.shard_paths[0], mmap_mode='r')
+        self.shard_size = int(first_shard.shape[0])
+        last_shard = np.load(self.shard_paths[-1], mmap_mode='r')
+        full_len = (len(self.shard_paths) - 1) * self.shard_size + int(last_shard.shape[0])
+        if full_len != len(self.gaps_all):
+            raise ValueError(
+                f"Pair count mismatch: {full_len} pairs in shards but "
+                f"{len(self.gaps_all)} entries in gaps.npy. Build script "
+                f"or directory has been corrupted."
+            )
+
+        # Apply gap filter (and optional limit) to derive the index list
+        # this dataset actually exposes. Original (unfiltered) shard
+        # offsets stay in self.gaps_all so the cache key arithmetic is
+        # straightforward.
+        if gap_filter is not None:
+            mask = np.isin(self.gaps_all, np.asarray(list(gap_filter), dtype=np.int32))
+            self.indices = np.nonzero(mask)[0]
+        else:
+            self.indices = np.arange(full_len, dtype=np.int64)
+        if limit and limit > 0:
+            self.indices = self.indices[:limit]
+
+        self.cache_size = cache_size
+        self.norm_fn = norm_fn
+        self.memmaps = OrderedDict()
+
+    def __len__(self):
+        return int(len(self.indices))
+
+    def __getitem__(self, idx):
+        if idx < 0 or idx >= len(self.indices):
+            raise IndexError(f"Index {idx} out of range")
+        true_idx = int(self.indices[idx])
+        shard_idx, local_idx = divmod(true_idx, self.shard_size)
+        if shard_idx not in self.memmaps:
+            if len(self.memmaps) >= self.cache_size:
+                self.memmaps.popitem(last=False)
+            self.memmaps[shard_idx] = np.load(self.shard_paths[shard_idx], mmap_mode='r')
+        else:
+            self.memmaps.move_to_end(shard_idx)
+        pair = np.array(self.memmaps[shard_idx][local_idx])  # (2, T, C)
+        v1 = torch.from_numpy(pair[0]).float()
+        v2 = torch.from_numpy(pair[1]).float()
+        if self.norm_fn is not None:
+            v1 = self.norm_fn(v1)
+            v2 = self.norm_fn(v2)
+        return v1, v2, int(self.gaps_all[true_idx])
+
+    @property
+    def gaps(self):
+        """Per-sample gap labels for the *exposed* (post-filter) indices.
+
+        Convenience for downstream batch-stratified evaluators that need
+        to know each sample's gap without calling `__getitem__`.
+        """
+        return self.gaps_all[self.indices]
+
+
 class PairedViewDataset(Dataset):
     """Wrap any Dataset that yields a single tensor and return (view1, view2).
 

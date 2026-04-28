@@ -1,4 +1,4 @@
-"""Shared SimCLR v1 training loop for ssl_55 — LayerNorm projection head
+"""Shared SimCLR v1 training loop for ssl_55: LayerNorm projection head
 + defensive non-finite-grad skip.
 
 Derived from ssl_54_simclr_grid_yoran/_shared_train.py with two changes:
@@ -9,7 +9,7 @@ Derived from ssl_54_simclr_grid_yoran/_shared_train.py with two changes:
      plus a final LN before `F.normalize` in NTXent). This bounds the
      per-channel scale of the projection output and prevents the
      magnitude-runaway failure observed in ssl_54 at d=768
-     (`embed_z_std → 3.6M`, probe collapsed 0.65 → 0.50). The encoder is
+     (`embed_z_std -> 3.6M`, probe collapsed 0.65 -> 0.50). The encoder is
      unchanged, so checkpoints remain key-compatible with
      `DirectClassifier.encoder` for downstream fine-tuning.
 
@@ -18,8 +18,8 @@ Derived from ssl_54_simclr_grid_yoran/_shared_train.py with two changes:
      both skipped for that batch and a `nonfinite_skip_count` TB scalar is
      incremented. The optimiser's grads are still cleared at the top of
      the next iteration. This converts the ssl_54 d=768 failure mode
-     (single bad batch → Inf grad → `clip_grad_norm_` returns Inf →
-     `0 × Inf = NaN` corrupts weights → grad_norm pinned at Inf forever)
+     (single bad batch -> Inf grad -> `clip_grad_norm_` returns Inf ->
+     `0 x Inf = NaN` corrupts weights -> grad_norm pinned at Inf forever)
      from run-ending into one lost step. With the LN head fix this
      counter is expected to stay at 0; it fires only as a safety net.
 
@@ -476,7 +476,7 @@ def main():
             grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_norm=float(c['grad_clip']))
             # ssl_54 d=768 lesson: when grad_norm is non-finite,
             # `clip_grad_norm_` itself can introduce NaNs (5/Inf=0,
-            # 0×Inf=NaN), and a single NaN parameter corrupts the run
+            # 0xInf=NaN), and a single NaN parameter corrupts the run
             # forever. Skip the optimiser/scheduler steps in that case so
             # the bad batch is dropped instead of propagated.
             assert grad_norm is not None, "clip_grad_norm_ returned None — model has no params with grads"
@@ -652,7 +652,7 @@ def main():
             end_top1 = last[-1][1]
             non_dec = all(last[i][1] >= last[i - 1][1] - 0.005 for i in range(1, len(last)))
             passed = end_top1 >= 0.63 and non_dec
-            print(f"Pass criterion: probe_top1 >= 0.63 AND non-decreasing → {'PASS' if passed else 'FAIL'} (end {end_top1:.4f})")
+            print(f"Pass criterion: probe_top1 >= 0.63 AND non-decreasing -> {'PASS' if passed else 'FAIL'} (end {end_top1:.4f})")
 
     accelerator.end_training()
 
