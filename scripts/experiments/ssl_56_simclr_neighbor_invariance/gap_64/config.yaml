@@ -24,6 +24,8 @@ probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
 probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
 probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
 
+ssl_pair_val: 'data/01_processed/val_sets/ssl_pair_val_yoran_v1.memmap'
+
 data_config: 'configs/data.yaml'
 
 resume_from: ''

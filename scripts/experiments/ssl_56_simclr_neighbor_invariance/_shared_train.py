@@ -55,7 +55,7 @@ if module_path not in sys.path:
 
 from smrt_foundation.dataset import (
     ShardedMemmapDataset, LabeledMemmapDataset, PairedViewDataset,
-    ChunkedRandomSampler,
+    PairedGapMemmapDataset, ChunkedRandomSampler,
 )
 from smrt_foundation.model import SimCLRSmrtLN
 from smrt_foundation.loss import NTXent
@@ -212,6 +212,115 @@ def linear_probe_eval(encoder, probe_config, config, accelerator, norm_fn):
     torch.cuda.empty_cache()
 
     return top1, auroc
+
+
+def ssl_pair_val_eval(
+    unwrapped_model,
+    val_data_dir,
+    accelerator,
+    norm_fn,
+    temperature,
+    batch_size=1024,
+    limit_per_gap=10000,
+):
+    """Per-gap SSL pair val metrics on the frozen `PairedGapMemmapDataset`.
+
+    Mirrors `linear_probe_eval`'s "every rank computes the same thing
+    independently, only rank 0 logs" pattern: the DataLoader is *not*
+    `accelerator.prepare`'d, so each rank sees the full per-gap subset
+    and the metrics are deterministic across ranks (no sync needed).
+
+    Returned dict has TB-friendly slash-separated keys:
+      val_ssl/loss_gap_{g}, val_ssl/top1_gap_{g}, val_ssl/pos_cos_gap_{g}
+    plus a single global summary `val_ssl/spearman_cos_vs_gap` (Spearman
+    of mean-positive-cosine-similarity vs gap_bp). Spearman > 0 means
+    cos sim grows with gap (encoder over-fit to position); < 0 means
+    cos sim drops with gap (locality preserved); ≈ 0 means invariance.
+
+    The per-batch contrastive matching uses B candidates per query
+    (no all-gather across ranks), so `val_ssl/loss_gap_{g}` is on a
+    smaller-pool denominator than `train_loss`. The trends and shape
+    are what matter — absolute magnitudes between the two won't
+    line up perfectly.
+    """
+    device = accelerator.device
+    unwrapped_model.eval()
+
+    # One full instantiation to discover which gap values are actually
+    # present in this val set (the build script may have skipped some
+    # gaps if every read was too short, though for yoran that won't
+    # happen). Cheap: just opens gaps.npy + the first/last shard.
+    full_ds = PairedGapMemmapDataset(val_data_dir, norm_fn=norm_fn)
+    unique_gaps = sorted(set(int(g) for g in full_ds.gaps_all))
+    del full_ds
+
+    metrics = {}
+    pos_cos_at_gap_means = []  # list of (gap_bp, mean_pos_cos) for spearman
+
+    for g in unique_gaps:
+        ds_g = PairedGapMemmapDataset(
+            val_data_dir, norm_fn=norm_fn,
+            gap_filter=[g], limit=limit_per_gap,
+        )
+        if len(ds_g) == 0:
+            continue
+        dl = DataLoader(
+            ds_g, batch_size=batch_size,
+            num_workers=2, shuffle=False, drop_last=False,
+        )
+
+        loss_sum = 0.0
+        top1_sum = 0
+        pos_cos_sum = 0.0
+        n_total = 0
+
+        for v1, v2, _gap_batch in dl:
+            v1, v2 = v1.to(device), v2.to(device)
+            B = v1.shape[0]
+            if B < 2:
+                # Cross-entropy needs at least one negative per query.
+                continue
+            with torch.no_grad():
+                z1, z2 = unwrapped_model(v1, v2)
+                z1n = torch.nn.functional.normalize(z1, dim=-1)
+                z2n = torch.nn.functional.normalize(z2, dim=-1)
+                sim = (z1n @ z2n.T) / temperature  # [B, B]
+                targets = torch.arange(B, device=device)
+                ce = torch.nn.functional.cross_entropy(sim, targets, reduction='sum')
+                top1 = (sim.argmax(dim=1) == targets).long().sum()
+                pos_cos = (z1n * z2n).sum(dim=-1).sum()
+            loss_sum += float(ce.item())
+            top1_sum += int(top1.item())
+            pos_cos_sum += float(pos_cos.item())
+            n_total += B
+
+        if n_total == 0:
+            continue
+        mean_loss = loss_sum / n_total
+        mean_top1 = top1_sum / n_total
+        mean_pos_cos = pos_cos_sum / n_total
+        metrics[f'val_ssl/loss_gap_{g}'] = mean_loss
+        metrics[f'val_ssl/top1_gap_{g}'] = mean_top1
+        metrics[f'val_ssl/pos_cos_gap_{g}'] = mean_pos_cos
+        pos_cos_at_gap_means.append((g, mean_pos_cos))
+
+    # Spearman(mean_pos_cos, gap) — Pearson on rank-transformed values.
+    # Need at least 3 distinct gaps for a meaningful correlation.
+    if len(pos_cos_at_gap_means) >= 3:
+        gs_t = torch.tensor([x[0] for x in pos_cos_at_gap_means], dtype=torch.float64)
+        ms_t = torch.tensor([x[1] for x in pos_cos_at_gap_means], dtype=torch.float64)
+        gs_ranks = gs_t.argsort().argsort().to(torch.float64)
+        ms_ranks = ms_t.argsort().argsort().to(torch.float64)
+        gs_norm = gs_ranks - gs_ranks.mean()
+        ms_norm = ms_ranks - ms_ranks.mean()
+        denom = (gs_norm.pow(2).sum().sqrt() * ms_norm.pow(2).sum().sqrt()).item()
+        if denom > 0:
+            metrics['val_ssl/spearman_cos_vs_gap'] = float(
+                (gs_norm * ms_norm).sum().item() / denom
+            )
+
+    torch.cuda.empty_cache()
+    return metrics
 
 
 def build_policy(aug_cfg, data_config_path):
@@ -583,6 +692,30 @@ def main():
                             f"step {global_step}: probe_top1={probe_top1:.4f}  "
                             f"probe_auroc={probe_auroc:.4f}  (recent loss={current_loss:.4f})"
                         )
+
+                    # Per-gap SSL pair val eval — tells us whether the
+                    # framework is learning the SSL task itself, separate
+                    # from CpG transfer. Opt-in via config['ssl_pair_val'].
+                    if config.get('ssl_pair_val'):
+                        ssl_val_metrics = ssl_pair_val_eval(
+                            unwrapped, config['ssl_pair_val'],
+                            accelerator, ssl_norm,
+                            temperature=float(c['temperature']),
+                            batch_size=int(c.get('val_pair_batch_size', 1024)),
+                            limit_per_gap=int(c.get('val_pair_limit_per_gap', 10000)),
+                        )
+                        if accelerator.is_main_process:
+                            accelerator.log(ssl_val_metrics, step=global_step)
+                            rho = ssl_val_metrics.get(
+                                'val_ssl/spearman_cos_vs_gap', float('nan'))
+                            top1_g32 = ssl_val_metrics.get(
+                                'val_ssl/top1_gap_32', float('nan'))
+                            print(
+                                f"step {global_step}: ssl_pair_val "
+                                f"spearman_cos_vs_gap={rho:.3f} "
+                                f"top1_gap_32={top1_g32:.3f}"
+                            )
+
                     accelerator.wait_for_everyone()
                     model.train()
                     # Reset step-time timer so probe wall time doesn't
