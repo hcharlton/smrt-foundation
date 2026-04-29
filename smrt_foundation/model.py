@@ -980,3 +980,88 @@ class SimCLRSmrtLN(nn.Module):
     z = self._encode_pool_project(x)
     B = view1.shape[0]
     return z[:B], z[B:]
+
+
+### EXPERIMENTAL (ssl_57) — input-masked predictor with LN projection head
+#
+# Sibling of Smrt2VecInputMask above. Adds the same LN-bounded projection
+# head pattern that ssl_55 used to fix the d=768 magnitude-runaway in the
+# SimCLR head, applied to the per-position projection that feeds AgInfoNCE.
+# The encoder is unchanged, so encoder-only checkpoints stay drop-in
+# compatible with DirectClassifier and the existing Smrt2VecInputMask for
+# downstream fine-tuning. The original Smrt2VecInputMask is preserved
+# unchanged for ssl_21 reproducibility.
+
+
+class Smrt2VecInputMaskLN(nn.Module):
+  """Smrt2VecInputMask sibling whose `project` MLP has LayerNorm both
+  between hidden Linear/GELU and immediately before the AgInfoNCE
+  `F.normalize`. Bounds the per-channel scale of the projected
+  per-position output, eliminating the same unbounded-magnitude pathway
+  that ssl_55 fixed for the SimCLR head.
+
+  Forward signature matches Smrt2VecInputMask: returns
+  `(c_proj, targets, mask_idx)` for AgInfoNCE consumption.
+  """
+  def __init__(self, d_model=128, n_layers=4, n_head=4, max_len=4096, p_mask=0.05, mask_size=10):
+    super().__init__()
+    self.d_model = d_model
+    self.p_mask = p_mask
+    self.mask_size = mask_size
+    self.encoder = SmrtEncoder(d_model, n_layers, n_head, max_len)
+
+    self.project = nn.Sequential(
+        nn.Linear(d_model, d_model),
+        nn.LayerNorm(d_model),
+        nn.GELU(),
+        nn.Linear(d_model, d_model),
+        nn.LayerNorm(d_model),
+    )
+
+  def apply_input_mask(self, x, p_mask, mask_size):
+    """Mask kinetics channels at the input level (before CNN).
+
+    Identical to Smrt2VecInputMask.apply_input_mask: zeros kinetics
+    (channels 1, 2) at random contiguous spans, preserves sequence and
+    pad channels.
+    """
+    B, T, C = x.shape
+    pad = x[..., 3]
+
+    mask_centers = (torch.rand(B, T, device=x.device) < p_mask) & ~(pad.bool())
+
+    mask_full = F.max_pool1d(
+        mask_centers.float().unsqueeze(1),
+        kernel_size=mask_size, stride=1,
+        padding=mask_size // 2
+    ).squeeze(1)[:, :T].bool() & ~(pad.bool())
+
+    x_masked = x.clone()
+    x_masked[mask_full, 1] = 0.0
+    x_masked[mask_full, 2] = 0.0
+
+    return x_masked, mask_full
+
+  def _downsample_mask(self, mask, target_len):
+    """Downsample input-resolution mask to CNN output resolution.
+    Conservative: a downsampled position is masked if any of its
+    corresponding input positions were masked.
+    """
+    m = mask.float().unsqueeze(1)
+    m = F.max_pool1d(m, kernel_size=2, stride=2)
+    m = F.max_pool1d(m, kernel_size=2, stride=2)
+    return m.squeeze(1).bool()[:, :target_len]
+
+  def forward(self, x):
+    with torch.no_grad():
+      _, _, targets = self.encoder.get_latents(x)
+
+    x_masked, input_mask = self.apply_input_mask(x, self.p_mask, self.mask_size)
+    z, z_pad, _ = self.encoder.get_latents(x_masked)
+    z = self.encoder.add_pe(z)
+    c = self.encoder.forward_transformer(z, z_pad)
+    c_proj = self.project(c)
+
+    ds_mask = self._downsample_mask(input_mask, z.shape[1])
+
+    return c_proj, targets.detach(), ds_mask
