@@ -222,6 +222,7 @@ def ssl_pair_val_eval(
     temperature,
     batch_size=1024,
     limit_per_gap=10000,
+    name='train',
 ):
     """Per-gap SSL pair val metrics on the frozen `PairedGapMemmapDataset`.
 
@@ -230,18 +231,29 @@ def ssl_pair_val_eval(
     `accelerator.prepare`'d, so each rank sees the full per-gap subset
     and the metrics are deterministic across ranks (no sync needed).
 
+    The `name` arg prefixes every metric key (e.g. 'train' for the
+    in-distribution probe set, 'val' for the held-out set). Calling
+    twice with different names + paths and merging the dicts gives a
+    train/val split where train_top1 vs val_top1 quantifies
+    generalization gap directly. The convention used by ssl_56:
+      name='train' -> yoran pair val (training distribution)
+      name='val'   -> ob007 pair val (held-out, never trained on)
+
     Returned dict has TB-friendly slash-separated keys:
-      val_ssl/loss_gap_{g}, val_ssl/top1_gap_{g}, val_ssl/pos_cos_gap_{g}
-    plus a single global summary `val_ssl/spearman_cos_vs_gap` (Spearman
-    of mean-positive-cosine-similarity vs gap_bp). Spearman > 0 means
-    cos sim grows with gap (encoder over-fit to position); < 0 means
-    cos sim drops with gap (locality preserved); ≈ 0 means invariance.
+      val_ssl/{name}_loss_gap_{g}
+      val_ssl/{name}_top1_gap_{g}
+      val_ssl/{name}_pos_cos_gap_{g}
+    plus a global summary `val_ssl/{name}_spearman_cos_vs_gap`
+    (Spearman of mean-positive-cosine-similarity vs gap_bp).
+    Spearman > 0 means cos sim grows with gap (encoder over-fit to
+    position); < 0 means cos sim drops with gap (locality preserved);
+    ≈ 0 means invariance.
 
     The per-batch contrastive matching uses B candidates per query
-    (no all-gather across ranks), so `val_ssl/loss_gap_{g}` is on a
-    smaller-pool denominator than `train_loss`. The trends and shape
-    are what matter — absolute magnitudes between the two won't
-    line up perfectly.
+    (no all-gather across ranks), so `val_ssl/{name}_loss_gap_{g}` is
+    on a smaller-pool denominator than `train_loss`. Trends and shape
+    are what matter — absolute magnitudes between the two won't line
+    up perfectly.
     """
     device = accelerator.device
     unwrapped_model.eval()
@@ -299,9 +311,9 @@ def ssl_pair_val_eval(
         mean_loss = loss_sum / n_total
         mean_top1 = top1_sum / n_total
         mean_pos_cos = pos_cos_sum / n_total
-        metrics[f'val_ssl/loss_gap_{g}'] = mean_loss
-        metrics[f'val_ssl/top1_gap_{g}'] = mean_top1
-        metrics[f'val_ssl/pos_cos_gap_{g}'] = mean_pos_cos
+        metrics[f'val_ssl/{name}_loss_gap_{g}'] = mean_loss
+        metrics[f'val_ssl/{name}_top1_gap_{g}'] = mean_top1
+        metrics[f'val_ssl/{name}_pos_cos_gap_{g}'] = mean_pos_cos
         pos_cos_at_gap_means.append((g, mean_pos_cos))
 
     # Spearman(mean_pos_cos, gap) — Pearson on rank-transformed values.
@@ -315,7 +327,7 @@ def ssl_pair_val_eval(
         ms_norm = ms_ranks - ms_ranks.mean()
         denom = (gs_norm.pow(2).sum().sqrt() * ms_norm.pow(2).sum().sqrt()).item()
         if denom > 0:
-            metrics['val_ssl/spearman_cos_vs_gap'] = float(
+            metrics[f'val_ssl/{name}_spearman_cos_vs_gap'] = float(
                 (gs_norm * ms_norm).sum().item() / denom
             )
 
@@ -695,25 +707,49 @@ def main():
 
                     # Per-gap SSL pair val eval — tells us whether the
                     # framework is learning the SSL task itself, separate
-                    # from CpG transfer. Opt-in via config['ssl_pair_val'].
-                    if config.get('ssl_pair_val'):
-                        ssl_val_metrics = ssl_pair_val_eval(
-                            unwrapped, config['ssl_pair_val'],
-                            accelerator, ssl_norm,
-                            temperature=float(c['temperature']),
-                            batch_size=int(c.get('val_pair_batch_size', 1024)),
-                            limit_per_gap=int(c.get('val_pair_limit_per_gap', 10000)),
-                        )
+                    # from CpG transfer. Two probe sets:
+                    #   ssl_pair_val_train -> in-distribution (yoran),
+                    #     model has seen these reads during training
+                    #   ssl_pair_val_val   -> held-out (ob007), never
+                    #     in the training source
+                    # Reporting top-1 on both lets us read the
+                    # generalization gap directly: if train_top1 is
+                    # high but val_top1 is at chance, the encoder
+                    # memorized; if both are high, real SSL learning
+                    # happened. Opt-in via either config key.
+                    ssl_pair_val_paths = {}
+                    if config.get('ssl_pair_val_train'):
+                        ssl_pair_val_paths['train'] = config['ssl_pair_val_train']
+                    if config.get('ssl_pair_val_val'):
+                        ssl_pair_val_paths['val'] = config['ssl_pair_val_val']
+
+                    if ssl_pair_val_paths:
+                        combined_metrics = {}
+                        for split_name, split_path in ssl_pair_val_paths.items():
+                            m = ssl_pair_val_eval(
+                                unwrapped, split_path,
+                                accelerator, ssl_norm,
+                                temperature=float(c['temperature']),
+                                batch_size=int(c.get('val_pair_batch_size', 1024)),
+                                limit_per_gap=int(c.get('val_pair_limit_per_gap', 10000)),
+                                name=split_name,
+                            )
+                            combined_metrics.update(m)
                         if accelerator.is_main_process:
-                            accelerator.log(ssl_val_metrics, step=global_step)
-                            rho = ssl_val_metrics.get(
-                                'val_ssl/spearman_cos_vs_gap', float('nan'))
-                            top1_g32 = ssl_val_metrics.get(
-                                'val_ssl/top1_gap_32', float('nan'))
+                            accelerator.log(combined_metrics, step=global_step)
+                            tr_top1 = combined_metrics.get(
+                                'val_ssl/train_top1_gap_32', float('nan'))
+                            va_top1 = combined_metrics.get(
+                                'val_ssl/val_top1_gap_32', float('nan'))
+                            tr_rho = combined_metrics.get(
+                                'val_ssl/train_spearman_cos_vs_gap', float('nan'))
+                            va_rho = combined_metrics.get(
+                                'val_ssl/val_spearman_cos_vs_gap', float('nan'))
                             print(
                                 f"step {global_step}: ssl_pair_val "
-                                f"spearman_cos_vs_gap={rho:.3f} "
-                                f"top1_gap_32={top1_g32:.3f}"
+                                f"train_top1_gap_32={tr_top1:.3f} "
+                                f"val_top1_gap_32={va_top1:.3f} "
+                                f"train_rho={tr_rho:.3f} val_rho={va_rho:.3f}"
                             )
 
                     accelerator.wait_for_everyone()
