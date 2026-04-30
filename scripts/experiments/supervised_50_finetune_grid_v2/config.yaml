@@ -1,0 +1,67 @@
+experiment_type: 'supervised'
+experiment_name: '50_finetune_grid_v2'
+run_message: >-
+  Matrixed fine-tune grid: 4 architectures (d128_L4, d256_L8, d512_L8, d768_L8)
+  x 3 encoder inits (random, ssl_57_300k masked-pred, ssl_55_300k SimCLR) x 3
+  SimCLR-canonical train_sizes (10k / 100k / 8M) = 33 runs in one experiment.
+  ssl_55 has no d=768 (collapsed pre-LN-head fix); see skip list. Single-stage
+  AdamW max_lr=3e-3 schedule (mirrors supervised_46/47/48). min_steps dropped
+  to 100 to let max_epochs govern at small n (avoids the exp_49
+  silent-overtraining bug). Random-init combos at d=256/d=512/d=768 fill in
+  architecture-matched baselines that supervised_47 (d=128 only) doesn't cover.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "24:00:00"
+  gres: gpu:8
+  num_processes: 1
+
+# --- Data (CpG v2 memmaps, identical to supervised_47/48) ---
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+# --- The matrix ---
+architectures:
+  d128_L4: { d_model: 128, n_layers: 4, n_head: 4 }
+  d256_L8: { d_model: 256, n_layers: 8, n_head: 4 }
+  d512_L8: { d_model: 512, n_layers: 8, n_head: 8 }
+  d768_L8: { d_model: 768, n_layers: 8, n_head: 12 }   # n_head=12 keeps head_dim=64
+
+inits:
+  random:
+    checkpoint: null
+  ssl_57_300k:
+    checkpoint_template: 'scripts/experiments/ssl_57_inputmask_grid_lnhead/size_{arch}/checkpoints/final_model.pt'
+  ssl_55_300k:
+    checkpoint_template: 'scripts/experiments/ssl_55_simclr_grid_lnhead/size_{arch}/checkpoints/final_model.pt'
+
+# ssl_55 d=768 collapsed pre-LN-head fix (see docs/negative_results.md
+# 2026-04-27); no usable checkpoint exists.
+skip:
+  - { arch: d768_L8, init: ssl_55_300k }
+
+train_sizes: [10000, 100000, 8000000]
+
+# --- Shared classifier defaults (overridable per-arch above) ---
+classifier:
+  context: 32
+  weight_decay: 0.02
+  pct_start: 0.1
+  max_lr: 3e-3
+  batch_size: 4096
+
+# --- Step budget ---
+# `min_steps: 100` (vs supervised_47's 10000) is load-bearing here. At
+# n=10000, bs=4096, max_epochs=200 the natural budget is ~600 steps; the
+# supervised_47-style min_steps=10000 would force ~3300 epochs over 10k
+# samples = guaranteed memorization. Same lesson as exp 49.
+scaling:
+  val_limit: 1000000
+  max_epochs: 200
+  min_steps: 100
+  max_steps: 400000
+  n_evals: 40
+  first_eval_step: 100
