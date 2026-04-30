@@ -1,0 +1,65 @@
+experiment_type: 'ssl'
+experiment_name: '57_inputmask_grid_lnhead_d128_L4_1m'
+run_message: >
+  ssl_57 — d128_L4 size in the input-masked-prediction scaling grid.
+  Combines ssl_21's learning task (Smrt2VecInputMask + AgInfoNCE) with
+  ssl_55's harness (LayerNorm projection head, non-finite-grad skip,
+  ChunkedRandomSampler, step-based cadences, encoder-only portable
+  ckpts) and ssl_56's per-gap SSL pair val (adapted to non-pair-trained
+  encoders via encoder.forward + center-latent pooling).
+  d=128, L=4, H=2, ctx=4096, bs=64. Mirrors ssl_55_d128_L4 axes.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "48:00:00"
+  gres: gpu:8
+  num_processes: 8
+
+ssl_dataset: 'yoran_raw.memmap'
+
+probe_pos_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+# Two pair-val sets reused verbatim from ssl_56:
+#   "train" = same source as SSL training (yoran, in-distribution)
+#   "val"   = held-out source (ob007, never in training data)
+# The pair-val task isn't this experiment's training objective (which
+# is per-position masked prediction), but it remains a useful diagnostic
+# of whether the encoder produces locally-coherent same-molecule
+# representations.
+ssl_pair_val_train: 'data/01_processed/val_sets/ssl_pair_val_yoran_v1.memmap'
+ssl_pair_val_val:   'data/01_processed/val_sets/ssl_pair_val_ob007_v1.memmap'
+
+resume_from: ''
+
+smrt2vec:
+  d_model: 128
+  n_layers: 4
+  n_head: 2
+  context: 4096
+  p_mask: 0.05
+  mask_size: 10
+  total_steps: 1000000
+  ds_limit: 0
+  batch_size: 64
+  optimizer: 'AdamW'
+  max_lr: 3.0e-4
+  temperature: 0.1
+  max_negatives: 8192
+  weight_decay: 0.02
+  pct_start: 0.10
+  grad_clip: 5.0
+  probe_every_steps: 10000
+  checkpoint_every_steps: 10000
+  resume_every_steps: 10000
+  chunk_size: 2048
+
+probe:
+  context: 32
+  batch_size: 512
+  epochs: 3
+  lr: 3.0e-3
+  ds_limit: 500000
