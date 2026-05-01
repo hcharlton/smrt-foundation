@@ -1,0 +1,53 @@
+experiment_type: 'ssl'
+experiment_name: '57_inputmask_grid_lnhead_d512_L8_1m_v2'
+run_message: >
+  ssl_57 — d512_L8 size in the input-masked-prediction scaling grid.
+  d=512, L=8, H=8, ctx=4096, bs=16. Mirrors ssl_55_d512_L8 axes.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "48:00:00"
+  gres: gpu:8
+  num_processes: 8
+
+ssl_dataset: 'yoran_raw.memmap'
+
+probe_pos_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+ssl_pair_val_train: 'data/01_processed/val_sets/ssl_pair_val_yoran_v1.memmap'
+ssl_pair_val_val:   'data/01_processed/val_sets/ssl_pair_val_ob007_v1.memmap'
+
+resume_from: ''
+
+smrt2vec:
+  d_model: 512
+  n_layers: 8
+  n_head: 8
+  context: 4096
+  p_mask: 0.05
+  mask_size: 10
+  total_steps: 1000000
+  ds_limit: 0
+  batch_size: 16
+  optimizer: 'AdamW'
+  max_lr: 3.0e-4
+  temperature: 0.1
+  max_negatives: 8192
+  weight_decay: 0.02
+  pct_start: 0.03
+  grad_clip: 5.0
+  probe_every_steps: 10000
+  checkpoint_every_steps: 10000
+  resume_every_steps: 10000
+  chunk_size: 2048
+
+probe:
+  context: 32
+  batch_size: 512
+  epochs: 3
+  lr: 3.0e-3
+  ds_limit: 500000
