@@ -72,3 +72,28 @@ The failure is **width-dependent and tied to projection-head capacity**: the hea
 2. Defensive: `_shared_train.py` skips both `optimizer.step()` and `scheduler.step()` when `clip_grad_norm_` returns a non-finite value, with a `nonfinite_skip_count` TB counter. Converts a single bad batch from "permanently corrupts the run" into "one lost step." Should not engage if the LN fix is doing its job.
 
 **Reading:** Wang & Isola, "Understanding Contrastive Representation Learning through Alignment and Uniformity on the Hypersphere" (ICML 2020). Jing et al., "Understanding Dimensional Collapse in Contrastive Self-Supervised Learning" (ICLR 2022). Chen et al., SimCLR v1 §4.2 and Appendix B (NeurIPS 2020) for the original BN-in-projection-head empirical justification.
+
+## 2026-05-04: All Accelerate-Driven SSL Runs Trained at 1/num_processes the Specified Schedule Horizon
+
+**Hypothesis (implicit, never explicitly tested):** `total_steps=N` in an SSL config produces a cosine schedule that bottoms at global step N.
+
+**Experimental Setup:** Investigation triggered by the ssl_57 1m_v2 collapse (`docs/experiment_log.md` 2026-05-01). 1m_v2 was a single-variable warmup-duration fix (`pct_start: 0.10 → 0.03`) over 1m_v1, motivated by the hypothesis that the long warmup destabilized the moving-target AgInfoNCE training. v2 also collapsed. The shared early-trajectory shape between v2 and the 300k run prompted plotting z_std vs cumulative LR (`report/training_dynamics/ssl57_zstd_attractor/`) to test a shared-attractor reading, which led to inspecting the actual LR schedule. Source-checked `accelerate.scheduler.AcceleratedScheduler.step` (accelerate 1.13.0, default `split_batches=False` path).
+
+**Observation:** `accelerator.prepare(scheduler)` wraps the underlying `LambdaLR` as `AcceleratedScheduler`, whose `step()` method advances the wrapped scheduler by `num_processes` per call:
+
+```python
+# accelerate/scheduler.py: AcceleratedScheduler.step()
+else:
+    # the training dataloader batch size was multiplied by `num_processes`,
+    # so we need to do num_processes steps per training step
+    num_processes = AcceleratorState().num_processes
+    for _ in range(num_processes):
+        ...
+        self.scheduler.step(*args, **kwargs)
+```
+
+With 8 GPUs and `total_steps=1000000`, the cosine bottoms at global step **125,000** (= 1M / 8). The remaining 87% of training runs at `min_lr_ratio × max_lr = 0.05 × 3e-4 = 1.5e-5` — effectively frozen. **Every Accelerate-driven SSL run in the project carries this bug**: ssl_53, ssl_54, ssl_55, ssl_56, ssl_57 (300k, 1m, 1m_v2). The supervised harness already had the fix in supervised_40 (`docs/experiment_log.md` 2026-04-16); the SSL harness never inherited it.
+
+**Conclusion:** Single-line patch — remove `scheduler = accelerator.prepare(scheduler)` from `ssl_57_inputmask_grid_lnhead/_shared_train.py:463`. The raw `LambdaLR` from `get_cosine_schedule_with_warmup` (`smrt_foundation/optim.py:5`) is correct; the training loop's per-step `scheduler.step()` advances it by 1 per global step. Applied to ssl_57 in the 1m_v3 row (`docs/experiment_log.md` 2026-05-04). `ssl_55_simclr_grid_lnhead/_shared_train.py` and `ssl_56_simclr_neighbor_invariance/_shared_train.py` carry the same bug; not patched here because those experiments are not being rerun, but the same one-line removal is needed if either is ever resubmitted.
+
+**Caveat for past SSL interpretations:** ssl_53/54/55/56/57 probe trajectories should be read with the schedule-compression confound. The 300k SSL runs effectively trained at full LR for ~37,500 global steps then idled at 1.5e-5 for the remaining 262,500. Patterns previously interpreted as "stable plateau" (300k probe trajectories), "oscillating without monotone improvement" (ssl_55 d=512), or "still climbing at 300k" (ssl_57 300k probe reading from the user-reported screenshots) were partially the encoder not actually training in the late phase. ssl_57 1m_v3 is the first Accelerate-driven SSL run to test the actual schedule horizon. Cross-experiment "did extending help?" questions across the historical SSL log are confounded by the bug.

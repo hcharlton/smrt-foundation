@@ -459,8 +459,13 @@ def main():
     model, optimizer, dl = accelerator.prepare(model, optimizer, dl)
 
     total_steps = int(c['total_steps'])
+    # Do not call accelerator.prepare(scheduler): AcceleratedScheduler.step()
+    # advances the wrapped LambdaLR by num_processes per call (default
+    # split_batches=False path; verified against accelerate==1.13.0 source),
+    # which compresses the schedule horizon by 8x with 8 GPUs. Same fix
+    # supervised_40 applied for the ds_grid lineage (`docs/experiment_log.md`).
+    # The raw LambdaLR is stepped once per global step in the training loop.
     scheduler = get_cosine_schedule_with_warmup(optimizer, total_steps=total_steps, pct_start=c['pct_start'])
-    scheduler = accelerator.prepare(scheduler)
 
     progress_state = ProgressState()
     accelerator.register_for_checkpointing(progress_state)
