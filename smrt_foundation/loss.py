@@ -45,6 +45,23 @@ class AgInfoNCE(nn.Module):
             truth = truth[idx]
 
         if dist.is_initialized():
+            # Sync-min subsample: dist_nn.all_gather requires identical
+            # send-tensor shapes per rank. Per-rank truth.shape[0] varies
+            # with batch composition (variable read lengths × small bs at
+            # large d_model), and the max_negatives cap above only enforces
+            # uniformity when local_count > cap on every rank — which fails
+            # when bs × ctx is small enough that some rank ends up below
+            # the cap. All-reduce the local count to the global minimum
+            # and trim every rank to that. One cheap int all-reduce per
+            # step; pre-empts a NCCL deadlock that surfaced at d=768 bs=8.
+            local_count = torch.tensor(preds.shape[0], device=preds.device, dtype=torch.long)
+            dist.all_reduce(local_count, op=dist.ReduceOp.MIN)
+            global_min = int(local_count.item())
+            if preds.shape[0] > global_min:
+                idx = torch.randperm(preds.shape[0], device=preds.device)[:global_min]
+                preds = preds[idx]
+                truth = truth[idx]
+
             truth_gathered = torch.cat(dist_nn.all_gather(truth), dim=0)
             labels = torch.arange(truth.shape[0], device=truth.device) + (dist.get_rank() * truth.shape[0])
         else:

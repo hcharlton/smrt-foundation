@@ -516,6 +516,67 @@ def main():
                 f"(epoch {epoch_idx+1}, step_in_epoch {step_in_epoch_count}/{len(dl)})")
         accelerator.wait_for_everyone()
 
+    # Step-0 baseline eval: probe + pair val on the random-init encoder
+    # (fresh runs only — `global_step == 0`). Anchors every trajectory at
+    # a calibrated baseline rather than extrapolating back from step
+    # `probe_every_steps`. The probe-head signal alone is non-trivially
+    # above chance (a linear head on a random CNN+transformer can pick
+    # up some class correlation), so the SSL gain is `step_N − step_0`,
+    # not `step_N − 0.5`. Also disambiguates "collapsed at chance" from
+    # "below random init" when probe falls during training.
+    # Skipped on resume: the resumed checkpoint already has its in-run
+    # measurements at `probe_every_steps` cadence.
+    if global_step == 0 and config.get('probe_pos_train'):
+        log("=== step 0 baseline eval (random-init encoder) ===")
+        unwrapped = accelerator.unwrap_model(model)
+        probe_top1, probe_auroc = linear_probe_eval(
+            unwrapped.encoder, config.get('probe', {}),
+            config, accelerator, ssl_norm,
+        )
+        if accelerator.is_main_process:
+            probe_history.append((0, probe_top1, probe_auroc))
+            accelerator.log({
+                'probe_top1': probe_top1,
+                'probe_auroc': probe_auroc,
+            }, step=0)
+            print(
+                f"step 0 baseline: probe_top1={probe_top1:.4f}  "
+                f"probe_auroc={probe_auroc:.4f}"
+            )
+
+        ssl_pair_val_paths = {}
+        if config.get('ssl_pair_val_train'):
+            ssl_pair_val_paths['train'] = config['ssl_pair_val_train']
+        if config.get('ssl_pair_val_val'):
+            ssl_pair_val_paths['val'] = config['ssl_pair_val_val']
+
+        if ssl_pair_val_paths:
+            combined_metrics = {}
+            for split_name, split_path in ssl_pair_val_paths.items():
+                m = ssl_pair_val_eval(
+                    unwrapped.encoder, split_path,
+                    accelerator, ssl_norm,
+                    temperature=float(c['temperature']),
+                    batch_size=int(c.get('val_pair_batch_size', 1024)),
+                    limit_per_gap=int(c.get('val_pair_limit_per_gap', 10000)),
+                    name=split_name,
+                )
+                combined_metrics.update(m)
+            if accelerator.is_main_process:
+                accelerator.log(combined_metrics, step=0)
+                tr_top1 = combined_metrics.get(
+                    'val_ssl/train_top1_gap_32', float('nan'))
+                va_top1 = combined_metrics.get(
+                    'val_ssl/val_top1_gap_32', float('nan'))
+                print(
+                    f"step 0 baseline: ssl_pair_val "
+                    f"train_top1_gap_32={tr_top1:.3f} "
+                    f"val_top1_gap_32={va_top1:.3f}"
+                )
+
+        accelerator.wait_for_everyone()
+        model.train()
+
     # Step-cap outer loop: re-iterate the DataLoader as many epochs as
     # fit until global_step hits total_steps. Epoch counter is bookkeeping
     # for resume's skip_first_batches; the cosine schedule is keyed off
