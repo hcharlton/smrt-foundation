@@ -241,3 +241,72 @@ Submit a size with `bash run.sh scripts/experiments/ssl_57_inputmask_grid_lnhead
   `spearman_cos_vs_gap`.
 - Frozen `PairedGapMemmapDataset` + the existing build under
   `data/01_processed/val_sets/ssl_pair_val_*_v1.memmap/`.
+
+
+# v5
+
+Smallest surface change from v3: swap the encoder's CNN for the
+existing `SmrtEncoderSmallRF` (4 ResBlocks, r0=27, 4x downsampling
+preserved) via a new `Smrt2VecInputMaskLNSmallRF` wrapper. All other
+v3 hyperparameters are preserved verbatim — `max_lr=3e-4`,
+`pct_start=0.03`, 1M steps, `mask_size=10`, `p_mask=0.05`. The LR
+fix is the orthogonal v4 axis; combining the two changes would
+confound attribution.
+
+## Hypothesis
+
+The default CNN's `r0=107` makes the masked-prediction objective
+largely interpolatable at `mask_size=10`. An output latent centred on a
+masked region sees 107 input bases of which only ~10 are masked, so
+~97 unmasked context bases are available to interpolate the masked
+positions. The contrastive signal is therefore partially degenerate at
+every masked position, which plausibly contributes to both the
+epoch-1-peak-then-decay pattern (the encoder learns a useful local
+feature immediately, then has nothing left to learn) and the
+projection-head dimensional collapse seen in v1/v2/v3.
+
+`CNNSmallRF` reduces `r0` to 27 bases. With `mask_size=10` that means
+~37% of each latent's RF is masked — a BERT-style ratio that demands
+genuine context-from-context inference rather than local
+interpolation. If the trivial-shortcut hypothesis is right, v5 should
+either (a) train without collapsing at v3's `max_lr=3e-4` and reach a
+non-trivial probe, or (b) collapse at a different point in the
+trajectory than v3, isolating RF as a contributing factor.
+
+## What changed and why nothing else did
+
+| Component | v3 | v5 | Reason for the choice |
+|---|---|---|---|
+| Encoder CNN | `CNN` (11 ResBlocks, r0=107) | `CNNSmallRF` (4 ResBlocks, r0=27) | Test the trivial-interpolation hypothesis. |
+| Encoder downsampling | 4x | 4x | Preserved so probe head, pair-val adapter, and `_downsample_mask` math are unchanged. |
+| Projection head | `Linear → LN → GELU → Linear → LN` | identical | Same magnitude bound on the contrastive output. |
+| `max_lr` | 3e-4 | 3e-4 | Smallest surface change; isolate the RF variable. |
+| `pct_start` | 0.03 | 0.03 | Carried from v3. |
+| `total_steps` | 1,000,000 | 1,000,000 | Carried from v3. |
+| `mask_size`, `p_mask` | 10, 0.05 | 10, 0.05 | Carried from v3. With RF=27 the mask covers ~37% of each latent's RF, a load-bearing change in the contrastive signal without retuning. |
+| Resume guard arch_keys | 6 keys | 6 keys | No new key added. State-dict mismatch at torch load is sufficient if `resume_from` is misconfigured across variants. |
+| State-dict transferability | n/a | not transferable from default-RF runs | ResBlock counts differ; this is fresh training only. |
+
+## Implementation footprint
+
+- New class `Smrt2VecInputMaskLNSmallRF` in `smrt_foundation/model.py`
+  (subclass of `Smrt2VecInputMaskLN`, swaps `SmrtEncoder` for
+  `SmrtEncoderSmallRF`; forward path inherited unchanged).
+- New config knob `cnn_variant` in `_shared_train.py` (default
+  `'default'`, `'small_rf'` selects the new class). Existing v2/v3/v4
+  configs omit the key and resolve to the original `Smrt2VecInputMaskLN`
+  — fully backward compatible.
+- Four new size dirs `size_<d>_L<L>_1m_v5/` whose configs differ from
+  v3 only by `experiment_name` suffix and `cnn_variant: 'small_rf'`.
+
+## Pass criterion
+
+Same as v3/v4 at d=128 (control / smallest size where ssl_21 trained):
+
+- `probe_top1 ≥ 0.58` at the end (matches ssl_21's reported end value)
+- AND `probe_top1` non-decreasing over the last 3 probe evaluations.
+
+A persistent collapse at v5 would falsify the trivial-shortcut
+hypothesis (or at minimum demote it from sole explanation), at which
+point combining v4's lower LR with v5's smaller RF becomes the next
+move.

@@ -60,7 +60,7 @@ from smrt_foundation.dataset import (
     ShardedMemmapDataset, LabeledMemmapDataset,
     PairedGapMemmapDataset, ChunkedRandomSampler,
 )
-from smrt_foundation.model import Smrt2VecInputMaskLN
+from smrt_foundation.model import Smrt2VecInputMaskLN, Smrt2VecInputMaskLNSmallRF
 from smrt_foundation.loss import AgInfoNCE
 from smrt_foundation.optim import get_cosine_schedule_with_warmup
 from smrt_foundation.normalization import KineticsNorm
@@ -351,6 +351,7 @@ def main():
         'checkpoint_every_steps': 10000,
         'resume_every_steps': 10000,
         'chunk_size': 2048,
+        'cnn_variant': 'default',
     }
     c = DEFAULT | config.get('smrt2vec', {})
     config['smrt2vec'] = c
@@ -435,7 +436,14 @@ def main():
     )
 
     # --- Model / loss / optim ---
-    model = Smrt2VecInputMaskLN(
+    # cnn_variant='default' (RF=107) | 'small_rf' (RF=27, 4x downsampling
+    # preserved). The small_rf path swaps SmrtEncoder for SmrtEncoderSmallRF
+    # via Smrt2VecInputMaskLNSmallRF. State-dicts are not interchangeable
+    # across variants — fresh training only.
+    model_cls = (Smrt2VecInputMaskLNSmallRF
+                 if c['cnn_variant'] == 'small_rf'
+                 else Smrt2VecInputMaskLN)
+    model = model_cls(
         d_model=c['d_model'], n_layers=c['n_layers'], n_head=c['n_head'],
         max_len=c['context'],
         p_mask=float(c['p_mask']), mask_size=int(c['mask_size']),

@@ -1065,3 +1065,35 @@ class Smrt2VecInputMaskLN(nn.Module):
     ds_mask = self._downsample_mask(input_mask, z.shape[1])
 
     return c_proj, targets.detach(), ds_mask
+
+
+class Smrt2VecInputMaskLNSmallRF(Smrt2VecInputMaskLN):
+  """Smrt2VecInputMaskLN sibling using SmrtEncoderSmallRF (CNN r0=27)
+  instead of SmrtEncoder (r0=107). Same 4x CNN downsampling and same
+  forward signature, so _downsample_mask, the project MLP, AgInfoNCE
+  consumption, and the SSL pair-val adapter are all unchanged.
+
+  Motivation: at mask_size=10 in input space, the default RF=107 leaves
+  ~97 unmasked context bases per latent's RF, which makes the
+  masked-prediction objective largely interpolatable. Reducing RF to 27
+  bases makes mask spans cover ~37% of each latent's RF (BERT-style
+  ratio), restoring genuine contrastive signal at every masked position.
+
+  Fresh-training-only: state-dict keys are NOT interchangeable with the
+  default-RF Smrt2VecInputMaskLN (ResBlock counts differ).
+  """
+  def __init__(self, d_model=128, n_layers=4, n_head=4, max_len=4096,
+               p_mask=0.05, mask_size=10):
+    nn.Module.__init__(self)
+    self.d_model = d_model
+    self.p_mask = p_mask
+    self.mask_size = mask_size
+    self.encoder = SmrtEncoderSmallRF(d_model, n_layers, n_head, max_len)
+
+    self.project = nn.Sequential(
+        nn.Linear(d_model, d_model),
+        nn.LayerNorm(d_model),
+        nn.GELU(),
+        nn.Linear(d_model, d_model),
+        nn.LayerNorm(d_model),
+    )
