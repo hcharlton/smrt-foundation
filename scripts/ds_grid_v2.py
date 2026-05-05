@@ -41,7 +41,7 @@ if module_path not in sys.path:
     sys.path.insert(0, module_path)
 
 from smrt_foundation.dataset import LabeledMemmapDataset
-from smrt_foundation.model import DirectClassifier
+from smrt_foundation.model import DirectClassifier, DirectClassifierSmallRF
 from smrt_foundation.optim import get_cosine_schedule_with_warmup
 from smrt_foundation.normalization import KineticsNorm
 
@@ -65,6 +65,11 @@ DEFAULT_CLASSIFIER = {
     'context': 32,
     'weight_decay': 0.02,
     'pct_start': 0.1,
+    # cnn_variant='default' (RF=107, default DirectClassifier) | 'small_rf'
+    # (RF=27, DirectClassifierSmallRF for fine-tuning small-RF SSL encoders
+    # like ssl_30 and ssl_58). Defaults to 'default' so existing configs
+    # without the key (supervised_47/50) keep their behavior unchanged.
+    'cnn_variant': 'default',
 }
 
 
@@ -284,7 +289,17 @@ def train_one_combo(rank, combo, config, experiment_dir, tb_dir):
           f"Epochs: {total_steps / max(steps_per_epoch, 1):.1f}")
 
     # -- Model --
-    model = DirectClassifier(
+    # cnn_variant='small_rf' picks DirectClassifierSmallRF (CNN RF=27),
+    # required for fine-tuning small-RF SSL encoders (ssl_30, ssl_58)
+    # whose encoder.cnn.* state-dict keys are incompatible with the
+    # default 11-block CNN. The two classes share head, forward, and
+    # encoder.{embed,pe,blocks,layer_norm_target} structure, so the
+    # rest of train_one_combo (load_pretrained_encoder, head training,
+    # eval) is encoder-agnostic and needs no further changes.
+    model_cls = (DirectClassifierSmallRF
+                 if c.get('cnn_variant', 'default') == 'small_rf'
+                 else DirectClassifier)
+    model = model_cls(
         d_model=c['d_model'], n_layers=c['n_layers'],
         n_head=c['n_head'], max_len=c['context'],
     )

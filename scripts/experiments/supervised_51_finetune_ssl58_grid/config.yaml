@@ -1,0 +1,71 @@
+experiment_type: 'supervised'
+experiment_name: '51_finetune_ssl58_grid'
+run_message: >-
+  First fine-tune evaluation of the ssl_58 autoencoder grid. Tests
+  whether the +5pp linear-probe gain we saw at d=128 translates into
+  fine-tune accuracy gains over random init at matching architecture.
+  Single-stage AdamW max_lr=3e-3 (mirrors supervised_46/47/48/50).
+  Architectures match ssl_58 exactly (head_dim=64 across all sizes;
+  d=128 has n_head=2, vs supervised_50's n_head=4 at d=128). The
+  random-init baseline here is therefore the correct comparator for
+  ssl_58_d128, at the cost of cross-experiment continuity at d=128.
+  cnn_variant=small_rf dispatches DirectClassifierSmallRF (encoder uses
+  CNNSmallRF, RF=27) to match ssl_58's encoder state-dict keys. 2 inits
+  x 4 archs x 3 train_sizes = 24 runs.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "24:00:00"
+  gres: gpu:8
+  num_processes: 1
+
+# --- Data (CpG v2 memmaps, identical to supervised_50) ---
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+# --- The matrix ---
+# Architectures match ssl_58 head counts exactly so the encoder
+# state-dict (which carries n_head-shaped attention QKV projections)
+# loads cleanly. head_dim = d_model / n_head = 64 throughout.
+architectures:
+  d128_L4: { d_model: 128, n_layers: 4, n_head: 2 }
+  d256_L8: { d_model: 256, n_layers: 8, n_head: 4 }
+  d512_L8: { d_model: 512, n_layers: 8, n_head: 8 }
+  d768_L8: { d_model: 768, n_layers: 8, n_head: 12 }
+
+inits:
+  random:
+    checkpoint: null
+  ssl_58_full:
+    checkpoint_template: 'scripts/experiments/ssl_58_autoencoder_grid/size_{arch}/checkpoints/final_model.pt'
+
+skip: []
+
+train_sizes: [10000, 100000, 8000000]
+
+# --- Shared classifier defaults (overridable per-arch above) ---
+# cnn_variant=small_rf swaps DirectClassifier -> DirectClassifierSmallRF
+# (encoder uses SmrtEncoderSmallRF, CNN RF=27, 4 ResBlocks). State-dict
+# keys for encoder.cnn.* are incompatible with the default 11-block CNN,
+# so this switch is required when loading ssl_58 encoder checkpoints.
+classifier:
+  context: 32
+  weight_decay: 0.02
+  pct_start: 0.1
+  max_lr: 3e-3
+  batch_size: 4096
+  cnn_variant: 'small_rf'
+
+# --- Step budget (same as supervised_50) ---
+# min_steps=100 lets max_epochs govern at small n; supervised_47's
+# min_steps=10000 caused silent overtraining at n=10k.
+scaling:
+  val_limit: 1000000
+  max_epochs: 200
+  min_steps: 100
+  max_steps: 400000
+  n_evals: 40
+  first_eval_step: 100

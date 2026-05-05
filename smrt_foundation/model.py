@@ -774,6 +774,34 @@ class SmrtAutoencoderSmallRF(SmrtAutoencoder):
     self.mask_size = mask_size
 
 
+class DirectClassifierSmallRF(nn.Module):
+  """Supervised classifier using SmrtEncoderSmallRF (CNN RF=27) instead of
+  the default SmrtEncoder (RF=107). Intended for fine-tuning small-RF
+  SSL pretrained encoders (ssl_30, ssl_58) where the source encoder uses
+  CNNSmallRF and the encoder state-dict's `encoder.cnn.*` keys are
+  incompatible with the default DirectClassifier (different ResBlock
+  counts).
+
+  Same head, same forward signature as DirectClassifier. State-dict keys
+  differ in the encoder.cnn.* portion only; encoder.embed, encoder.pe,
+  encoder.layer_norm_target, and encoder.blocks all match the default
+  encoder at matching d_model / n_layers / n_head / max_len.
+  """
+  def __init__(self, d_model, n_layers, n_head, max_len):
+    super().__init__()
+    self.encoder = SmrtEncoderSmallRF(d_model, n_layers, n_head, max_len)
+    self.head = nn.Sequential(
+      nn.Linear(d_model, d_model // 2),
+      nn.GELU(),
+      nn.Linear(d_model // 2, 1),
+    )
+
+  def forward(self, x):
+    c = self.encoder.forward(x)
+    logits = self.head(c[:, c.shape[1] // 2, :])
+    return logits
+
+
 ### SimCLR v1 wrapper
 #
 # SimCLRSmrt composes the existing SmrtEncoder with a small nonlinear
