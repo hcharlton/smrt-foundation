@@ -96,16 +96,32 @@ def get_git_revision_hash():
 
 
 class NormedDataset(Dataset):
-    """Thin wrapper that applies a normalization callable to each sample."""
-    def __init__(self, inner, norm_fn):
+    """Thin wrapper that applies a normalization callable to each sample,
+    plus an optional random crop down to `crop_len` along the time axis.
+
+    The yoran SSL memmap stores reads at native length (~4096). When
+    training at a shorter `context` (e.g. ctx=512 for ssl_58), the model's
+    PositionalEncoding buffer is sized to that context, and feeding a
+    raw-length sample through the encoder hits a shape-mismatch in
+    `PositionalEncoding.forward` (the CNN downsamples 4096 to 1024
+    latents; the PE buffer only has 512 positions). Random-crop down to
+    `crop_len` here so the model always sees inputs at its trained
+    context. ssl_29 set the precedent ("random cropping from 4096→128").
+    """
+    def __init__(self, inner, norm_fn, crop_len=None):
         self.inner = inner
         self.norm_fn = norm_fn
+        self.crop_len = crop_len
 
     def __len__(self):
         return len(self.inner)
 
     def __getitem__(self, idx):
-        return self.norm_fn(self.inner[idx])
+        sample = self.norm_fn(self.inner[idx])
+        if self.crop_len is not None and sample.shape[0] > self.crop_len:
+            start = int(torch.randint(0, sample.shape[0] - self.crop_len + 1, (1,)).item())
+            sample = sample[start:start + self.crop_len]
+        return sample
 
 
 class ProgressState:
@@ -420,7 +436,10 @@ def main():
         if accelerator.is_main_process:
             print(f"SSL norm — means: {ssl_norm.means}, stds: {ssl_norm.stds}")
 
-    normed_ds = NormedDataset(ds, ssl_norm)
+    # Random-crop each yoran read (~4096 bp native) to ctx for training.
+    # Probe and pair-val datasets are at ctx=32 already and aren't wrapped
+    # by NormedDataset, so this only affects the SSL training stream.
+    normed_ds = NormedDataset(ds, ssl_norm, crop_len=int(c['context']))
 
     sampler = ChunkedRandomSampler(normed_ds, c['chunk_size'], shuffle_within=True)
     dl = DataLoader(
