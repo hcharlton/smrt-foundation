@@ -402,6 +402,7 @@ def main():
     project_namespace = f"{exp_type}/{exp_name}"
 
     tracker = None
+    csv_path = None
     if accelerator.is_main_process:
         accelerator.init_trackers(project_namespace)
         tracker = accelerator.get_tracker('tensorboard')
@@ -409,6 +410,20 @@ def main():
         with open(os.path.join(run_dir, 'hparams.yaml'), 'w') as f:
             yaml.dump(config, f)
         tracker.writer.add_text('Full_Config', f"```yaml\n{yaml.dump(config, indent=2)}\n```", 0)
+
+        # Per-eval CSV: one row per probe evaluation (including step-0
+        # baseline), written by the main process. Same metrics as the
+        # corresponding TB scalars, but in a flat file for offline plotting
+        # / cross-experiment aggregation. Header written once at run start;
+        # rows appended by the eval block at every probe tick.
+        import csv as _csv_mod
+        csv_path = os.path.join(run_dir, 'probe_history.csv')
+        with open(csv_path, 'w', newline='') as f:
+            _csv_mod.writer(f).writerow([
+                'step', 'probe_top1', 'probe_auroc',
+                'val_ssl_train_top1_gap_32', 'val_ssl_val_top1_gap_32',
+                'val_ssl_train_spearman_cos_vs_gap', 'val_ssl_val_spearman_cos_vs_gap',
+            ])
 
     # --- Dataset & normalization ---
     dataset_name = config.get('ssl_dataset', 'yoran_raw.memmap')
@@ -442,9 +457,20 @@ def main():
     normed_ds = NormedDataset(ds, ssl_norm, crop_len=int(c['context']))
 
     sampler = ChunkedRandomSampler(normed_ds, c['chunk_size'], shuffle_within=True)
+    # num_workers=6, prefetch_factor=8: bumped from ssl_57's (4, 4) defaults
+    # because at ctx=512 with bs scaled 8x to match activation memory, the
+    # smaller-model sizes (d=128/d=256) became dataloader-bound — d=128
+    # was running at ~5 it/s vs d=768's ~20 it/s, opposite of the FLOPs-
+    # ratio expectation. More workers absorb intermittent IO-wait
+    # (kernel side; CPU oversubscription at 6×8=48 workers on 32 cores
+    # is real but workers spend most wallclock blocked on disk, not
+    # spinning). Bigger prefetch buffer (8 vs 4) absorbs the multi-second
+    # p95 tails that profile_ssl51_dataloader_grid identified. The larger
+    # sizes (d=512/d=768) aren't dataloader-bound and see no change in
+    # steady-state throughput from these knobs.
     dl = DataLoader(
-        normed_ds, batch_size=c['batch_size'], num_workers=4,
-        pin_memory=True, prefetch_factor=4,
+        normed_ds, batch_size=c['batch_size'], num_workers=6,
+        pin_memory=True, prefetch_factor=8,
         shuffle=False, sampler=sampler,
         persistent_workers=True,
     )
@@ -499,8 +525,8 @@ def main():
         print(f"Steps per epoch: {len(dl)}, Total steps: {total_steps}")
         print(f"Warmup steps: {int(total_steps * c['pct_start'])}")
         print(
-            f"Probe every {c['probe_every_steps']} global steps, "
-            f"milestone ckpt every {c['checkpoint_every_steps']} global steps, "
+            f"Probe every {c['probe_every_steps']} global steps "
+            f"(encoder milestone .pt + probe_history.csv row tied to each probe), "
             f"resume ckpt every {c['resume_every_steps']} global steps"
         )
 
@@ -524,6 +550,39 @@ def main():
             log(f"[resume] saved latest/ at global_step {global_step_count} "
                 f"(epoch {epoch_idx+1}, step_in_epoch {step_in_epoch_count}/{len(dl)})")
         accelerator.wait_for_everyone()
+
+    def _save_milestone(step, epoch_idx, step_in_epoch_count):
+        """Encoder-only portable milestone for downstream inference.
+        Tied to every probe eval (including step-0 baseline) so each row
+        of probe_history.csv has a corresponding loadable artifact.
+        """
+        if accelerator.is_main_process:
+            unwrapped = accelerator.unwrap_model(model)
+            save_path = os.path.join(checkpoint_dir, f'step_{step}.pt')
+            torch.save({
+                'encoder_state_dict': unwrapped.encoder.state_dict(),
+                'config': config,
+                'epoch': epoch_idx,
+                'global_step': step,
+                'step_in_epoch': step_in_epoch_count,
+                **ssl_norm.save_stats(),
+            }, save_path)
+            print(f"Saved encoder checkpoint to {save_path}")
+        accelerator.wait_for_everyone()
+
+    def _log_eval_csv(step, probe_top1, probe_auroc, pair_metrics):
+        """Append one row per probe eval to <run_dir>/probe_history.csv."""
+        if not accelerator.is_main_process or csv_path is None:
+            return
+        import csv as _csv_mod
+        with open(csv_path, 'a', newline='') as f:
+            _csv_mod.writer(f).writerow([
+                step, probe_top1, probe_auroc,
+                pair_metrics.get('val_ssl/train_top1_gap_32', float('nan')),
+                pair_metrics.get('val_ssl/val_top1_gap_32', float('nan')),
+                pair_metrics.get('val_ssl/train_spearman_cos_vs_gap', float('nan')),
+                pair_metrics.get('val_ssl/val_spearman_cos_vs_gap', float('nan')),
+            ])
 
     # Step-0 baseline eval: probe + pair val on the random-init encoder
     # (fresh runs only — `global_step == 0`). Anchors every trajectory at
@@ -557,8 +616,8 @@ def main():
         if config.get('ssl_pair_val_val'):
             ssl_pair_val_paths['val'] = config['ssl_pair_val_val']
 
+        combined_metrics = {}
         if ssl_pair_val_paths:
-            combined_metrics = {}
             for split_name, split_path in ssl_pair_val_paths.items():
                 m = ssl_pair_val_eval(
                     unwrapped.encoder, split_path,
@@ -580,6 +639,9 @@ def main():
                     f"train_top1_gap_32={tr_top1:.3f} "
                     f"val_top1_gap_32={va_top1:.3f}"
                 )
+
+        _log_eval_csv(0, probe_top1, probe_auroc, combined_metrics)
+        _save_milestone(0, 0, 0)
 
         accelerator.wait_for_everyone()
         model.train()
@@ -669,17 +731,18 @@ def main():
                     f"grad={grad_norm_r:.2f}")
 
             probe_every_steps = int(c['probe_every_steps'])
-            checkpoint_every_steps = int(c['checkpoint_every_steps'])
             resume_every_steps = int(c['resume_every_steps'])
             tick_probe = (probe_every_steps > 0
                           and global_step % probe_every_steps == 0
                           and config.get('probe_pos_train'))
-            tick_ckpt = (checkpoint_every_steps > 0
-                         and global_step % checkpoint_every_steps == 0)
             tick_resume = (resume_every_steps > 0
                            and global_step % resume_every_steps == 0)
 
-            if tick_probe or tick_ckpt:
+            # Milestone .pt save is now tied to every probe eval (via
+            # `_save_milestone` in the probe block below). The legacy
+            # `checkpoint_every_steps` knob remains in DEFAULT for
+            # backward compat with config.yaml files but is unused.
+            if tick_probe:
                 unwrapped = accelerator.unwrap_model(model)
 
                 if tick_probe:
@@ -704,8 +767,8 @@ def main():
                     if config.get('ssl_pair_val_val'):
                         ssl_pair_val_paths['val'] = config['ssl_pair_val_val']
 
+                    combined_metrics = {}
                     if ssl_pair_val_paths:
-                        combined_metrics = {}
                         for split_name, split_path in ssl_pair_val_paths.items():
                             m = ssl_pair_val_eval(
                                 unwrapped.encoder, split_path,
@@ -733,15 +796,9 @@ def main():
                                 f"train_rho={tr_rho:.3f} val_rho={va_rho:.3f}"
                             )
 
-                    accelerator.wait_for_everyone()
-                    model.train()
-                    _prev_t = time.perf_counter()
-                    _window_start_t = _prev_t
-
-                if tick_ckpt:
-                    # Portable encoder-only milestone. The decoder is not
-                    # used downstream and is dropped from the saved state.
-                    # Load recipe:
+                    # CSV row + portable encoder milestone tied to every
+                    # probe eval. Milestone format (encoder-only, decoder
+                    # dropped) load recipe:
                     #   import torch
                     #   from smrt_foundation.model import SmrtEncoderSmallRF
                     #   ckpt = torch.load('step_<N>.pt', map_location='cpu')
@@ -750,18 +807,13 @@ def main():
                     #                            cfg['n_head'], cfg['context'])
                     #   enc.load_state_dict(ckpt['encoder_state_dict'])
                     #   # Use ckpt['means'] / ckpt['stds'] with KineticsNorm.
-                    if accelerator.is_main_process:
-                        save_path = os.path.join(checkpoint_dir, f'step_{global_step}.pt')
-                        torch.save({
-                            'encoder_state_dict': unwrapped.encoder.state_dict(),
-                            'config': config,
-                            'epoch': epoch,
-                            'global_step': global_step,
-                            'step_in_epoch': step_in_epoch_done,
-                            **ssl_norm.save_stats(),
-                        }, save_path)
-                        print(f"Saved encoder checkpoint to {save_path}")
+                    _log_eval_csv(global_step, probe_top1, probe_auroc, combined_metrics)
+                    _save_milestone(global_step, epoch, step_in_epoch_done)
+
                     accelerator.wait_for_everyone()
+                    model.train()
+                    _prev_t = time.perf_counter()
+                    _window_start_t = _prev_t
 
             if tick_resume:
                 _save_latest(
