@@ -230,6 +230,43 @@ Equivalence tests verifying that `KineticsNorm` produces identical statistics an
 
 ---
 
+### `test_bam_to_labeled_memmap.py`
+
+Tests for `scripts/bam_to_labeled_memmap.py`, the single-pass BAM &rarr; labeled memmap pipeline used to build the tissue-classification dataset. Output is uint8 raw BAM values (no normalization &mdash; that is the dataloader's job), with feature channels `[seq, fi, fp, ri, rp, *optional_tags, mask]` and a `manifest.parquet` carrying per-window `(shard_idx, row_idx, read_name, tissue_str, cell_str, tissue_id, cell_id, crop_start, read_length)`.
+
+The central correctness question: does the row at `(shard_idx, row_idx)` in the data shard actually correspond to the read named in the manifest, with kinetics that match the BAM bytes at the recorded `crop_start`?
+
+#### Test data
+
+The session fixture streams the first 1000 reads of the real yoran BAM (`data/00_raw/unlabeled/yoran_kinetics_diploid.bam`) into a temp BAM and filters the real yoran labels file (`data/01_processed/val_sets/yoran_read_labels.txt`, 24M lines) to those reads. This exercises the actual `<cell>/<zmw>/ccs <tissue>` line format and real read-name conventions on a manageable subset. Empirically the first 1000 reads of the yoran BAM cover all 10 tissues (blood, sperm, colon, lung, liver, muscle, spleen, kidney, testis, skin) across ~10 PacBio cells, with at least 60 reads per tissue. Setup cost: ~1 s to stream the BAM, ~8 s to filter the labels file, done once per session.
+
+The whole suite runs in ~18 s on GenomeDK; tests skip automatically if the yoran BAM or labels file are not present.
+
+#### Session fixtures
+
+| Fixture | What it does |
+|---|---|
+| `config` | Loads `configs/data.yaml` |
+| `seq_lookup` | Builds the ASCII &rarr; token lookup table from `data.token_map` |
+| `yoran_subset` | Streams first 1000 reads of yoran BAM into a temp BAM and filters the real labels file to those reads. Returns `{bam_path, labels_path, label_map, tissues, tissue_counts, n_reads}`. |
+| `output_dir` | Runs the script once against `yoran_subset` with `context=2048`, `shard_size=64`, `seed=0` &rarr; temp output directory |
+
+#### Tests
+
+| Test | Verifies |
+|---|---|
+| `test_specific_read_attribution` | A chosen real yoran read appears exactly once in the manifest; its labels-sidecar entry agrees with the manifest; and the shard data row equals the BAM-extracted uint8 array sliced at the recorded `crop_start`. This is the read-level fidelity guarantee. |
+| `test_reverse_kinetics_alignment` | For the chosen read, the shard's `ri` column at output position `j` equals BAM `ri[L-1-(crop_start+j)]` byte-for-byte (and likewise for `rp`). Direct regression test for the v1 archived-script reverse-kinetics misalignment bug. |
+| `test_real_labels_format_is_parsed` | Every manifest row's `tissue_str` matches the source label_map for the same read &mdash; confirms the parser handles the real yoran labels-file line format (including occasional trailing whitespace) without dropping or mislabeling rows. |
+| `test_zmw_disambiguation` | Pure unit test of `parse_labels` (no BAM). Same ZMW integer in two distinct cells with different tissues produces two distinct `label_map` entries and two distinct `cell_to_id` entries. Regression for the ZMW-uniqueness concern. |
+| `test_excluded_tissue_is_dropped` | Restricting `--tissues` to one of the discovered tissues excludes all others from the manifest. |
+| `test_too_short_reads_are_dropped` | Passing a `context` larger than every read leaves the manifest empty and writes zero shard files. |
+| `test_max_reads_per_tissue_respected` | Per-tissue `max_reads_per_tissue=3` yields manifest counts &le; 3 per tissue. |
+| `test_seed_determinism` | Two runs with the same seed produce identical manifests and bit-identical shard contents. |
+| `test_optional_tags_round_trip` | Passing `--optional_tags sm sx` extends the feature schema correctly and a sample row's optional-tag column matches the BAM bytes at the recorded `crop_start`. (Yoran BAM has `sm`/`sx`, so this path actually executes.) |
+
+---
+
 ### `test_ssl_21_train.py`
 
 Static AST-based analysis of `ssl_21_pretrain/train.py`. Parses the training script source to verify that the linear probe evaluation runs on all ranks (not gated behind `is_main_process`) and that `wait_for_everyone()` synchronizes ranks between probe and next epoch. These guards prevent NCCL timeouts from rank desynchronization.

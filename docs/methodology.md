@@ -221,3 +221,35 @@ Architectural tweaks orthogonal to the invariant (e.g., `ssl_55_simclr_grid_lnhe
 - *Discoverability.* When asking "have we already tested whether the encoder should be position-invariant within a read?", the answer is in the directory name, not in the README of one of N similarly-named runs.
 
 **Scope:** This convention applies to *contrastive* (positive/negative pair) SSL only. Masked-prediction SSL (Smrt2Vec, autoencoder lineages) names by mechanism since the invariant framing doesn't directly apply — there's no positive/negative pair, only "predict the masked thing." Supervised experiments name by what they're testing (data scaling, baseline control, etc.).
+
+## 2026-05: Single-Pass BAM → Labeled Memmap for Tissue Classification
+
+**Motivation:** The tissue-provenance classification task needs windowed reads with per-read tissue labels. The existing `yoran.zarr` does not store `read.query_name`, so it cannot be joined to `yoran_read_labels.txt` post-hoc without a second BAM pass to recover names. Any drift between the two passes would silently shift labels relative to data and produce plausible-looking but wrong accuracy. For a feasibility study, that's the worst possible failure mode.
+
+**Method:** `scripts/bam_to_labeled_memmap.py` walks the BAM once and writes data shards, a labels sidecar, and a `manifest.parquet` in the same iteration loop. Label assignment, kinetics extraction, crop, and shard write all happen at the same point in the same loop, so the row at `(shard_idx, row_idx)` and the label at `labels_NNNNN.npy[row_idx]` are produced together. Misattribution is structurally impossible. Per-tissue read names are pre-sampled from the labels file (not from the BAM) so the cap is unbiased w.r.t. BAM read order.
+
+**Justification:** Skips a 1.6 TB intermediate zarr we don't need for this task and removes the names-out-of-sync silent-failure mode. The manifest is the load-bearing artifact for tests, downstream cell-level splitting, and per-tissue diagnostics; keeping it as a separate parquet (rather than baking labels into shard filenames or the data tensor) lets the same memmap be split read-level OR held-out-cell without rebuilding.
+
+## 2026-05: Raw uint8 on Disk; Online Normalization in the Dataloader
+
+**Motivation:** Different normalization schemes (per-read MAD on the cropped window, per-batch z-score, no normalization, learned normalization) each have different transfer-time properties. Baking one scheme into the persisted artifact (as `zarr_to_memmap_instanceNorm.py` does) locks future experiments into that one choice.
+
+**Method:** `bam_to_labeled_memmap.py` writes `dtype=uint8` shards holding the raw BAM tag values (sequence tokens, fi/fp/ri/rp, optional sm/sx) with no log1p or MAD transform. `schema.json` records `"normalize": "none"`. The dataset class is responsible for casting to float and applying whatever normalization the experiment wants.
+
+**Justification:** Storage halves vs float16, IO is faster, and normalization choice becomes an experimental knob rather than a one-way commitment. Matches the precedent already in `bam_to_zarr.py` and `zarr_to_methyl_memmap_v2.py`, which store raw bytes; the older `zarr_to_memmap_instanceNorm.py` is a legacy pattern not propagated forward.
+
+## 2026-05: Forward + Forward-Aligned-Reverse Kinetics in Each Window
+
+**Motivation:** PacBio CCS reads have kinetics from two passes of the polymerase: `fi/fp` from the forward strand and `ri/rp` from the reverse. Both carry independent information about base modifications and polymerase damage. The methyl-classification path (v2 pipeline) already uses both via separate forward and reverse views per CpG window; for tissue classification a single per-read window is enough, but discarding half the kinetics signal would be a needless loss.
+
+**Method:** Each output row of `bam_to_labeled_memmap.py` carries both kinetics views aligned to the same forward-strand position. Channels are `[seq, fi, fp, ri, rp, *optional_tags, mask]`. PacBio stores `ri[i] / rp[i]` in reverse order (i.e., `ri[i]` is the kinetics measured at forward-strand position `L-1-i`); we reverse the per-read array (`ri[::-1].copy()`) before slicing so column `j` of the output row corresponds to forward-strand position `crop_start + j` for all four kinetics columns.
+
+**Justification:** Aligning all kinetics to a single forward-strand frame lets a position-aware encoder consume both signals at the same coordinate without a second view, and it sidesteps the v1 archived-script bug that flipped only the sequence and kinetics jointly with `np.flip` on the whole read (which silently misaligned `ri/rp` against the reverse-complemented sequence). Doing the alignment via explicit reverse-indexing matches `zarr_to_methyl_memmap_v2.py:136-139` and keeps the cropping operation a single contiguous slice across all columns.
+
+## 2026-05: Random Crop at Build Time, Determinstic per Seed
+
+**Motivation:** PacBio HiFi reads are typically 10-25 kb. A `context=4096` window covers a small fraction of any one read. Choosing which crop to keep on disk has consequences: deterministic center-crop biases away from start-of-read polymerase warmup; multiple non-overlapping crops per read inflate effective sample size and risk train/val leakage at the read level; random crop at training time precludes a fixed-shape memmap.
+
+**Method:** One random crop per accepted read, drawn at build time from a single `np.random.RandomState(seed + 1)` advancing once per accepted read in BAM iteration order. A separate `RandomState(seed)` drives per-tissue read-name sampling so changing `--tissues` or `--max_reads_per_tissue` doesn't shift crop draws via shared RNG state. The crop start is recorded in `manifest.parquet` so tests can reconstruct the exact slice from the BAM.
+
+**Justification:** Matches the existing pattern in `zarr_to_methyl_memmap_v2.py:207`. Avoids `hash(read.query_name)` for per-read seeding because Python's `hash()` is randomized across processes via `PYTHONHASHSEED` and would silently break determinism. BAM iteration order is itself deterministic, so a single advancing RNG suffices and the dataset is fully reproducible from `--seed`.

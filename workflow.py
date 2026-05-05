@@ -97,7 +97,30 @@ CONFIG = {
             'optional_tags': [],
             'n_reads': 0,
         }
-    }
+    },
+    # Tissue-classification datasets. These bypass the zarr intermediate:
+    # `scripts/bam_to_labeled_memmap.py` walks the BAM once, joins each
+    # accepted read against the labels file in the same loop iteration,
+    # and emits sharded uint8 windows with a manifest.parquet + labels
+    # sidecar. Output is raw BAM values; normalization is the dataloader's
+    # job. Generation runs on GenomeDK (where the BAMs live); the Gefion
+    # target only verifies the transferred dataset is present.
+    'tissue_datasets': {
+        'yoran_ctx4096': {
+            'bam': 'data/00_raw/unlabeled/yoran_kinetics_diploid.bam',
+            'labels': 'data/01_processed/val_sets/yoran_read_labels.txt',
+            'output_dir': 'data/01_processed/tissue_sets/yoran_ctx4096',
+            # Blood is excluded: it comes from a single multiplexed cell
+            # (m84108_250708_182754_s4) shared across individuals, so the
+            # tissue:cell confound is unresolvable.
+            'tissues': ['colon', 'kidney', 'liver', 'lung', 'muscle', 'skin', 'spleen', 'testis'],
+            'context': 4096,
+            'max_reads_per_tissue': 200000,
+            'optional_tags': [],
+            'shard_size': 16384,
+            'seed': 42,
+        },
+    },
 }
 
 # workflow initialization
@@ -249,6 +272,82 @@ def ssl_pair_val_conversion(
         --total_cap {total_cap} \
         --shard_size {shard_size} \
         --seed {seed}
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+
+def bam_to_labeled_memmap_conversion(
+    bam_path,
+    label_path,
+    output_dir,
+    config_path,
+    tissues,
+    context=4096,
+    max_reads_per_tissue=0,
+    optional_tags=(),
+    seed=42,
+    shard_size=16384,
+):
+    """Single-pass BAM -> labeled memmap for tissue classification.
+
+    Walks the BAM linearly, accepting reads whose query_name matches the
+    pre-sampled per-tissue accept_set and writing one random-cropped
+    `context`-length window per accepted read. Output channels are
+    `[seq, fi, fp, ri, rp, *optional_tags, mask]` as raw uint8 (no
+    normalization). See `scripts/bam_to_labeled_memmap.py` for details.
+
+    Sentinel: `<output_dir>/schema.json` is written last by the script's
+    finalize step, so its existence implies all shards + labels +
+    manifest are also on disk.
+
+    Resource sizing: yoran (1.4 TB BAM, 24M reads) walks in 1-3 hours of
+    sequential I/O on shared storage. Per-read processing is fast (~ms
+    per accepted read). Walltime is sized to the worst case.
+
+    On Gefion: the BAM is huge (~1.4 TB for yoran) so we generate the
+    dataset on GenomeDK and SFTP only the windowed output (~40 GB) over.
+    The Gefion-side target therefore expects the dataset to be present
+    and just touches the sentinel; if it's missing, the spec fails with a
+    pointer to the GenomeDK generation step.
+    """
+    sentinel = os.path.join(output_dir, 'schema.json')
+    inputs = {'bam': bam_path, 'labels': label_path}
+    outputs = {'out_file': sentinel}
+
+    if IS_GEFION:
+        options = {'cores': 1, 'memory': '4gb', 'walltime': '00:10:00'}
+        spec = f"""
+        if [ ! -f "{sentinel}" ]; then
+            echo "ERROR: tissue dataset {output_dir} not present on Gefion."
+            echo "Generate on GenomeDK ('gwf run tissue_<name>') and SFTP the directory over."
+            exit 1
+        fi
+        echo "tissue dataset present, touching sentinel"
+        touch {sentinel}
+        """
+        return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+    options = {'cores': 12, 'memory': '64gb', 'walltime': '24:00:00'}
+    tissues_str = ' '.join(tissues)
+    optional_tags_str = ' '.join(optional_tags)
+    spec = f"""
+    source $(conda info --base)/etc/profile.d/conda.sh
+    conda activate data_prep
+    cd {p('')}
+
+    mkdir -p {output_dir}
+
+    python -m scripts.bam_to_labeled_memmap \
+        --bam_path {bam_path} \
+        --label_path {label_path} \
+        --output_dir {output_dir} \
+        --config {config_path} \
+        --tissues {tissues_str} \
+        --context {context} \
+        --max_reads_per_tissue {max_reads_per_tissue} \
+        --seed {seed} \
+        --shard_size {shard_size} \
+        --optional_tags {optional_tags_str}
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
@@ -447,7 +546,45 @@ def process_dataset(name, data):
         )
 
 
+def process_tissue_dataset(name, data):
+    """Register the tissue-classification BAM -> labeled-memmap target.
+
+    On Gefion the BAM and labels file are mocked (the source data is not
+    transferred); the conversion target itself just verifies that the
+    output directory was SFTP'd in. On GenomeDK the conversion runs the
+    real script.
+    """
+    if IS_GEFION:
+        gwf.target_from_template(
+            name=f'mock_bam_{name}',
+            template=mock_file(output_path=data['bam'])
+        )
+        gwf.target_from_template(
+            name=f'mock_labels_{name}',
+            template=mock_file(output_path=data['labels'])
+        )
+
+    gwf.target_from_template(
+        name=f'tissue_{name}',
+        template=bam_to_labeled_memmap_conversion(
+            bam_path=data['bam'],
+            label_path=data['labels'],
+            output_dir=data['output_dir'],
+            config_path=CONFIG['data_config'],
+            tissues=data['tissues'],
+            context=data['context'],
+            max_reads_per_tissue=data['max_reads_per_tissue'],
+            optional_tags=data['optional_tags'],
+            seed=data['seed'],
+            shard_size=data['shard_size'],
+        )
+    )
+
+
 ############################# TARGETS ##########################################
 
 for name, data in CONFIG['datasets'].items():
     process_dataset(name, data)
+
+for name, data in CONFIG.get('tissue_datasets', {}).items():
+    process_tissue_dataset(name, data)
