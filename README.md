@@ -159,6 +159,37 @@ The decoder is intentionally shallow (two transpose convolutions + linear) so th
 
 **Fine-tuning infrastructure** (experiment 22, `scripts/experiments/supervised_22_finetune/`): The original fine-tuning experiment, loading contrastive (exp 21) encoder weights. Two-stage training: frozen encoder + classification head (5 epochs), then unfreeze all with differential LR (encoder 3e-4, head 3e-3, 15 epochs). Exp 27 reuses this infrastructure with the autoencoder encoder.
 
+### Supervised Tissue Classification*
+At least 10 samples, each with millions of reads, have labels for the provenance of each read. The kinetics of in these reads is used to make classifications for the methylation of individual CpG sites, and then these *can* be used to develop classifiers for tissue provenance. The kinetics therefore include this information, and addition information the encodes the damage process that is occuring in different tissues. The group has already showed that there is a clear mutation signature for each tissue (for example oxidative for colon and UV for skin) by looking at the contexts in which mutations occur (see COSMIC spectra). Therefore there is good reason to believe that by looking at a 4096 or 2048 section of a read, we should be able to classify its tissue provenance. At 'data/01_processed/*_read_labels.txt' we have the labels for each individual read in several different indivudals of different species, so now we just need to link that information to a memmap of reads with an integer (?) label for each exact 4096 sequence. And then we can train a classifier much like the transformer-resnet stack that is currently being used for methylation but on multiclass. We need to take into account that not all of the samples/individuals have the same set of tissues. Furthermore, it might be good to ignore blood, since the reads are very short, and in yoran it comes from only one pacbio cell. Batch effets may not be as large a concern as otherwise thought, since Peter did not have batch effects in his analysis of de novo mutations and their signatures when analyzing this dataset. Currently we do not have a tissue type classifier that works with either nucleotides or kinetics. The main interest in this task would be to 1. get a classifier for tissue, 2. see if the classifier is generalizable across samples, or if it is learning the specific damage profile of each individual (also intersesting), 3. 
+
+*This is an entirely new task, and has no bearing on the downstream CpG classification. The downstream task of this classifier would be the same as its training task: Take a large read window and identify its tissue provenance. 
+
+Concern 1: How to organize the train/val partitioning. We obviously want each read to be in exactly one of the train or val partition, but does this also apply to PacBio Cells?
+
+Concern 2: Should this task start with training on only one individual? Probably, since even if that's an easier task and it works better than it is generalizable, our first task is to see if there's a signal to work with.
+
+Caveat:  Any code that builds train/val splits, dedup tables, or read-level joins must key on the full <cell>/<ZMW> string, never on the ZMW integer alone
+
+#### Process 
+The training eval will occur on a single node of 8 H100 chips (on Gefion)
+1. data: generate memmap dataset of 2048 (cropped) reads with a label sidecar 
+2. data: split into 80/20 train/val
+3. train: (train read) -> (model) -> (vector of logits for each class) -> (cross entropy loss) 
+4. eval: (val read) -> (model (no grad)) -> vector of logits for each class -> collect top 1 scores and top 5 scores
+
+#### todo
+- generate dataset 
+- validate datset (double check that reads have the right labels)
+- split dataset
+- transfer dataset to gefion (only done by me personally)
+- organize a stack for a provenance classifier reusing as many components as possible
+- design an intitial training/eval experiment 
+
+#### later
+- eval on general dataset, and then restrict to eval on known de novo mutations (since this carries unique damage processes)
+
+
+
 ## Process
 ### 1. Data Pipeline (`workflow.py`)
 gwf only manages the data pipeline: BAM → Zarr → memmap → validation. The `CONFIG` dictionary at the top is a static registry that maps raw BAM files to intermediate Zarr stores and training-ready memmap tensors. Modify `CONFIG` when ingesting new datasets, then `gwf run` to process them.
