@@ -1,0 +1,31 @@
+experiment_type: 'supervised'
+experiment_name: '51_baseline_size_grid_d256_L8'
+run_message: >
+  supervised_51 — d256_L8 in the size-scaling grid. ~11M params,
+  head_dim=64 (n_head=4). All other knobs identical to size_d128_L4 in
+  this grid. Effective bs=4096 (8×512). Walltime 24h; expected ~30
+  epochs at this throughput.
+
+resources:
+  cores: 16
+  memory: 256gb
+  walltime: "24:00:00"
+  gres: gpu:8
+  num_processes: 8
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+classifier:
+  d_model: 256
+  n_head: 4
+  n_layers: 8
+  context: 32
+  weight_decay: 0.02
+  epochs: 60
+  ds_limit: 0
+  batch_size: 512
+  max_lr: 3e-3
+  pct_start: 0.1

@@ -1,0 +1,36 @@
+experiment_type: 'supervised'
+experiment_name: '51_baseline_size_grid_d128_L4'
+run_message: >
+  supervised_51 — d128_L4 anchor in the size-scaling grid. Same recipe
+  as supervised_40_baseline_v2 (DirectClassifier ctx=32, AdamW lr=3e-3
+  wd=0.02 pct_start=0.1, cosine schedule on prepared optimizer with v40's
+  no-AcceleratedScheduler-wrap fix, KineticsNorm log_transform=True,
+  cpg_pos/neg_v2 data, seed=42, bs=512 per GPU × 8 GPUs = 4096 effective)
+  except n_head=2 instead of v40's n_head=4 — keeps head_dim=64 constant
+  across the grid (matches ssl_55/57 convention) so the cross-size scaling
+  is a clean read of one variable. epochs=60 is the cosine horizon;
+  walltime=24h ends d=128 cleanly mid/late-cosine at this throughput.
+
+resources:
+  cores: 16
+  memory: 256gb
+  walltime: "24:00:00"
+  gres: gpu:8
+  num_processes: 8
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+classifier:
+  d_model: 128
+  n_head: 2
+  n_layers: 4
+  context: 32
+  weight_decay: 0.02
+  epochs: 60
+  ds_limit: 0
+  batch_size: 512
+  max_lr: 3e-3
+  pct_start: 0.1
