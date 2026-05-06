@@ -175,12 +175,17 @@ def tissue_eval(model, val_dl, accelerator, name, n_classes=8):
     """Single-process eval on `val_dl`. Returns metrics dict namespaced by `name`.
 
     The val DataLoader is NOT prepared via `accelerator.prepare`, so each
-    rank sees the full val set. Metrics are computed on the main process only;
-    other ranks are no-ops within `wait_for_everyone()` bookends. Same pattern
-    as ssl_58's pair-val loop.
+    rank holds its own copy of the val set. The model is unwrapped before
+    forward — calling the DDP-wrapped module on a single rank would trigger
+    a buffer-sync collective that the other ranks (sitting in the trailing
+    `wait_for_everyone()`) won't participate in, causing a 10-min NCCL
+    timeout. Unwrap bypasses DDP entirely; non-main ranks are pure no-ops
+    inside the barrier bookend. Same effect as ssl_58 passing
+    `unwrapped.encoder` into ssl_pair_val_eval.
     """
     device = accelerator.device
-    model.eval()
+    unwrapped = accelerator.unwrap_model(model)
+    unwrapped.eval()
     metrics = {}
 
     if accelerator.is_main_process:
@@ -195,7 +200,7 @@ def tissue_eval(model, val_dl, accelerator, name, n_classes=8):
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True).long()
             with torch.no_grad():
-                logits = model(x)
+                logits = unwrapped(x)
                 loss_sum += float(criterion(logits, y).item())
                 n_total += int(y.shape[0])
             top1_metric.update(logits, y)
