@@ -1,0 +1,530 @@
+{
+  "data_dir": "/faststorage/project/mutationalscanning/Workspaces/chcharlton/smrt-foundation/data/01_processed/tissue_sets/yoran_ctx4096",
+  "context": 4096,
+  "manifest_rows": 1555968,
+  "n_tissues": 8,
+  "n_cells": 2,
+  "tissue_to_id": {
+    "colon": 0,
+    "kidney": 1,
+    "liver": 2,
+    "lung": 3,
+    "muscle": 4,
+    "skin": 5,
+    "spleen": 6,
+    "testis": 7
+  },
+  "tissue_counts": [
+    {
+      "tissue_str": "colon",
+      "len": 194359
+    },
+    {
+      "tissue_str": "kidney",
+      "len": 194804
+    },
+    {
+      "tissue_str": "liver",
+      "len": 194064
+    },
+    {
+      "tissue_str": "lung",
+      "len": 194705
+    },
+    {
+      "tissue_str": "muscle",
+      "len": 194819
+    },
+    {
+      "tissue_str": "skin",
+      "len": 194069
+    },
+    {
+      "tissue_str": "spleen",
+      "len": 194355
+    },
+    {
+      "tissue_str": "testis",
+      "len": 194793
+    }
+  ],
+  "cell_counts": [
+    {
+      "cell_str": "m84108_250930_153107_s2",
+      "len": 802778
+    },
+    {
+      "cell_str": "m84108_251007_115244_s1",
+      "len": 753190
+    }
+  ],
+  "tissue_cell_counts": [
+    {
+      "tissue_str": "colon",
+      "cell_str": "m84108_250930_153107_s2",
+      "len": 71421
+    },
+    {
+      "tissue_str": "colon",
+      "cell_str": "m84108_251007_115244_s1",
+      "len": 122938
+    },
+    {
+      "tissue_str": "kidney",
+      "cell_str": "m84108_250930_153107_s2",
+      "len": 105269
+    },
+    {
+      "tissue_str": "kidney",
+      "cell_str": "m84108_251007_115244_s1",
+      "len": 89535
+    },
+    {
+      "tissue_str": "liver",
+      "cell_str": "m84108_250930_153107_s2",
+      "len": 101005
+    },
+    {
+      "tissue_str": "liver",
+      "cell_str": "m84108_251007_115244_s1",
+      "len": 93059
+    },
+    {
+      "tissue_str": "lung",
+      "cell_str": "m84108_250930_153107_s2",
+      "len": 104057
+    },
+    {
+      "tissue_str": "lung",
+      "cell_str": "m84108_251007_115244_s1",
+      "len": 90648
+    },
+    {
+      "tissue_str": "muscle",
+      "cell_str": "m84108_250930_153107_s2",
+      "len": 109376
+    },
+    {
+      "tissue_str": "muscle",
+      "cell_str": "m84108_251007_115244_s1",
+      "len": 85443
+    },
+    {
+      "tissue_str": "skin",
+      "cell_str": "m84108_250930_153107_s2",
+      "len": 94241
+    },
+    {
+      "tissue_str": "skin",
+      "cell_str": "m84108_251007_115244_s1",
+      "len": 99828
+    },
+    {
+      "tissue_str": "spleen",
+      "cell_str": "m84108_250930_153107_s2",
+      "len": 105241
+    },
+    {
+      "tissue_str": "spleen",
+      "cell_str": "m84108_251007_115244_s1",
+      "len": 89114
+    },
+    {
+      "tissue_str": "testis",
+      "cell_str": "m84108_250930_153107_s2",
+      "len": 112168
+    },
+    {
+      "tissue_str": "testis",
+      "cell_str": "m84108_251007_115244_s1",
+      "len": 82625
+    }
+  ],
+  "tissue_length_summary": [
+    {
+      "tissue_str": "colon",
+      "len_min": 4120,
+      "len_q25": 13287.0,
+      "len_median": 15419.0,
+      "len_q75": 18277.0,
+      "len_max": 36045,
+      "len_mean": 16134.153427420391
+    },
+    {
+      "tissue_str": "kidney",
+      "len_min": 4160,
+      "len_q25": 12817.0,
+      "len_median": 14851.0,
+      "len_q75": 17590.0,
+      "len_max": 39798,
+      "len_mean": 15535.775949159155
+    },
+    {
+      "tissue_str": "liver",
+      "len_min": 4124,
+      "len_q25": 12211.0,
+      "len_median": 14016.0,
+      "len_q75": 16513.0,
+      "len_max": 40887,
+      "len_mean": 14695.795593206365
+    },
+    {
+      "tissue_str": "lung",
+      "len_min": 4148,
+      "len_q25": 12616.0,
+      "len_median": 14567.0,
+      "len_q75": 17176.0,
+      "len_max": 34923,
+      "len_mean": 15215.754695565085
+    },
+    {
+      "tissue_str": "muscle",
+      "len_min": 4105,
+      "len_q25": 13092.0,
+      "len_median": 15147.0,
+      "len_q75": 17914.0,
+      "len_max": 44318,
+      "len_mean": 15804.193682341045
+    },
+    {
+      "tissue_str": "skin",
+      "len_min": 4111,
+      "len_q25": 12930.0,
+      "len_median": 15007.0,
+      "len_q75": 17702.0,
+      "len_max": 37247,
+      "len_mean": 15633.07201562331
+    },
+    {
+      "tissue_str": "spleen",
+      "len_min": 4106,
+      "len_q25": 12531.0,
+      "len_median": 14419.0,
+      "len_q75": 17005.0,
+      "len_max": 34065,
+      "len_mean": 15090.600334439556
+    },
+    {
+      "tissue_str": "testis",
+      "len_min": 4175,
+      "len_q25": 13287.0,
+      "len_median": 15492.0,
+      "len_q75": 18432.0,
+      "len_max": 37270,
+      "len_mean": 16201.843649412453
+    }
+  ],
+  "tissues_per_cell": [
+    {
+      "cell_str": "m84108_250930_153107_s2",
+      "n_tissues": 8
+    },
+    {
+      "cell_str": "m84108_251007_115244_s1",
+      "n_tissues": 8
+    }
+  ],
+  "cells_per_tissue": [
+    {
+      "tissue_str": "colon",
+      "n_cells": 2,
+      "cells": [
+        "m84108_250930_153107_s2",
+        "m84108_251007_115244_s1"
+      ]
+    },
+    {
+      "tissue_str": "kidney",
+      "n_cells": 2,
+      "cells": [
+        "m84108_250930_153107_s2",
+        "m84108_251007_115244_s1"
+      ]
+    },
+    {
+      "tissue_str": "liver",
+      "n_cells": 2,
+      "cells": [
+        "m84108_250930_153107_s2",
+        "m84108_251007_115244_s1"
+      ]
+    },
+    {
+      "tissue_str": "lung",
+      "n_cells": 2,
+      "cells": [
+        "m84108_250930_153107_s2",
+        "m84108_251007_115244_s1"
+      ]
+    },
+    {
+      "tissue_str": "muscle",
+      "n_cells": 2,
+      "cells": [
+        "m84108_250930_153107_s2",
+        "m84108_251007_115244_s1"
+      ]
+    },
+    {
+      "tissue_str": "skin",
+      "n_cells": 2,
+      "cells": [
+        "m84108_250930_153107_s2",
+        "m84108_251007_115244_s1"
+      ]
+    },
+    {
+      "tissue_str": "spleen",
+      "n_cells": 2,
+      "cells": [
+        "m84108_250930_153107_s2",
+        "m84108_251007_115244_s1"
+      ]
+    },
+    {
+      "tissue_str": "testis",
+      "n_cells": 2,
+      "cells": [
+        "m84108_250930_153107_s2",
+        "m84108_251007_115244_s1"
+      ]
+    }
+  ],
+  "padding_check": {
+    "shards_checked": 5,
+    "rows_checked": 500,
+    "padding_fraction_max": 0.0,
+    "padding_fraction_mean": 0.0
+  },
+  "held_out_cell_feasible_for_all_tissues": true,
+  "single_cell_tissues": [],
+  "max_reads_per_tissue": 200000,
+  "tissue_waterfall": [
+    {
+      "tissue_str": "colon",
+      "n_in_labels": 2032943,
+      "n_in_manifest": 194359,
+      "n_after_cap": 200000
+    },
+    {
+      "tissue_str": "kidney",
+      "n_in_labels": 1784438,
+      "n_in_manifest": 194804,
+      "n_after_cap": 200000
+    },
+    {
+      "tissue_str": "liver",
+      "n_in_labels": 1712697,
+      "n_in_manifest": 194064,
+      "n_after_cap": 200000
+    },
+    {
+      "tissue_str": "lung",
+      "n_in_labels": 1751837,
+      "n_in_manifest": 194705,
+      "n_after_cap": 200000
+    },
+    {
+      "tissue_str": "muscle",
+      "n_in_labels": 1641585,
+      "n_in_manifest": 194819,
+      "n_after_cap": 200000
+    },
+    {
+      "tissue_str": "skin",
+      "n_in_labels": 1669758,
+      "n_in_manifest": 194069,
+      "n_after_cap": 200000
+    },
+    {
+      "tissue_str": "spleen",
+      "n_in_labels": 1749769,
+      "n_in_manifest": 194355,
+      "n_after_cap": 200000
+    },
+    {
+      "tissue_str": "testis",
+      "n_in_labels": 1647807,
+      "n_in_manifest": 194793,
+      "n_after_cap": 200000
+    }
+  ],
+  "length_retention": [
+    {
+      "tissue_str": "colon",
+      "cell_str": "m84108_251007_115244_s1",
+      "cell_short": "s1",
+      "n_in_labels_tc": 1284642,
+      "n_in_manifest": 122938,
+      "tissue_total_labels": 2032943,
+      "n_after_cap": 200000,
+      "expected_post_cap": 126382.49080274263,
+      "length_retention_pct": 97.2745506273343
+    },
+    {
+      "tissue_str": "colon",
+      "cell_str": "m84108_250930_153107_s2",
+      "cell_short": "s2",
+      "n_in_labels_tc": 748301,
+      "n_in_manifest": 71421,
+      "tissue_total_labels": 2032943,
+      "n_after_cap": 200000,
+      "expected_post_cap": 73617.50919725737,
+      "length_retention_pct": 97.01632231080809
+    },
+    {
+      "tissue_str": "kidney",
+      "cell_str": "m84108_251007_115244_s1",
+      "cell_short": "s1",
+      "n_in_labels_tc": 818073,
+      "n_in_manifest": 89535,
+      "tissue_total_labels": 1784438,
+      "n_after_cap": 200000,
+      "expected_post_cap": 91689.70846843655,
+      "length_retention_pct": 97.64999965162033
+    },
+    {
+      "tissue_str": "kidney",
+      "cell_str": "m84108_250930_153107_s2",
+      "cell_short": "s2",
+      "n_in_labels_tc": 966365,
+      "n_in_manifest": 105269,
+      "tissue_total_labels": 1784438,
+      "n_after_cap": 200000,
+      "expected_post_cap": 108310.29153156345,
+      "length_retention_pct": 97.19205673943075
+    },
+    {
+      "tissue_str": "liver",
+      "cell_str": "m84108_251007_115244_s1",
+      "cell_short": "s1",
+      "n_in_labels_tc": 823481,
+      "n_in_manifest": 93059,
+      "tissue_total_labels": 1712697,
+      "n_after_cap": 200000,
+      "expected_post_cap": 96161.90137543302,
+      "length_retention_pct": 96.77325288804477
+    },
+    {
+      "tissue_str": "liver",
+      "cell_str": "m84108_250930_153107_s2",
+      "cell_short": "s2",
+      "n_in_labels_tc": 889216,
+      "n_in_manifest": 101005,
+      "tissue_total_labels": 1712697,
+      "n_after_cap": 200000,
+      "expected_post_cap": 103838.09862456698,
+      "length_retention_pct": 97.27161931690388
+    },
+    {
+      "tissue_str": "lung",
+      "cell_str": "m84108_251007_115244_s1",
+      "cell_short": "s1",
+      "n_in_labels_tc": 813412,
+      "n_in_manifest": 90648,
+      "tissue_total_labels": 1751837,
+      "n_after_cap": 200000,
+      "expected_post_cap": 92863.8908756922,
+      "length_retention_pct": 97.61382938535453
+    },
+    {
+      "tissue_str": "lung",
+      "cell_str": "m84108_250930_153107_s2",
+      "cell_short": "s2",
+      "n_in_labels_tc": 938425,
+      "n_in_manifest": 104057,
+      "tissue_total_labels": 1751837,
+      "n_after_cap": 200000,
+      "expected_post_cap": 107136.1091243078,
+      "length_retention_pct": 97.12598380744332
+    },
+    {
+      "tissue_str": "muscle",
+      "cell_str": "m84108_251007_115244_s1",
+      "cell_short": "s1",
+      "n_in_labels_tc": 716830,
+      "n_in_manifest": 85443,
+      "tissue_total_labels": 1641585,
+      "n_after_cap": 200000,
+      "expected_post_cap": 87333.88767563057,
+      "length_retention_pct": 97.83487518309781
+    },
+    {
+      "tissue_str": "muscle",
+      "cell_str": "m84108_250930_153107_s2",
+      "cell_short": "s2",
+      "n_in_labels_tc": 924755,
+      "n_in_manifest": 109376,
+      "tissue_total_labels": 1641585,
+      "n_after_cap": 200000,
+      "expected_post_cap": 112666.11232436943,
+      "length_retention_pct": 97.07976759249748
+    },
+    {
+      "tissue_str": "skin",
+      "cell_str": "m84108_251007_115244_s1",
+      "cell_short": "s1",
+      "n_in_labels_tc": 862212,
+      "n_in_manifest": 99828,
+      "tissue_total_labels": 1669758,
+      "n_after_cap": 200000,
+      "expected_post_cap": 103273.88759329196,
+      "length_retention_pct": 96.66335055879529
+    },
+    {
+      "tissue_str": "skin",
+      "cell_str": "m84108_250930_153107_s2",
+      "cell_short": "s2",
+      "n_in_labels_tc": 807546,
+      "n_in_manifest": 94241,
+      "tissue_total_labels": 1669758,
+      "n_after_cap": 200000,
+      "expected_post_cap": 96726.11240670804,
+      "length_retention_pct": 97.43077402278013
+    },
+    {
+      "tissue_str": "spleen",
+      "cell_str": "m84108_251007_115244_s1",
+      "cell_short": "s1",
+      "n_in_labels_tc": 801085,
+      "n_in_manifest": 89114,
+      "tissue_total_labels": 1749769,
+      "n_after_cap": 200000,
+      "expected_post_cap": 91564.65796342261,
+      "length_retention_pct": 97.32357656553299
+    },
+    {
+      "tissue_str": "spleen",
+      "cell_str": "m84108_250930_153107_s2",
+      "cell_short": "s2",
+      "n_in_labels_tc": 948684,
+      "n_in_manifest": 105241,
+      "tissue_total_labels": 1749769,
+      "n_after_cap": 200000,
+      "expected_post_cap": 108435.34203657739,
+      "length_retention_pct": 97.05415044893769
+    },
+    {
+      "tissue_str": "testis",
+      "cell_str": "m84108_251007_115244_s1",
+      "cell_short": "s1",
+      "n_in_labels_tc": 697724,
+      "n_in_manifest": 82625,
+      "tissue_total_labels": 1647807,
+      "n_after_cap": 200000,
+      "expected_post_cap": 84685.16033734533,
+      "length_retention_pct": 97.56727113801446
+    },
+    {
+      "tissue_str": "testis",
+      "cell_str": "m84108_250930_153107_s2",
+      "cell_short": "s2",
+      "n_in_labels_tc": 950083,
+      "n_in_manifest": 112168,
+      "tissue_total_labels": 1647807,
+      "n_after_cap": 200000,
+      "expected_post_cap": 115314.83966265467,
+      "length_retention_pct": 97.27108872382728
+    }
+  ]
+}

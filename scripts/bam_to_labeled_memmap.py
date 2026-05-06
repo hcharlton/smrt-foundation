@@ -6,10 +6,11 @@ tissue, walks the BAM once, and writes:
 
   output_dir/
     schema.json           - feature names, tissue/cell ID maps, params
-    manifest.parquet      - one row per output window (load-bearing for
-                            tests + downstream cell-level splits)
+    manifest.parquet      - one row per output window: (shard_idx, row_idx,
+                            read_name, tissue_str, cell_str, tissue_id,
+                            cell_id, crop_start, read_length). Single source
+                            of truth for labels and split logic.
     shard_NNNNN.npy       - (<=shard_size, context, n_features) uint8
-    labels_NNNNN.npy      - (<=shard_size, 2) int32, columns (tissue_id, cell_id)
 
 Output is uint8 raw BAM values (no normalization). Normalization is the
 dataloader's job.
@@ -203,40 +204,6 @@ class ShardWriter:
         return self.total_written
 
 
-class LabelShardWriter:
-    """Buffers (tissue_id, cell_id) int32 pairs; flushes labels_NNNNN.npy.
-
-    Flush cadence mirrors a parent ShardWriter so labels_NNNNN.npy[i] always
-    refers to the same row as shard_NNNNN.npy[i].
-    """
-
-    def __init__(self, output_dir, shard_size):
-        self.output_dir = output_dir
-        self.shard_size = shard_size
-        self.buffer = np.zeros((shard_size, 2), dtype=np.int32)
-        self.ptr = 0
-        self.shard_idx = 0
-
-    def add(self, tissue_id, cell_id):
-        self.buffer[self.ptr, 0] = tissue_id
-        self.buffer[self.ptr, 1] = cell_id
-        self.ptr += 1
-        if self.ptr >= self.shard_size:
-            self._flush()
-
-    def _flush(self):
-        if self.ptr == 0:
-            return
-        path = os.path.join(self.output_dir, f"labels_{self.shard_idx:05d}.npy")
-        np.save(path, self.buffer[:self.ptr])
-        self.shard_idx += 1
-        self.ptr = 0
-        self.buffer[:] = 0
-
-    def finalize(self):
-        self._flush()
-
-
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
@@ -343,7 +310,6 @@ def bam_to_labeled_memmap(
     lookup_table = _build_seq_lookup(seq_map)
 
     shard_writer = ShardWriter(output_dir, shard_size, context, n_features)
-    label_writer = LabelShardWriter(output_dir, shard_size)
 
     manifest_rows = []
     counters = {
@@ -392,7 +358,6 @@ def bam_to_labeled_memmap(
             window = full[crop_start:crop_start + context]
 
             shard_idx, row_idx = shard_writer.add(window)
-            label_writer.add(tissue_id, cell_id)
 
             manifest_rows.append({
                 'shard_idx': shard_idx,
@@ -413,7 +378,6 @@ def bam_to_labeled_memmap(
 
     # ----- 6. Finalize -----
     shard_writer.finalize()
-    label_writer.finalize()
 
     # Manifest (polars)
     manifest_schema = {

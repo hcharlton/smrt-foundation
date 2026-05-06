@@ -25,6 +25,7 @@ import numpy as np
 import polars as pl
 import pysam
 import pytest
+import torch
 import yaml
 
 from scripts.bam_to_labeled_memmap import (
@@ -33,6 +34,7 @@ from scripts.bam_to_labeled_memmap import (
     bam_to_labeled_memmap,
     parse_labels,
 )
+from smrt_foundation.dataset import TissueMemmapDataset
 
 
 # ---------------------------------------------------------------------------
@@ -213,15 +215,10 @@ def test_specific_read_attribution(yoran_subset, output_dir, seq_lookup):
     assert rows.height == 1, f"{target_name} should appear exactly once, got {rows.height}"
     row = rows.row(0, named=True)
 
-    # 1. Tissue label correctness in the manifest.
+    # 1. Tissue label correctness in the manifest (single source of truth).
     assert row['tissue_str'] == expected_tissue
 
-    # 2. Tissue label correctness in the labels sidecar.
-    labels = np.load(os.path.join(output_dir, f"labels_{row['shard_idx']:05d}.npy"))
-    assert int(labels[row['row_idx'], 0]) == int(row['tissue_id'])
-    assert int(labels[row['row_idx'], 1]) == int(row['cell_id'])
-
-    # 3. Kinetics correctness: BAM bytes -> ri/rp aligned -> slice at crop_start
+    # 2. Kinetics correctness: BAM bytes -> ri/rp aligned -> slice at crop_start
     #    must equal the shard row exactly (uint8, no rounding).
     schema = json.load(open(os.path.join(output_dir, 'schema.json')))
     features = schema['features']
@@ -410,6 +407,47 @@ def test_seed_determinism(yoran_subset, config, tmp_path_factory):
         a = np.load(os.path.join(out_a, shard))
         b = np.load(os.path.join(out_b, shard))
         np.testing.assert_array_equal(a, b)
+
+
+def test_tissue_dataset_class_roundtrip(yoran_subset, output_dir, seq_lookup):
+    """
+    `TissueMemmapDataset` must produce ``(x, tissue_id)`` items that match
+    what the manifest+shards say at the same logical index, including under
+    a polars filter expression for train/val splitting.
+    """
+    # Full dataset: every manifest row should be reachable, in manifest order.
+    ds = TissueMemmapDataset(output_dir)
+    manifest = pl.read_parquet(os.path.join(output_dir, 'manifest.parquet'))
+    assert len(ds) == manifest.height
+
+    # Spot-check a few items: dataset's (x, y) must equal what we'd hand-load
+    # from shard + manifest.
+    schema = json.load(open(os.path.join(output_dir, 'schema.json')))
+    for sample_idx in (0, len(ds) // 2, len(ds) - 1):
+        x, y = ds[sample_idx]
+        row = manifest.row(sample_idx, named=True)
+        assert int(y) == int(row['tissue_id'])
+        assert x.dtype == torch.float32
+        assert tuple(x.shape) == (schema['context'], len(schema['features']))
+
+        shard = np.load(os.path.join(output_dir, f"shard_{row['shard_idx']:05d}.npy"))
+        expected = shard[row['row_idx']].astype(np.float32)
+        np.testing.assert_array_equal(x.numpy(), expected)
+
+    # Filter expression: held-out cell. Pick a cell with both train and val
+    # presence so we exercise both sides.
+    cells = manifest['cell_id'].unique().sort().to_list()
+    held_out = cells[0]
+    train = TissueMemmapDataset(output_dir, filter_expr=pl.col('cell_id') != held_out)
+    val = TissueMemmapDataset(output_dir, filter_expr=pl.col('cell_id') == held_out)
+    assert len(train) + len(val) == len(ds)
+    assert len(train) > 0 and len(val) > 0
+
+    # Sanity check: the val set's cell_ids really are all the held-out cell.
+    val_manifest = manifest.filter(pl.col('cell_id') == held_out)
+    train_manifest = manifest.filter(pl.col('cell_id') != held_out)
+    assert len(val) == val_manifest.height
+    assert len(train) == train_manifest.height
 
 
 def test_optional_tags_round_trip(yoran_subset, config, tmp_path_factory, seq_lookup):
