@@ -663,14 +663,23 @@ def process_tissue_dataset(name, data):
     real script.
     """
     if IS_GEFION:
-        gwf.target_from_template(
-            name=f'mock_bam_{name}',
-            template=mock_file(output_path=data['bam'])
-        )
-        gwf.target_from_template(
-            name=f'mock_labels_{name}',
-            template=mock_file(output_path=data['labels'])
-        )
+        # Tissue BAMs reuse the unlabeled SSL BAM path (e.g. yoran_ctx4096
+        # points at yoran_kinetics_diploid.bam, already mocked by
+        # process_dataset). gwf forbids two targets producing the same
+        # output, so skip the mock here if the path is already claimed.
+        existing_outputs = {
+            out for t in gwf.targets.values() for out in t.outputs.values()
+        }
+        if data['bam'] not in existing_outputs:
+            gwf.target_from_template(
+                name=f'mock_bam_{name}',
+                template=mock_file(output_path=data['bam'])
+            )
+        if data['labels'] not in existing_outputs:
+            gwf.target_from_template(
+                name=f'mock_labels_{name}',
+                template=mock_file(output_path=data['labels'])
+            )
 
     gwf.target_from_template(
         name=f'tissue_{name}',
