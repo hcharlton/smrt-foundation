@@ -172,48 +172,51 @@ def _materialize_to_gpu(wrapped_ds, device, log=print, name='split'):
 
 
 def tissue_eval(model, val_dl, accelerator, name, n_classes=8):
-    """Single-process eval on `val_dl`. Returns metrics dict namespaced by `name`.
+    """Eval on `val_dl`. Returns metrics dict namespaced by `name`.
 
-    The val DataLoader is NOT prepared via `accelerator.prepare`, so each
-    rank holds its own copy of the val set. The model is unwrapped before
-    forward — calling the DDP-wrapped module on a single rank would trigger
-    a buffer-sync collective that the other ranks (sitting in the trailing
-    `wait_for_everyone()`) won't participate in, causing a 10-min NCCL
-    timeout. Unwrap bypasses DDP entirely; non-main ranks are pure no-ops
-    inside the barrier bookend. Same effect as ssl_58 passing
-    `unwrapped.encoder` into ssl_pair_val_eval.
+    All ranks run the full eval in lockstep. Each rank already holds a
+    full copy of the val set on its own GPU (materialised once per rank
+    in `main`), and DDP keeps params synced across ranks, so every rank
+    produces identical logits and identical metric state. torchmetrics'
+    `compute()` triggers an internal ALLGATHER to sync state across
+    ranks; since all 8 ranks call it together, the collective completes
+    cleanly. Logging / CSV / checkpoint downstream in `_run_eval_block`
+    stays gated to main only.
+
+    Forward uses the unwrapped model so DDP buffer-sync collectives don't
+    fire (they're already a no-op since we read no buffers, but unwrap is
+    explicit and matches ssl_58's `linear_probe_eval` / `ssl_pair_val_eval`
+    pattern).
     """
     device = accelerator.device
     unwrapped = accelerator.unwrap_model(model)
     unwrapped.eval()
+
+    top1_metric = MulticlassAccuracy(num_classes=n_classes, top_k=1, average='micro').to(device)
+    top3_metric = MulticlassAccuracy(num_classes=n_classes, top_k=min(3, n_classes), average='micro').to(device)
+    f1_metric = MulticlassF1Score(num_classes=n_classes, average='macro').to(device)
+    criterion = nn.CrossEntropyLoss(reduction='sum')
+    loss_sum = 0.0
+    n_total = 0
+
+    for x, y in val_dl:
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True).long()
+        with torch.no_grad():
+            logits = unwrapped(x)
+            loss_sum += float(criterion(logits, y).item())
+            n_total += int(y.shape[0])
+        top1_metric.update(logits, y)
+        top3_metric.update(logits, y)
+        f1_metric.update(logits, y)
+
     metrics = {}
+    if n_total > 0:
+        metrics[f'{name}/loss'] = loss_sum / n_total
+        metrics[f'{name}/top1'] = float(top1_metric.compute().item())
+        metrics[f'{name}/top3'] = float(top3_metric.compute().item())
+        metrics[f'{name}/macro_f1'] = float(f1_metric.compute().item())
 
-    if accelerator.is_main_process:
-        top1_metric = MulticlassAccuracy(num_classes=n_classes, top_k=1, average='micro').to(device)
-        top3_metric = MulticlassAccuracy(num_classes=n_classes, top_k=min(3, n_classes), average='micro').to(device)
-        f1_metric = MulticlassF1Score(num_classes=n_classes, average='macro').to(device)
-        criterion = nn.CrossEntropyLoss(reduction='sum')
-        loss_sum = 0.0
-        n_total = 0
-
-        for x, y in val_dl:
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True).long()
-            with torch.no_grad():
-                logits = unwrapped(x)
-                loss_sum += float(criterion(logits, y).item())
-                n_total += int(y.shape[0])
-            top1_metric.update(logits, y)
-            top3_metric.update(logits, y)
-            f1_metric.update(logits, y)
-
-        if n_total > 0:
-            metrics[f'{name}/loss'] = loss_sum / n_total
-            metrics[f'{name}/top1'] = float(top1_metric.compute().item())
-            metrics[f'{name}/top3'] = float(top3_metric.compute().item())
-            metrics[f'{name}/macro_f1'] = float(f1_metric.compute().item())
-
-    accelerator.wait_for_everyone()
     return metrics
 
 
