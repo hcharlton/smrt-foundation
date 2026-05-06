@@ -55,7 +55,9 @@ CONFIG = {
             'memmap': 'data/01_processed/ssl_sets/ob007.memmap',
             'memmap_raw':  'data/01_processed/ssl_sets/ob007_raw.memmap',
             'memmap_filter_qual':  'data/01_processed/ssl_sets/ob007_filter_qual.memmap',
+            'memmap_fwdrev': 'data/01_processed/ssl_sets/ob007_fwdrev.memmap',
             'ssl_pair_val': 'data/01_processed/val_sets/ssl_pair_val_ob007_v1.memmap',
+            'ssl_pair_val_fwdrev': 'data/01_processed/val_sets/ssl_pair_val_ob007_fwdrev.memmap',
             'optional_tags': ['sm', 'sx'],
             'n_reads': 0,
         },
@@ -65,7 +67,9 @@ CONFIG = {
             'memmap': 'data/01_processed/ssl_sets/yoran.memmap',
             'memmap_raw':  'data/01_processed/ssl_sets/yoran_raw.memmap',
             'memmap_filter_qual':  'data/01_processed/ssl_sets/yoran_filter_qual.memmap',
+            'memmap_fwdrev': 'data/01_processed/ssl_sets/yoran_fwdrev.memmap',
             'ssl_pair_val': 'data/01_processed/val_sets/ssl_pair_val_yoran_v1.memmap',
+            'ssl_pair_val_fwdrev': 'data/01_processed/val_sets/ssl_pair_val_yoran_fwdrev.memmap',
             'optional_tags': ['sm', 'sx'],
             'n_reads': 0,
         },
@@ -73,6 +77,7 @@ CONFIG = {
             'bam': 'data/00_raw/labeled/methylated_hifi_reads.bam',
             'zarr': 'data/01_processed/ssl_sets/cpg_pos.zarr',
             'memmap': 'data/01_processed/val_sets/cpg_pos_v2.memmap',
+            'memmap_fwdrev': 'data/01_processed/val_sets/cpg_pos_fwdrev.memmap',
             'optional_tags': [],
             'n_reads': 0,
         },
@@ -80,6 +85,7 @@ CONFIG = {
             'bam': 'data/00_raw/labeled/unmethylated_hifi_reads.bam',
             'zarr': 'data/01_processed/ssl_sets/cpg_neg.zarr',
             'memmap': 'data/01_processed/val_sets/cpg_neg_v2.memmap',
+            'memmap_fwdrev': 'data/01_processed/val_sets/cpg_neg_fwdrev.memmap',
             'optional_tags': [],
             'n_reads': 0,
         },
@@ -352,6 +358,40 @@ def bam_to_labeled_memmap_conversion(
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
 
 
+def memmap_fwdrev_conversion(
+    zarr_path, output_path, config_path,
+    shard_size=16384, shards=0, context=4096, profile=False,
+):
+    """6-channel paired-kinetics SSL memmap target.
+
+    Mirrors `memmap_conversion` but invokes
+    `scripts.zarr_to_memmap_fwdrev`, which writes one row per read
+    segment with the channel layout [seq, fi, fp, ri, rp, mask] and
+    aligns reverse kinetics via `ri[L-end:L-start][::-1]` (the v2 fix
+    from the methyl pipeline). No normalization, no filter_qual, no
+    RC duplication on disk; consumers do those operations online.
+    """
+    inputs = {'in_file': zarr_path}
+    outputs = {'out_file': output_path}
+    options = {'cores': 8, 'memory': '64gb', 'walltime': '18:00:00'}
+
+    profiler_env = "TimeLINE_PROFILE=1" if profile else ""
+    spec = f"""
+    source $(conda info --base)/etc/profile.d/conda.sh
+    conda activate data_prep
+    cd {p('')}
+
+    {profiler_env} python -m scripts.zarr_to_memmap_fwdrev \
+        --input_path {zarr_path} \
+        --output_path {output_path} \
+        --config_path {config_path} \
+        --shard_size {shard_size} \
+        --max_shards {shards} \
+        --context {context}
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+
 def memmap_cpg_conversion(
     zarr_path, output_path, config_path,
     shard_size=4*2**20, shards=0, context=32,
@@ -368,6 +408,41 @@ def memmap_cpg_conversion(
     cd {p('')}
 
     {profiler_env} python -m scripts.zarr_to_methyl_memmap_v2 \
+        --input_path {zarr_path} \
+        --output_path {output_path} \
+        --config_path {config_path} \
+        --shard_size {shard_size} \
+        --max_shards {shards} \
+        --context {context} \
+        --val_pct {val_pct} \
+        --seed {seed}
+    """
+    return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)
+
+
+def memmap_cpg_fwdrev_conversion(
+    zarr_path, output_path, config_path,
+    shard_size=4*2**20, shards=0, context=32,
+    val_pct=0.2, seed=42, profile=False,
+):
+    """6-channel paired-kinetics CpG val memmap target.
+
+    Mirrors `memmap_cpg_conversion` but invokes
+    `scripts.zarr_to_methyl_memmap_fwdrev`, which writes one
+    forward-strand-anchored 6-channel window per CpG site (vs. v2's
+    two 4-channel windows). Reverse kinetics use the v2 alignment fix.
+    """
+    inputs = {'in_file': zarr_path}
+    outputs = {'out_file': f'{output_path}'}
+    options = {'cores': 8, 'memory': '64gb', 'walltime': '18:00:00'}
+
+    profiler_env = "TimeLINE_PROFILE=1" if profile else ""
+    spec = f"""
+    source $(conda info --base)/etc/profile.d/conda.sh
+    conda activate data_prep
+    cd {p('')}
+
+    {profiler_env} python -m scripts.zarr_to_methyl_memmap_fwdrev \
         --input_path {zarr_path} \
         --output_path {output_path} \
         --config_path {config_path} \
@@ -450,6 +525,15 @@ def process_dataset(name, data):
                 config_path=CONFIG['data_config'],
             )
         )
+        if 'memmap_fwdrev' in data:
+            gwf.target_from_template(
+                name=f'{name}_to_memmap_fwdrev',
+                template=memmap_cpg_fwdrev_conversion(
+                    zarr_path=zarr_target.outputs['out_file'],
+                    output_path=data['memmap_fwdrev'],
+                    config_path=CONFIG['data_config'],
+                )
+            )
         return
 
     memmap_target = gwf.target_from_template(
@@ -508,6 +592,30 @@ def process_dataset(name, data):
                 seed=CONFIG['ssl_pair_val']['seed'],
             )
         )
+
+    if 'memmap_fwdrev' in data:
+        memmap_target_fwdrev = gwf.target_from_template(
+            name=f'{name}_to_memmap_fwdrev',
+            template=memmap_fwdrev_conversion(
+                zarr_path=zarr_target.outputs['out_file'],
+                output_path=data['memmap_fwdrev'],
+                config_path=CONFIG['data_config'],
+                profile=True,
+            )
+        )
+
+        if 'ssl_pair_val_fwdrev' in data:
+            gwf.target_from_template(
+                name=f'{name}_to_ssl_pair_val_fwdrev',
+                template=ssl_pair_val_conversion(
+                    memmap_path=memmap_target_fwdrev.outputs['out_file'],
+                    output_path=data['ssl_pair_val_fwdrev'],
+                    target_len=CONFIG['ssl_pair_val']['target_len'],
+                    total_cap=CONFIG['ssl_pair_val']['total_cap'],
+                    shard_size=CONFIG['ssl_pair_val']['shard_size'],
+                    seed=CONFIG['ssl_pair_val']['seed'],
+                )
+            )
 
     if name == 'ob007':
         gwf.target_from_template(

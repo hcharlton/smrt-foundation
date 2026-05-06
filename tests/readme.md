@@ -453,6 +453,52 @@ End-to-end integration tests for the v2 CpG memmap pipeline: Zarr &rarr; shards 
 
 ---
 
+### `test_zarr_to_memmap_fwdrev.py`
+
+End-to-end tests for `scripts/zarr_to_memmap_fwdrev.py`, the 6-channel paired-kinetics SSL memmap creation script. Output channel layout `[seq, fi, fp, ri, rp, mask]` mirrors the tissue pipeline; one row per read segment, no RC duplication on disk.
+
+The load-bearing detail under test is the v2 reverse-strand kinetics indexing: at every forward window `[start, end)` of a read of length `L`, output row channel 3 must equal source `ri[L-end:L-start][::-1]` (and likewise channel 4 for `rp`). The legacy SSL script (`zarr_to_memmap_instanceNorm.py`) uses `np.flip(read_rev[start:end])` instead, which is benign there because forward and reverse views are written as separate samples but is wrong for paired-channel output. A dedicated regression test fails if the new script silently regresses to the legacy indexing.
+
+Uses the small `ob007_500k.zarr` (or any available `*.zarr` with seq/fi/fp/ri/rp) at `context=4096`, `shard_size=256`, `max_shards=1` for fast fixture turnaround.
+
+| Test class | Test | Verifies |
+|---|---|---|
+| `TestSchema` | `test_schema_sidecar` | `schema.json` records `features=[seq,fi,fp,ri,rp,mask]`, `pad_idx=5`, and the `ri[L-end:L-start][::-1]` indexing convention |
+|  | `test_shard_shape` | First shard is `(256, 4096, 6)` float16 |
+|  | `test_seq_tokens_in_range` | Seq channel only contains values in `{0, 1, 2, 3, 4}` |
+|  | `test_mask_is_binary` | Mask channel only contains values in `{0, 1}` |
+| `TestKineticsFidelity` | `test_forward_kinetics_match` | Output `fi`/`fp` channels equal source zarr values at the same forward positions |
+|  | `test_reverse_kinetics_use_v2_fix` | Output `ri`/`rp` channels equal `source_ri[L-end:L-start][::-1]` (the v2 fix) |
+|  | `test_reverse_kinetics_do_NOT_match_legacy_indexing` | Discriminating regression test: output does NOT match the legacy `ri[start:end][::-1]` pattern. Catches a silent regression to the legacy bug. |
+| `TestPadMask` | `test_pad_mask_layout` | For each row, mask is 0.0 over `[0, seg_len)` and 1.0 over `[seg_len, context)` with no interleaving |
+| `TestNoRcDuplication` | `test_consecutive_rows_are_different_reads` | Row 0 and row 1 do not have identical seq channels (the legacy 4-channel pipeline wrote each read as fwd + RC reverse pairs; the fwdrev pipeline does not) |
+
+Last run: 2026-05-06, 9 passed in ~50s on Gefion against `data/01_processed/ssl_sets/ob007_500k.zarr` (zarr v3 store, processed via the data_prep conda env).
+
+---
+
+### `test_zarr_to_methyl_memmap_fwdrev.py`
+
+Sibling of the v2 test suite for the new 6-channel CpG val pipeline (`scripts/zarr_to_methyl_memmap_fwdrev.py`). Same v2 reverse-kinetics indexing fix, but applied to CpG-centered windows; one sample per CpG (vs. v2's two samples) since both fwd and rev kinetics now live in the same row.
+
+Uses `cpg_pos_subset.zarr` if present, else `cpg_pos.zarr`, with `context=32`, `shard_size=4096`, `max_shards=1`.
+
+| Test class | Test | Verifies |
+|---|---|---|
+| `TestSchema` | `test_schema_sidecar` | `schema.json` records `samples_per_cpg=1`, `pad_idx=5`, fwdrev source string |
+|  | `test_shard_shape_and_dtype` | Train shard rows are `(32, 6)` float16 |
+| `TestCpgExtraction` | `test_all_windows_have_cg_at_center` | Every row has C-token at index 15 and G-token at index 16 |
+|  | `test_one_sample_per_cpg` | Total written rows are NOT ~2x the source CpG count (regression guard against the v2 two-samples-per-CpG behaviour leaking into the new pipeline) |
+| `TestKineticsFidelity` | `test_forward_kinetics_match` | Output `fi`/`fp` for the first train CpG match the source zarr at `[win_start, win_end)` |
+|  | `test_reverse_kinetics_use_v2_fix` | Output `ri`/`rp` equal source `ri[rev_start:rev_end][::-1]` where `rev_start = L-win_end, rev_end = L-win_start` |
+|  | `test_reverse_kinetics_do_NOT_match_legacy_indexing` | Discriminating regression test: output does not match the legacy `ri[win_start:win_end][::-1]` indexing |
+| `TestMask` | `test_mask_is_all_zero` | Every position of every CpG window has mask=0 (full window is real data) |
+| `TestTrainValSplit` | `test_split_is_deterministic` | Two runs with `seed=42` produce identical row counts and bit-identical shard contents in both train and val splits |
+
+Last run: 2026-05-06, 9 passed in ~7m30s on Gefion against `data/01_processed/ssl_sets/cpg_pos.zarr`. Wall time is dominated by the determinism test (which runs the script twice end-to-end on the full cpg_pos zarr); the fidelity tests themselves take ~1s each.
+
+---
+
 ### `test_legacy_leakage.py`
 
 Checks whether the legacy parquet train/test split leaks windows from the same reads across splits. Read-level overlap would inflate evaluation metrics because CpG sites on the same read share kinetics context. Requires legacy parquet files on disk; skips if not found.

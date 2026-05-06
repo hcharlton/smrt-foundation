@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 from typing import Optional, Sequence
 
@@ -77,17 +78,21 @@ DEFAULT_GAPS_BP = (
 assert len(DEFAULT_GAPS_BP) == 19
 
 
-CH_PAD = 3  # last channel is the pad channel by project convention
+DEFAULT_CH_PAD = 3  # legacy 4-channel layout: [seq, fi, fp, mask]
 
 
-def unpadded_length(read: np.ndarray) -> int:
+def unpadded_length(read: np.ndarray, ch_pad: int = DEFAULT_CH_PAD) -> int:
     """Length of the prefix of `read` (shape (T, C)) that is not padded.
 
     Pad channel convention: 0.0 = real base, 1.0 = pad. Mirrors
     `smrt_foundation.augment._unpadded_length` but operates on numpy
     arrays directly so the build script doesn't need torch.
+
+    `ch_pad` is the channel index of the padding mask. Defaults to 3
+    for the legacy 4-channel layout; 6-channel fwdrev sources use 5
+    and pass it via the source memmap's schema.json sidecar.
     """
-    pad = read[:, CH_PAD]
+    pad = read[:, ch_pad]
     not_pad = (pad == 0.0)
     if bool(not_pad.all()):
         return int(read.shape[0])
@@ -171,6 +176,21 @@ class _ShardedMemmapReader:
         first = np.load(self.shard_paths[0], mmap_mode='r')
         return int(first.shape[1])
 
+    def pad_idx(self) -> int:
+        """Channel index of the padding mask in the source shards.
+
+        Reads `schema.json` if present (written by fwdrev memmap
+        scripts); falls back to `DEFAULT_CH_PAD` for legacy 4-channel
+        sources that predate the schema sidecar.
+        """
+        schema_path = os.path.join(self.source_dir, "schema.json")
+        if os.path.exists(schema_path):
+            with open(schema_path) as f:
+                schema = json.load(f)
+            if "pad_idx" in schema:
+                return int(schema["pad_idx"])
+        return DEFAULT_CH_PAD
+
 
 def build_ssl_pair_val(
     source_memmap: str,
@@ -210,6 +230,7 @@ def build_ssl_pair_val(
     reader = _ShardedMemmapReader(source_memmap)
     n_features = reader.n_features()
     src_context = reader.context()
+    src_pad_idx = reader.pad_idx()
 
     gaps_bp = tuple(int(g) for g in gaps_bp)
     n_gaps = len(gaps_bp)
@@ -243,7 +264,7 @@ def build_ssl_pair_val(
     anchors_list = []
 
     print(f"[build_ssl_pair_val] source: {source_memmap}")
-    print(f"[build_ssl_pair_val] target_len: {target_len}, n_features: {n_features}, src_context: {src_context}")
+    print(f"[build_ssl_pair_val] target_len: {target_len}, n_features: {n_features}, src_context: {src_context}, pad_idx: {src_pad_idx}")
     print(f"[build_ssl_pair_val] gaps: {gaps_bp}")
     print(f"[build_ssl_pair_val] pairs_per_gap: {pairs_per_gap} (total_cap={total_cap})")
     print(f"[build_ssl_pair_val] shard_size: {shard_size}, seed: {seed}")
@@ -256,7 +277,7 @@ def build_ssl_pair_val(
         if all(counts[g] >= targets[g] for g in gaps_bp):
             break
 
-        unp = unpadded_length(read)
+        unp = unpadded_length(read, ch_pad=src_pad_idx)
 
         any_used = False
         for g in gaps_bp:
@@ -309,6 +330,7 @@ def build_ssl_pair_val(
         "target_len": int(target_len),
         "n_features": int(n_features),
         "src_context": int(src_context),
+        "src_pad_idx": int(src_pad_idx),
         "pairs_per_gap_target": int(pairs_per_gap),
         "total_cap": int(total_cap),
         "shard_size": int(shard_size),
