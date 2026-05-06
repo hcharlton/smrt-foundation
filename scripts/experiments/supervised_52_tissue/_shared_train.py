@@ -607,10 +607,14 @@ def main():
             epoch_loss_count += 1
 
             with torch.no_grad():
-                c_tensor = _diag['c']
-                c_flat = c_tensor.reshape(-1, c_tensor.shape[-1])
-                z_std_local = c_flat.std(dim=0).mean()
-                z_norm_local = c_flat.norm(dim=1).mean()
+                c_tensor = _diag.pop('c', None)
+                if c_tensor is None:
+                    z_std_local = torch.tensor(float('nan'), device=accelerator.device)
+                    z_norm_local = torch.tensor(float('nan'), device=accelerator.device)
+                else:
+                    c_flat = c_tensor.reshape(-1, c_tensor.shape[-1])
+                    z_std_local = c_flat.std(dim=0).mean()
+                    z_norm_local = c_flat.norm(dim=1).mean()
             grad_norm_r = accelerator.reduce(grad_norm, reduction='mean').item()
             z_std = accelerator.reduce(z_std_local, reduction='mean').item()
             z_norm = accelerator.reduce(z_norm_local, reduction='mean').item()

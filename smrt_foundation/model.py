@@ -1207,5 +1207,5 @@ class TissueClassifier(nn.Module):
     )
 
   def forward(self, x):
-    c = self.encoder.forward(x)
+    c = self.encoder(x)
     return self.head(c[:, c.shape[1] // 2, :])
