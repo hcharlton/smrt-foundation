@@ -22,9 +22,16 @@ if module_path not in sys.path:
 from smrt_foundation.dataset import LabeledMemmapDataset, ShardedMemmapDataset
 from smrt_foundation.normalization import ZNorm, KineticsNorm
 
-# Import SSLNorm from the experiment script
+# SSLNorm was previously hosted in scripts/experiments/ssl_21_pretrain/train.py
+# but was removed from the codebase. Guard the import so the file still
+# collects; the equivalence tests below skip when SSLNorm is unavailable.
 sys.path.insert(0, os.path.join(module_path, 'scripts', 'experiments', 'ssl_21_pretrain'))
-from train import SSLNorm
+try:
+    from train import SSLNorm  # type: ignore[attr-defined]
+    HAS_SSL_NORM = True
+except (ImportError, ModuleNotFoundError):
+    SSLNorm = None  # type: ignore[assignment,misc]
+    HAS_SSL_NORM = False
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +142,7 @@ class TestZNormEquivalence:
 # Test: SSLNorm equivalence on SSL data
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(not HAS_SSL_NORM, reason="SSLNorm has been removed from the codebase")
 class TestSSLNormEquivalence:
     """KineticsNorm should match SSLNorm on ShardedMemmapDataset."""
 
@@ -235,3 +243,106 @@ class TestKineticsNormProperties:
 
         # Values should still be modified (z-scored)
         assert not torch.equal(x_normed[:, 1], x_raw[:, 1])
+
+
+# ---------------------------------------------------------------------------
+# Test: KineticsNorm with n_continuous=4 (tissue 6-channel layout)
+# ---------------------------------------------------------------------------
+
+class _Synth6ChDataset(torch.utils.data.Dataset):
+    """Synthetic dataset with the tissue 6-channel layout
+    [seq, fi, fp, ri, rp, mask]. Used to exercise the n_continuous=4 path
+    without requiring the real tissue data on disk."""
+
+    def __init__(self, n=64, t=128, seed=0):
+        torch.manual_seed(seed)
+        x = torch.zeros(n, t, 6)
+        x[..., 0] = torch.randint(0, 5, (n, t)).float()  # seq tokens
+        # Distinct positive distributions per kinetic channel so means
+        # and stds end up channel-specific (catches accidental aliasing).
+        for k, (lo, scale) in enumerate([(0.5, 50.0), (0.5, 30.0), (0.1, 10.0), (0.1, 5.0)], start=1):
+            x[..., k] = torch.rand(n, t) * scale + lo
+        x[..., 5] = 0.0  # all real (no padding)
+        self.x = x
+
+    def __len__(self):
+        return len(self.x)
+
+    def __getitem__(self, i):
+        return self.x[i]
+
+
+class TestKineticsNormNContinuous4:
+    """Tissue task introduces a 6-channel layout [seq, fi, fp, ri, rp, mask]
+    handled by KineticsNorm(..., n_continuous=4). Verify the new path
+    targets channels 1..4, leaves seq/mask untouched, and round-trips
+    through save_stats/load_stats."""
+
+    def test_kin_channels_and_shapes(self):
+        ds = _Synth6ChDataset(n=64, t=128, seed=0)
+        knorm = KineticsNorm(ds, log_transform=True, max_samples=64, n_continuous=4)
+        assert knorm.n_continuous == 4
+        assert knorm.kin_channels == [1, 2, 3, 4]
+        assert knorm.means.shape == (6,)
+        assert knorm.stds.shape == (6,)
+
+    def test_seq_and_mask_stats_untouched(self):
+        ds = _Synth6ChDataset(n=64, t=128, seed=0)
+        knorm = KineticsNorm(ds, log_transform=True, max_samples=64, n_continuous=4)
+        # Seq channel 0 and mask channel 5 should not have stats computed
+        # (means default to 0, stds to 1).
+        assert knorm.means[0].item() == 0.0
+        assert knorm.means[5].item() == 0.0
+        assert knorm.stds[0].item() == 1.0
+        assert knorm.stds[5].item() == 1.0
+
+    def test_kin_channel_stats_learned(self):
+        ds = _Synth6ChDataset(n=64, t=128, seed=0)
+        knorm = KineticsNorm(ds, log_transform=True, max_samples=64, n_continuous=4)
+        for c in [1, 2, 3, 4]:
+            assert knorm.stds[c].item() > 0.05, (
+                f"channel {c} std={knorm.stds[c].item():.4g}; expected > 0.05"
+            )
+
+    def test_call_preserves_seq_and_mask(self):
+        ds = _Synth6ChDataset(n=64, t=128, seed=0)
+        knorm = KineticsNorm(ds, log_transform=True, max_samples=64, n_continuous=4)
+        x_orig = ds[0].clone()
+        x_normed = knorm(ds[0].clone())
+        torch.testing.assert_close(x_normed[..., 0], x_orig[..., 0],
+                                   msg="seq channel modified")
+        torch.testing.assert_close(x_normed[..., 5], x_orig[..., 5],
+                                   msg="mask channel modified")
+
+    def test_call_modifies_all_four_kinetics_channels(self):
+        ds = _Synth6ChDataset(n=64, t=128, seed=0)
+        knorm = KineticsNorm(ds, log_transform=True, max_samples=64, n_continuous=4)
+        x_orig = ds[0].clone()
+        x_normed = knorm(ds[0].clone())
+        for c in [1, 2, 3, 4]:
+            assert not torch.equal(x_normed[..., c], x_orig[..., c]), (
+                f"channel {c} unchanged after normalisation"
+            )
+
+    def test_save_load_round_trip(self):
+        ds = _Synth6ChDataset(n=64, t=128, seed=0)
+        knorm = KineticsNorm(ds, log_transform=True, max_samples=64, n_continuous=4)
+        state = knorm.save_stats()
+        assert state['norm_n_continuous'] == 4
+        loaded = KineticsNorm.load_stats(state)
+        assert loaded.n_continuous == 4
+        assert loaded.kin_channels == [1, 2, 3, 4]
+        torch.testing.assert_close(loaded.means, knorm.means)
+        torch.testing.assert_close(loaded.stds, knorm.stds)
+
+    def test_legacy_state_defaults_to_n_continuous_2(self):
+        # Pre-modification checkpoints have no 'norm_n_continuous' key.
+        # load_stats must default to 2 so old checkpoints continue to load.
+        legacy = {
+            'norm_means': torch.zeros(4),
+            'norm_stds': torch.ones(4),
+            'norm_log_transform': True,
+        }
+        loaded = KineticsNorm.load_stats(legacy)
+        assert loaded.n_continuous == 2
+        assert loaded.kin_channels == [1, 2]

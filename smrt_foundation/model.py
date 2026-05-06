@@ -1125,3 +1125,87 @@ class Smrt2VecInputMaskLNSmallRF(Smrt2VecInputMaskLN):
         nn.Linear(d_model, d_model),
         nn.LayerNorm(d_model),
     )
+
+
+### Tissue classification (supervised_52) — 6-channel input layout
+#
+# Tissue reads are stored with 4 kinetics channels (forward fi/fp + reverse
+# ri/rp) plus a sequence channel and a padding mask, for a total of 6
+# channels: [seq, fi, fp, ri, rp, mask]. The existing SmrtEncoder is hard-
+# wired to the SSL/CpG 4-channel layout [seq, fi, fp, mask] via
+# SmrtEmbedding(n_continuous=2) and a get_latents that slices x[..., 1:3].
+#
+# SmrtEncoderTissue is a fresh-training subclass parameterised on
+# n_continuous (default 4 for tissue). It also drops layer_norm_target
+# and the SSL-only `targets` return value from get_latents, since the
+# supervised path never uses them. State-dict keys are NOT interchangeable
+# with SmrtEncoder by design.
+#
+# TissueClassifier wraps SmrtEncoderTissue with a center-latent
+# multiclass head (matches DirectClassifier's pooling convention).
+
+
+class SmrtEncoderTissue(SmrtEncoder):
+  """SmrtEncoder variant for the 6-channel tissue layout.
+
+  Channel layout: [seq, fi, fp, ri, rp, mask] (n_continuous=4 by default).
+  Same CNN, PE, and transformer stack as SmrtEncoder. Differences:
+    - SmrtEmbedding constructed with n_continuous=4
+    - get_latents slices x[..., 1:1+n_continuous] for kinetics and
+      x[..., -1] for the pad mask
+    - layer_norm_target and the SSL-only `targets` return value are
+      dropped; this class is streamlined for the supervised tissue task
+
+  State-dict keys are NOT interchangeable with SmrtEncoder (the
+  embed.kin_embed Linear has different in_features and there is no
+  layer_norm_target submodule). Tissue checkpoints are not encoder-
+  compatible with SSL/CpG checkpoints by design.
+  """
+  def __init__(self, d_model=128, n_layers=4, n_head=4, max_len=2048,
+               dropout_p=0.01, n_continuous=4):
+    nn.Module.__init__(self)
+    self.d_model = d_model
+    self.n_continuous = n_continuous
+    self.embed = SmrtEmbedding(d_model, n_continuous=n_continuous)
+    self.pe = PositionalEncoding(d_model, max_len=max_len)
+    self.cnn = CNN(d_model, max_len=max_len, dropout_p=dropout_p)
+    self.blocks = nn.ModuleList([
+        TransformerBlock(d_model=d_model, n_head=n_head, max_len=max_len)
+        for _ in range(n_layers)
+    ])
+
+  def get_latents(self, x):  # pyright: ignore[reportIncompatibleMethodOverride]
+    x_nuc = x[..., 0]
+    x_kin = x[..., 1:1 + self.n_continuous]
+    x_pad = x[..., -1]
+    x = self.embed(x_nuc, x_kin, x_pad)
+    z, z_pad = self.cnn(x.permute(0, 2, 1), x_pad)
+    z = z.permute(0, 2, 1)
+    return z, z_pad
+
+  def forward(self, x):
+    z, z_pad = self.get_latents(x)
+    z = self.add_pe(z)
+    return self.forward_transformer(z, z_pad)
+
+
+class TissueClassifier(nn.Module):
+  """Multiclass tissue classifier over 4-kinetics-channel SMRT reads.
+
+  Center-latent pooling matches the DirectClassifier convention. Head:
+  Linear(d_model, d_model//2) -> GELU -> Linear(d_model//2, n_classes).
+  Forward returns raw logits; pair with nn.CrossEntropyLoss and long
+  targets.
+  """
+  def __init__(self, d_model, n_layers, n_head, max_len, n_classes=8, n_continuous=4):
+    super().__init__()
+    self.encoder = SmrtEncoderTissue(d_model, n_layers, n_head, max_len, n_continuous=n_continuous)
+    self.head = nn.Sequential(
+      nn.Linear(d_model, d_model // 2),
+      nn.GELU(),
+      nn.Linear(d_model // 2, n_classes),
+    )
+
+  def forward(self, x):
+    c = self.encoder.forward(x)
+    return self.head(c[:, c.shape[1] // 2, :])

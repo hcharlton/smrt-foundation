@@ -220,6 +220,8 @@ Equivalence tests verifying that `KineticsNorm` produces identical statistics an
 | `test_batch_output_identical` | Normalized output matches SSLNorm within atol=1e-5 |
 | `test_multiple_samples` | Equivalence holds across 50 samples |
 
+> Note: SSLNorm has been removed from `scripts/experiments/ssl_21_pretrain/train.py`, so the import is now guarded and these tests skip via `pytest.mark.skipif`.
+
 **`TestKineticsNormProperties`** &mdash; Internal behavior checks
 
 | Test | Verifies |
@@ -228,11 +230,29 @@ Equivalence tests verifying that `KineticsNorm` produces identical statistics an
 | `test_kinetics_are_modified` | Columns 1 and 2 (IPD, PW) are modified |
 | `test_no_log_transform_mode` | z-score-only mode (log_transform=False) still modifies kinetics |
 
+**`TestKineticsNormNContinuous4`** &mdash; 6-channel tissue layout (n_continuous=4)
+
+Synthetic-data tests for the new tissue path: `KineticsNorm(..., n_continuous=4)` over the layout `[seq, fi, fp, ri, rp, mask]`. Default `n_continuous=2` is preserved bit-for-bit by the existing tests above; these confirm the new path is correct end-to-end and round-trips through `save_stats` / `load_stats`.
+
+| Test | Verifies |
+|---|---|
+| `test_kin_channels_and_shapes` | `kin_channels == [1, 2, 3, 4]`, `means`/`stds` shape == `(6,)` |
+| `test_seq_and_mask_stats_untouched` | Stats at indices 0 (seq) and 5 (mask) remain at the defaults (mean=0, std=1) |
+| `test_kin_channel_stats_learned` | All four kinetics channels have non-trivial stds |
+| `test_call_preserves_seq_and_mask` | `__call__` does not modify channels 0 or 5 |
+| `test_call_modifies_all_four_kinetics_channels` | `__call__` modifies channels 1..4 |
+| `test_save_load_round_trip` | `save_stats` records `norm_n_continuous=4`; `load_stats` round-trips means/stds |
+| `test_legacy_state_defaults_to_n_continuous_2` | Legacy state (no `norm_n_continuous` key) loads with `n_continuous=2` |
+
+Last run: 2026-05-06, 7 passed in 21s on GenomeDK (synthetic data; no cluster artifacts required).
+
 ---
 
 ### `test_bam_to_labeled_memmap.py`
 
-Tests for `scripts/bam_to_labeled_memmap.py`, the single-pass BAM &rarr; labeled memmap pipeline used to build the tissue-classification dataset. Output is uint8 raw BAM values (no normalization &mdash; that is the dataloader's job), with feature channels `[seq, fi, fp, ri, rp, *optional_tags, mask]` and a `manifest.parquet` carrying per-window `(shard_idx, row_idx, read_name, tissue_str, cell_str, tissue_id, cell_id, crop_start, read_length)`.
+Tests for `scripts/bam_to_labeled_memmap.py`, the single-pass BAM &rarr; labeled memmap pipeline used to build the tissue-classification dataset, and `TissueMemmapDataset` (in `smrt_foundation/dataset.py`) which loads it.
+
+Output is uint8 raw BAM values (no normalization &mdash; that is the dataloader's job) with feature channels `[seq, fi, fp, ri, rp, *optional_tags, mask]`. The single source of truth for labels and split logic is `manifest.parquet`, which carries per-window `(shard_idx, row_idx, read_name, tissue_str, cell_str, tissue_id, cell_id, crop_start, read_length)`. There is no separate labels sidecar; the dataset class reads the manifest at construction time and uses it as the index for shard lookups.
 
 The central correctness question: does the row at `(shard_idx, row_idx)` in the data shard actually correspond to the read named in the manifest, with kinetics that match the BAM bytes at the recorded `crop_start`?
 
@@ -255,7 +275,8 @@ The whole suite runs in ~18 s on GenomeDK; tests skip automatically if the yoran
 
 | Test | Verifies |
 |---|---|
-| `test_specific_read_attribution` | A chosen real yoran read appears exactly once in the manifest; its labels-sidecar entry agrees with the manifest; and the shard data row equals the BAM-extracted uint8 array sliced at the recorded `crop_start`. This is the read-level fidelity guarantee. |
+| `test_specific_read_attribution` | A chosen real yoran read appears exactly once in the manifest; the shard data row equals the BAM-extracted uint8 array sliced at the recorded `crop_start`. This is the read-level fidelity guarantee. |
+| `test_tissue_dataset_class_roundtrip` | `TissueMemmapDataset` returns `(x, tissue_id)` pairs that match the manifest+shards at the same logical index, and the polars `filter_expr` for held-out-cell splitting partitions the dataset cleanly into train + val. |
 | `test_reverse_kinetics_alignment` | For the chosen read, the shard's `ri` column at output position `j` equals BAM `ri[L-1-(crop_start+j)]` byte-for-byte (and likewise for `rp`). Direct regression test for the v1 archived-script reverse-kinetics misalignment bug. |
 | `test_real_labels_format_is_parsed` | Every manifest row's `tissue_str` matches the source label_map for the same read &mdash; confirms the parser handles the real yoran labels-file line format (including occasional trailing whitespace) without dropping or mislabeling rows. |
 | `test_zmw_disambiguation` | Pure unit test of `parse_labels` (no BAM). Same ZMW integer in two distinct cells with different tissues produces two distinct `label_map` entries and two distinct `cell_to_id` entries. Regression for the ZMW-uniqueness concern. |

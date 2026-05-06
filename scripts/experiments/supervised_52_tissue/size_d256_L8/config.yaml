@@ -1,0 +1,38 @@
+experiment_type: 'supervised'
+experiment_name: 'tissue_size_grid_d256_L8'
+run_message: >
+  Tissue 8-way classifier shakedown: 50k train (cell s1), 10k val_s1
+  (held-out reads from cell s1), 10k val_s2 (held-out cell s2). 4h
+  walltime budget per size. d=256, L=8, head_dim=64.
+
+resources:
+  cores: 16
+  memory: 256gb
+  walltime: "04:30:00"
+  gres: gpu:8
+  num_processes: 8
+
+data_dir: 'data/01_processed/tissue_sets/yoran_ctx4096'
+partition_path: 'data/01_processed/tissue_sets/yoran_ctx4096/partition.csv'
+
+classifier:
+  d_model: 256
+  n_layers: 8
+  n_head: 4          # head_dim = 64
+  context: 2048
+  n_continuous: 4
+  n_classes: 8
+
+  total_steps: 100000
+  eval_every_steps: 5000
+  resume_every_steps: 5000
+
+  batch_size: 128    # per GPU; global = 1024 across 8 ranks
+  max_lr: 3e-3
+  weight_decay: 0.02
+  pct_start: 0.1
+  grad_clip: 5.0
+
+  dataset_on_gpu: true
+  chunk_size: 2048
+  ds_limit: 0

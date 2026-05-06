@@ -74,11 +74,17 @@ class ZNorm:
 
 
 class KineticsNorm:
-    """Unified log1p + z-score normalization for kinetics channels [1, 2].
+    """Unified log1p + z-score normalization for kinetics channels.
 
     Replaces both ZNorm (for LabeledMemmapDataset) and SSLNorm (for
     ShardedMemmapDataset). Handles both dataset types automatically and
     excludes padded positions when computing statistics.
+
+    Channel layout assumed: index 0 is the sequence token, indices
+    1..n_continuous are kinetics, the last index is the padding mask
+    (0.0 = real, 1.0 = pad). For n_continuous=2 (default) this matches
+    the SSL/CpG 4-channel layout [seq, fi, fp, mask]; for n_continuous=4
+    it matches the tissue 6-channel layout [seq, fi, fp, ri, rp, mask].
 
     Args:
         ds: Any Dataset. If __getitem__ returns a tuple, the first element
@@ -86,10 +92,14 @@ class KineticsNorm:
         eps: Epsilon for numerical stability in division.
         log_transform: Whether to apply log1p before z-scoring.
         max_samples: Maximum samples to load for computing statistics.
+        n_continuous: Number of kinetics channels (starts at index 1).
+            2 = legacy fwd-only [fi, fp]; 4 = fwd+rev [fi, fp, ri, rp].
     """
-    def __init__(self, ds, eps=1e-8, log_transform=True, max_samples=1_048_576):
+    def __init__(self, ds, eps=1e-8, log_transform=True, max_samples=1_048_576, n_continuous=2):
         self.log_transform = log_transform
         self.eps = eps
+        self.n_continuous = int(n_continuous)
+        self.kin_channels = list(range(1, 1 + self.n_continuous))
 
         sampler = ChunkedRandomSampler(ds, 2048, shuffle_within=True)
         batch = next(iter(DataLoader(ds, batch_size=max_samples, sampler=sampler)))
@@ -99,21 +109,21 @@ class KineticsNorm:
 
         if self.log_transform:
             x = x.clone()
-            x[..., [1, 2]] = torch.log1p(x[..., [1, 2]])
+            x[..., self.kin_channels] = torch.log1p(x[..., self.kin_channels])
 
         # Exclude padded positions (mask channel is last: 0.0 = real, 1.0 = pad)
         active = x[..., -1] == 0.0
 
         self.means = torch.zeros(x.shape[-1])
         self.stds = torch.ones(x.shape[-1])
-        for c in [1, 2]:
+        for c in self.kin_channels:
             vals = x[..., c][active]
             if vals.numel() > 0:
                 self.means[c] = vals.mean()
                 self.stds[c] = vals.std()
 
     @classmethod
-    def from_stats(cls, means, stds, log_transform=True, eps=1e-8):
+    def from_stats(cls, means, stds, log_transform=True, eps=1e-8, n_continuous=2):
         """Construct a KineticsNorm from pre-computed statistics.
 
         Bypasses the dataset-sampling path in __init__. Low-level constructor
@@ -132,10 +142,14 @@ class KineticsNorm:
                            training flow (ZNorm or KineticsNorm with default
                            log_transform=True).
             eps: Division-by-zero guard. Default matches __init__.
+            n_continuous: Number of kinetics channels at indices 1..n_continuous.
+                          Default 2 matches legacy checkpoints written before
+                          the field was added.
 
         Returns:
-            A KineticsNorm instance with .means, .stds, .log_transform, .eps
-            set directly. No DataLoader is instantiated.
+            A KineticsNorm instance with .means, .stds, .log_transform, .eps,
+            .n_continuous, .kin_channels set directly. No DataLoader is
+            instantiated.
         """
         means_t = means.clone().float() if torch.is_tensor(means) else torch.tensor(means, dtype=torch.float32)
         stds_t = stds.clone().float() if torch.is_tensor(stds) else torch.tensor(stds, dtype=torch.float32)
@@ -147,6 +161,8 @@ class KineticsNorm:
         instance = cls.__new__(cls)
         instance.log_transform = log_transform
         instance.eps = eps
+        instance.n_continuous = int(n_continuous)
+        instance.kin_channels = list(range(1, 1 + instance.n_continuous))
         instance.means = means_t
         instance.stds = stds_t
         return instance
@@ -171,6 +187,7 @@ class KineticsNorm:
             'norm_means': self.means.detach().cpu(),
             'norm_stds': self.stds.detach().cpu(),
             'norm_log_transform': self.log_transform,
+            'norm_n_continuous': self.n_continuous,
         }
 
     @classmethod
@@ -195,11 +212,12 @@ class KineticsNorm:
             state['norm_stds'],
             log_transform=state.get('norm_log_transform', True),
             eps=eps,
+            n_continuous=state.get('norm_n_continuous', 2),
         )
 
     def __call__(self, x):
         if self.log_transform:
-            x[..., [1, 2]] = torch.log1p(x[..., [1, 2]])
-        x[..., [1, 2]] -= self.means[[1, 2]]
-        x[..., [1, 2]] /= (self.stds[[1, 2]] + self.eps)
+            x[..., self.kin_channels] = torch.log1p(x[..., self.kin_channels])
+        x[..., self.kin_channels] -= self.means[self.kin_channels]
+        x[..., self.kin_channels] /= (self.stds[self.kin_channels] + self.eps)
         return x

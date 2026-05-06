@@ -230,6 +230,8 @@ Architectural tweaks orthogonal to the invariant (e.g., `ssl_55_simclr_grid_lnhe
 
 **Justification:** Skips a 1.6 TB intermediate zarr we don't need for this task and removes the names-out-of-sync silent-failure mode. The manifest is the load-bearing artifact for tests, downstream cell-level splitting, and per-tissue diagnostics; keeping it as a separate parquet (rather than baking labels into shard filenames or the data tensor) lets the same memmap be split read-level OR held-out-cell without rebuilding.
 
+**Manifest as the single source of truth for labels.** An earlier revision also wrote a `labels_NNNNN.npy` sidecar parallel to each data shard, carrying `(tissue_id, cell_id)` per row. That redundancy was dropped: the manifest already has those columns plus `read_name`, `cell_str`, `tissue_str`, `crop_start`, and `read_length`, so a separate sidecar adds maintenance burden without adding information. `TissueMemmapDataset` (in `smrt_foundation/dataset.py`) reads the manifest at construction time, applies an optional polars `filter_expr` for train/val splitting, and indexes shard slices on demand.
+
 ## 2026-05: Raw uint8 on Disk; Online Normalization in the Dataloader
 
 **Motivation:** Different normalization schemes (per-read MAD on the cropped window, per-batch z-score, no normalization, learned normalization) each have different transfer-time properties. Baking one scheme into the persisted artifact (as `zarr_to_memmap_instanceNorm.py` does) locks future experiments into that one choice.

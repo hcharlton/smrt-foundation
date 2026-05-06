@@ -121,6 +121,116 @@ class LabeledMemmapDataset(Dataset):
             x = self.norm_fn(x)
         return x, y
 
+class TissueMemmapDataset(Dataset):
+    """Tissue-classification dataset over uint8 sharded memmaps.
+
+    Companion to ``scripts/bam_to_labeled_memmap.py``. The expected
+    directory layout is::
+
+        <data_dir>/
+            schema.json
+            manifest.parquet      # one row per output window
+            shard_NNNNN.npy       # (<=shard_size, context, n_features) uint8
+
+    The manifest is the single source of truth for labels and split logic.
+    Each row carries ``(shard_idx, row_idx, read_name, tissue_str,
+    cell_str, tissue_id, cell_id, crop_start, read_length)``. This class
+    indexes by manifest row and loads the corresponding shard slice on
+    demand. Shards stay on disk as raw uint8; the cast to float32 happens
+    per item, and any normalization is applied online by the caller via
+    ``norm_fn``.
+
+    Train / val splitting is a polars expression evaluated against the
+    manifest at construction time::
+
+        from smrt_foundation.dataset import TissueMemmapDataset
+
+        # held-out cell: leave out cell_id 0 from training
+        train = TissueMemmapDataset(out_dir, filter_expr=pl.col('cell_id') != 0)
+        val   = TissueMemmapDataset(out_dir, filter_expr=pl.col('cell_id') == 0)
+
+        # random read-level split using a precomputed mask column
+        m = pl.read_parquet(out_dir + '/manifest.parquet').with_columns(
+            pl.lit(np.random.RandomState(0).rand(...)).alias('rand'))
+        train = TissueMemmapDataset(out_dir, filter_expr=pl.col('rand') >= 0.2)
+
+    Args:
+        data_dir: Directory containing schema.json, manifest.parquet, and
+            shard_*.npy files.
+        filter_expr: Optional polars expression applied to the manifest at
+            init time to restrict the dataset (for train/val splitting,
+            tissue subsetting, etc.). Default: include all rows.
+        norm_fn: Optional callable applied to the float32 window before
+            return (e.g. ``normalize_read_mad`` from
+            ``smrt_foundation.normalization``). Default: no normalization.
+        cache_size: Max number of shard memmaps held open at once. LRU.
+            Each shard is a few hundred MB at the default
+            ``shard_size=16384`` and ``context=4096``, so a small cache
+            keeps memory bounded; OS page cache handles the actual data
+            caching at finer granularity.
+
+    ``__getitem__(idx)`` returns ``(x, tissue_id)`` where ``x`` is a
+    float32 tensor of shape ``(context, n_features)`` and ``tissue_id`` is
+    a long tensor scalar. Tissue id assignments are recorded in
+    ``schema.json``'s ``tissue_to_id`` field.
+    """
+
+    def __init__(self, data_dir, filter_expr=None, norm_fn=None, cache_size=8):
+        self.data_dir = os.path.expandvars(data_dir)
+
+        manifest_path = os.path.join(self.data_dir, 'manifest.parquet')
+        if not os.path.exists(manifest_path):
+            raise FileNotFoundError(
+                f"manifest.parquet missing at {manifest_path}. "
+                f"Did the bam_to_labeled_memmap job complete?"
+            )
+        manifest = pl.read_parquet(manifest_path)
+        if filter_expr is not None:
+            manifest = manifest.filter(filter_expr)
+        if manifest.height == 0:
+            raise ValueError(
+                f"filter_expr eliminated every row of {manifest_path}. "
+                f"Check that the expression matches at least one read."
+            )
+
+        # Three columns are all we need at __getitem__ time. Stored as a
+        # 2D ndarray for O(1) indexing (faster than polars row-by-row).
+        self.refs = manifest.select(
+            ['shard_idx', 'row_idx', 'tissue_id']
+        ).to_numpy().astype(np.int64, copy=False)
+
+        self.cache_size = cache_size
+        self.norm_fn = norm_fn
+        self.memmaps = OrderedDict()
+
+    def __len__(self):
+        return len(self.refs)
+
+    def _shard_path(self, shard_idx):
+        return os.path.join(self.data_dir, f"shard_{int(shard_idx):05d}.npy")
+
+    def _get_shard(self, shard_idx):
+        if shard_idx in self.memmaps:
+            self.memmaps.move_to_end(shard_idx)
+            return self.memmaps[shard_idx]
+        if len(self.memmaps) >= self.cache_size:
+            self.memmaps.popitem(last=False)
+        arr = np.load(self._shard_path(shard_idx), mmap_mode='r')
+        self.memmaps[shard_idx] = arr
+        return arr
+
+    def __getitem__(self, idx):
+        if idx < 0 or idx >= len(self.refs):
+            raise IndexError(idx)
+        shard_idx, row_idx, tissue_id = self.refs[idx]
+        shard = self._get_shard(int(shard_idx))
+        x = torch.from_numpy(np.array(shard[int(row_idx)])).float()
+        if self.norm_fn is not None:
+            x = self.norm_fn(x)
+        y = torch.tensor(int(tissue_id), dtype=torch.long)
+        return x, y
+
+
 def compute_log_normalization_stats(df, features, epsilon=1):
     def clean(col):
         return df[col].explode().fill_null(0).cast(pl.Float32).clip(lower_bound=0).log1p()
