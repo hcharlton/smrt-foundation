@@ -1,277 +1,87 @@
 # smrt-foundation
-A foundation model for pacbio SMRT reads, providing a native understanding of kinetics wrt nucleotide context. The success case is producing a downstream classifier that using the pretrained encoder that beats (ideally by a significant margin) a classifier that is trained purely by supervised learning. This is directly comparable to wav2vec 2.0 minus the quantization module.
 
-The supervised baseline for single-strand CpG methylation classification is established at 82% top-1 accuracy using a CNN-transformer encoder trained end-to-end on labeled kinetics windows. The bulk of the work over the past six months has been on the self-supervised pretraining side, which has proven more difficult than anticipated. A wav2vec 2.0-style contrastive approach (InfoNCE on masked kinetics) was implemented first, but probe accuracy actively declined over pretraining epochs — a systematic investigation traced this to a combination of normalization mismatch, context length mismatch (4096 pretraining vs 32 downstream), and fundamental task misalignment where the contrastive objective discards the kinetics signal relevant to methylation. Switching to a masked autoencoder with direct kinetics reconstruction stabilized the probe at ~66% but did not close the gap. Fine-tuning the best pretrained encoder reached 79%, narrowing the deficit to 3pp, though the comparison is confounded by optimizer schedule differences and the fact that pretraining and fine-tuning used the same data distribution — violating the core SSL premise of leveraging additional unlabeled data. A large-scale autoencoder pretraining run on 25G of OB007 reads (exp 29, ~1000 GPU hours) reached 63% linear-probe accuracy — comparable to the smaller CpG-data autoencoder, so additional unlabeled data alone did not close the gap. Current work runs on two tracks: (1) **SimCLR** with kinetic-feature augmentations (subcrop, channel dropout, Gaussian noise, temporal blur) as an alternative to input-masking pretext tasks — scaling from 2M to 102M params in ssl_50/51/52; and (2) a **data scaling grid** for CpG supervised fine-tuning (exps 41–46) to characterize when pretrained initializations help versus hurt. A significant amount of infrastructure was built along the way: a BAM-to-memmap data pipeline, multi-GPU training with HuggingFace Accelerate, three pretraining architectures (input-masked contrastive, masked autoencoder, augmentation-based SimCLR), a linear probe evaluation framework, epoch-capped data scaling grids with per-size batch scaling, and a two-stage fine-tuning pipeline with differential learning rates.
+A foundation model for PacBio SMRT reads. The ambition is a downstream classifier built on a pretrained encoder that beats one trained from random init by some meaningful margin, especially in the label-scarce regime where SSL is supposed to help. Direct analog of wav2vec 2.0 for kinetics, minus the quantization module. The supervised baseline at full data sits at about 82% top-1 on single-strand CpG methylation in a 32 bp window (`supervised_20`). The autoencoder lineage is the SSL family that has produced positive transfer over random init; the active comparison is whether that lift translates into a beat in the small-n regime, where pretraining is meant to earn its keep.
 
-## Data
-PacBio SMRT HiFi reads. Unlike normal genetic sequencing data this comes with two extra features: Pulse width (pw or rp/fp) and interpulse duration (ipd or fi/ri). Since modifications to nucleuotides are also forced through the polymerase, they alter the kinetics of the molecule along with nucleotide context. This allows the inference of modifications on a per-site basis. This is natively done on a dual-strand basis for CpG sites by PacBio, but many other types of modifications are missing. 
-## Plan
-1. ~~Establish a supervised baseline for single strand CpG methylation classification on 32/64 basepair samples.~~ Done (exp 20, ~82% top-1).
-2. ~~Implement the "smrt2vec" following the design principles of wav2vec 2.0.~~ Done (`Smrt2VecInputMask`, `SmrtAutoencoder`).
-3. ~~Run pretraining experiments.~~ Contrastive (exp 21/23/26) and autoencoder (exp 24/25) completed; fine-tuning (exp 27) reached 79%.
-4. ~~Large-scale autoencoder pretraining on OB007.~~ Done (exp 29, 63% probe) — additional unlabeled data alone did not close the gap.
-5. Test SimCLR with kinetic-feature augmentations as an alternative to input-masking (ssl_50 pilot, ssl_51/52 scaling grid 2M → 102M params).
-6. Characterize the CpG supervised data scaling curve with and without pretrained initialization (exps 33–46, spanning 100 to 8M labeled training samples).
+## What we're working with
 
-## Self supervised task
-Three pretext tasks have been attempted. **Input-masked InfoNCE** (exps 21/23, `Smrt2VecInputMask`): mask kinetics channels at random spans in a 4096-base read, encode, and use InfoNCE to match masked-position outputs to unmasked targets. **Masked autoencoder** (exps 24/25, `SmrtAutoencoder`): same input masking but reconstruct the original kinetics at masked positions via MSE — trades contrastive matching for direct regression. **Augmentation-based SimCLR** (exps 50–52, `SimCLRSmrt`): no input masking — generate two augmented views of each read (random subcrop + channel dropout + Gaussian noise + temporal blur) and pull views of the same read together under NT-Xent while pushing all other in-batch views apart. The bet is that kinetic-feature augmentations preserve methylation identity.
-### Experimental Option and Thoughts
-None of the existing methods take advantage of coverage, which refers to the number of reads that align to the same position in the genome. Currently the model (even the SimCLR method) is taking windows of a read, and then using the contrastive loss objective to pull those views together. In contrastive learning, what is held invariant across the views tends to be something should be aligned for the downstream task, and since it is only really advantageous to use that in a unabeled context, that is based on some assumptions. For example, in the SimCLR paper, there are two views of the same image, and the task assumes that each image fundamentally represents one object, therefore the invariant of the two views is the class of the entity they represent, even though it is not explicitly labeled. So then the contrastive task is aligned with a classification task because the views that are pulled together are of the same object, and so the model learns to collapse the noise of the images toward the entity class invariant. In the context of this project, the generalized downstream task is modification at a single position in a read. We could use the coverage at a position to generate an tensor that is say of dimensions B,C,H,W = B,4,64,256 where there are 4 feature channels of ipd, pw, sm (agreements in the read-specific ccs position), sx (disagreements in the ccs read-specific position), 64 different reads all aligned to the exact genome position, and 256 base pairs of those reads. If we took multiple crops of this and used a SimCLR setup to pull their encoded representations together, what would the model learn? What's invariant in this section of data analagous to the original SimCLR setup with dogs, cats, etc.? The problem is that methylation or other modification is not necessarily the same for a given site in each read because each read is more likely to have come from a different cell than the other haplotype. 
+PacBio HiFi reads come with two channels per base that a normal sequencing read does not have: pulse width (`pw`, split into `fp`/`rp` for forward/reverse strands) and interpulse duration (`ipd`, `fi`/`ri`). The polymerase is sensitive to base modifications, so the kinetics carry a per-site footprint of methylation and other damage processes. PacBio resolves dual-strand CpG methylation natively, but most other modifications do not have a public model. That is the gap.
 
-Another idea: Roughly half of the reads come from one haplotype, and the other half from the other haplotype. And modification is MOSTLY symmetric across the haplotypes at one position. 
-## Downstream task
-Binary classification task of a fixed context window around CpG sites for a single strand of the sequence. So we take say 32 base pairs of data and feed that into the encoder and then attach a shallow classification head to make a logit for classification. 
+The current downstream task is binary CpG methylation classification on a single strand: take a 32 bp window centered on a CpG, encode it, attach a shallow head, predict methylated vs unmethylated.
 
-## Status
+## Where things stand
 
-### Supervised baseline: RESOLVED
-Direct supervised training on v2 memmap shards reaches ~82% top-1 (exp 20). The 70% regression from the original memmap pipeline was caused by a reverse kinetics misalignment bug in `zarr_to_methyl_memmap.py` — see "Reverse kinetics misalignment" below.
+**Supervised baseline.** `supervised_20` reaches about 82% top-1 on full data with a CNN-transformer at d=128, L=4. The v2 of that recipe (`supervised_40_baseline_v2`) was still climbing at epoch 20 (0.808 to 0.818). A capacity sweep across d=128/256/512/768 (`supervised_51_baseline_size_grid`) is in flight on Gefion to test whether v40's plateau is capacity-bound.
 
-### Self-supervised pretraining: IN PROGRESS
-Earlier blockers (all resolved): information leakage from latent masking (fixed by input masking in `Smrt2VecInputMask`), normalization mismatch (fixed by shared `KineticsNorm`), missing fine-tuning infrastructure (built in exp 22), sparse masking (increased to p_mask=0.15).
+**Autoencoder SSL is the working thread.** Two pretext tasks have produced positive transfer over random init, both autoencoders. `ssl_25` (CpG-data autoencoder, ctx=32) reaches 66% linear-probe top-1, a few pp above random-init probe. `ssl_29` (25G OB007 reads, ctx=128) reaches 63%. Fine-tuning the `ssl_25` encoder (`supervised_27`) brings it to 79% top-1, which is a 13pp recovery over the linear probe and within a few pp of the full-data supervised baseline. The full-data comparison is confounded by schedule differences and by pretraining and fine-tuning sharing a distribution, but the more interesting question is the small-n regime, where SSL is supposed to earn its keep. `supervised_47` (random-init data scaling), `supervised_50` (random vs `ssl_55` vs `ssl_57` finetune at 10k / 100k / 8M), and `supervised_51_finetune_ssl58_grid` (random vs `ssl_58` finetune at the same train sizes) are the matrixed comparisons that pin this down. Results pending on Gefion.
 
-**Input-masked objectives capped at ~66% probe.** Contrastive pretraining (exp 21/23) produced probe accuracy of ~58% that declined over epochs. Autoencoder pretraining (exp 24) stabilized at ~62%. Training on CpG data directly (exp 25/26) improved both by +4-5pp (autoencoder ~66%, contrastive ~63%). Fine-tuning the best autoencoder encoder (exp 27) recovered 13pp over the linear probe, reaching 79% — still 3pp below the supervised baseline.
+`ssl_58_autoencoder_grid` is the current scale-up of the working recipe. Same 4-size grid (d128/d256/d512/d768) at ctx=512 with `SmrtAutoencoderSmallRF` (small-RF CNN, r0=27) and `MaskedReconstructionLoss`. The structural argument for it is concrete: the autoencoder loss directly penalizes losing per-position kinetic variation (the signal methylation lives in), it has no projection head and no all-gather in the loss path so none of the dimensional-collapse or NCCL-deadlock pathways from `ssl_57` apply, and the small-RF CNN keeps each latent's receptive field local at ctx=512 rather than smearing it across the whole window. Modern post-`ssl_57` harness: no `accelerator.prepare(scheduler)`, `ChunkedRandomSampler` for sequential shard reads, step-based cadences for probe and resume, step-0 baseline on the random-init encoder, encoder-only `step_<N>.pt` milestones, dual-set pair-val (yoran in-distribution and ob007 held-out). Pass criterion at d=128: probe top-1 at least 0.67 and non-decreasing over the last three evals. The `size_*_long` variants of the same grid extend the cosine tail to a 96h walltime without reshaping the curve, so smaller models that finish the 1M-step schedule get to settle at min-lr instead of being clipped at walltime.
 
-**Scaling the input-masked autoencoder to 25G of OB007 (exp 29, ~1000 GPU hours) reached 63% probe** — comparable to exp 25 on CpG data, so additional unlabeled data alone did not close the gap. A reduced-receptive-field variant (exp 30, r0=27 vs 107) aimed to restore per-latent locality at ctx=32 and is still being evaluated.
+**Contrastive is paused.** Variants `ssl_50` through `ssl_57` either failed to beat the random-init probe or collapsed dimensionally during training. The diagnosis from the `ssl_57` post-mortem is structural: contrastive learning enforces an invariance, and every readily available pair definition we tried (within-read crops, neighbor-window pairs, same-tissue pairs) ends up suppressing the per-position kinetic variation that methylation lives in. Lower LR delays collapse without changing the destination. Smaller receptive field does not change the contrastive optimum. Worth revisiting if a fundamentally different positive-pair definition shows up (coverage-based pairs are the most interesting candidate), but no contrastive run is queued.
 
-**Current SSL direction: SimCLR with kinetic-feature augmentations (exps 50–52).** The augmentation-based positive pairing replaces input masking. ssl_50 is the pilot; ssl_51/52 is a scaling grid spanning 2M → 102M params. The d768_L8 model in ssl_51 showed gradient explosion post-warmup (norms of 1e9–1e10); ssl_52 adds gradient clipping (max_norm=5.0) and extra dataloader workers/prefetch to address it.
+Compute cliff: GPU walltime on Gefion expires 2026-05-13. After that the project is on much smaller capacity, so anything that needs the full grid has to be queued before then.
 
-### Supervised data scaling: IN PROGRESS
-Exps 33–46 characterize how CpG classification performance scales with labeled training data (100 to 8M samples) under different initializations and schedules. Exps 41–43 established epoch-capped step budgets so tiny datasets don't train for 400k epochs at bs=4096. Exps 44–45 added per-size batch scaling to restore stochastic gradient noise at small n, where runs with bs ≥ n_train were deterministically memorizing the training set. Exp 46 isolates the batch-scaling fix from the gradual-unfreeze schedule after 43/44/45 regressed at large n relative to exp 42.
+## Tissue provenance (paused)
 
-TLDR/Summary: The pretraining, even when it's performing at its best (79 percent) is still worse than 1 epoch of training directly.  
+We have read-level tissue labels for several individuals across multiple tissues and species, so it is reasonable to ask whether kinetics over a 2 to 4 kb read can predict the tissue a read came from. The bet is that mutation signatures (oxidative damage in colon, UV in skin) leave a kinetic fingerprint on top of the contextual mutation distribution that COSMIC spectra describe.
 
+`supervised_52_tissue` (8 tissues, 2 PacBio cells, 50k labeled reads, partition keyed on `read_name`) drove train cross-entropy to zero on all four sizes while val never moved. The follow-up sklearn probe sweep at `report/probe_tissue_yoran/` (2026-05-07) ran 13 models against the same partition and `KineticsNorm` the deep model uses. Pooled (25-d), binned (128-d), and flat (8192-d) kinetics features all collapse to chance on val (top1 between 0.121 and 0.137 against chance 0.125), while RF, HGB, and saga-LogReg memorize train to 1.0. Per-tissue 1-vs-rest AUROC sits between 0.50 and 0.57. `KineticsNorm` is not destroying signal, the reverse-kinetics alignment is correct, and ctx=2048 vs ctx=4096 changes nothing. The cell-batch effect (s1 vs s2) is real but small (val 0.549). The signal is not there at this dataset size, in the sense that the supervised model is trying to extract it.
 
-### Shared encoder (`SmrtEncoder`)
+Plausible next moves: scale labeled data well past 50k, A/B per-cell normalization (subtract cell mean before the global z-score), sequence-aware features beyond base composition, or condition on the genomic region the read maps to. None queued.
 
-All pretraining and supervised models share the same encoder. The forward path:
+## Shared encoder
+
+All SSL and supervised models share `SmrtEncoder` (`smrt_foundation/model.py`). Forward path:
 
 ```
-Input [B, T, 4]  (seq token, IPD, PW, pad mask)
+Input [B, T, 4]   (seq token, IPD, PW, pad mask)
   │
   ├─ SmrtEmbedding
-  │    nuc: Embedding(5, d/2)  →  [B, T, d/2]     (scaled by √d)
-  │    kin: Linear(2, d/2)     →  [B, T, d/2]     (scaled by √d)
-  │    concat + LayerNorm      →  [B, T, d]
+  │    nuc: Embedding(5, d/2)            (scaled by sqrt(d))
+  │    kin: Linear(2, d/2)               (scaled by sqrt(d))
+  │    concat + LayerNorm                →  [B, T, d]
   │
-  ├─ CNN (11 ResBlocks, two stride-2 for 4× downsampling)
-  │    [B, T, d] → permute → [B, d, T] → conv stack → [B, d, T/4] → permute → [B, T/4, d]
-  │    Also downsamples pad mask: [B, T] → max_pool → [B, T/4]
+  ├─ CNN: 11 ResBlocks, two stride-2 (4x downsample on T and on the pad mask)
+  │    [B, T, d]                         →  [B, T/4, d]
   │
-  ├─ Sinusoidal PE: [B, T/4, d] += pe[:, :T/4]
+  ├─ Sinusoidal positional encoding
   │
-  └─ Transformer (n_layers × {LayerNorm → MultiHeadAttn → LayerNorm → MLP(d→4d→d)})
-       [B, T/4, d] → [B, T/4, d]
+  └─ Transformer (n_layers x Pre-LN attn + 4x MLP)
+       [B, T/4, d]                       →  [B, T/4, d]
 ```
 
-Default: d_model=128, n_layers=4, n_head=4. CNN receptive field ≈ 107 bases.
+Default d=128, L=4, H=4. Receptive field of the standard CNN is about 107 bp; `SmrtEncoderSmallRF` is about 27 bp, used by `ssl_58` to keep the per-latent receptive field local relative to ctx=512.
 
-### Contrastive pretraining (`Smrt2VecInputMask`)
-
-Experiments 21, 23. Wav2vec 2.0 style: mask input kinetics, encode, match to unmasked targets via InfoNCE.
+## Repo
 
 ```
-Input x [B, T, 4]
-  │
-  ├─ Targets branch (no grad):
-  │    encoder.get_latents(x)  →  z_clean [B, T/4, d]
-  │    LayerNorm(z_clean)      →  targets [B, T/4, d]
-  │
-  ├─ Masked branch:
-  │    apply_input_mask(x)     →  x_masked [B, T, 4]  (kinetics ch 1,2 zeroed at random spans)
-  │    encoder.get_latents     →  z [B, T/4, d]
-  │    add_pe + transformer    →  c [B, T/4, d]
-  │    MLP(d→d, GELU, d→d)    →  c_proj [B, T/4, d]
-  │
-  └─ Loss (AgInfoNCE):
-       Select masked positions: c_proj[mask] [N, d], targets[mask] [N, d]
-       L2-normalize both, cosine similarity matrix [N, N_gathered] / τ
-       Cross-entropy against diagonal (each prediction matches its own target)
-       Distributed: all_gather targets across ranks for more negatives
+smrt_foundation/    package: model, dataset, normalization, loss, optim
+scripts/            data pipeline scripts and per-experiment dirs under scripts/experiments/
+configs/            shared configs (data.yaml is the source of truth for token map and CpG pipeline params)
+docs/               status.md, experiment_log.md, methodology.md, negative_results.md
+report/             EDA and probe scripts (each in its own subdir with a plot.py / build.py)
+tests/              pipeline-fidelity and unit tests (see tests/readme.md)
+workflow.py         gwf DAG for the data pipeline only (BAM to Zarr to memmap to validation)
+run.sh / test.sh / plot.sh   environment-detecting submission scripts (Gefion / GenomeDK / local)
 ```
 
-**Transfer results on full-read SSL data** (experiments 21, 23): InfoNCE loss converges, but the linear probe accuracy on CpG classification *declines* over epochs (~58%). Three compounding issues identified:
+The data pipeline is run via `gwf`. The `CONFIG` dict at the top of `workflow.py` registers BAMs and the Zarr / memmap targets they produce. Add a row, then `gwf run`. Datasets whose name starts with `cpg` go through the CpG windowing pipeline (v2); everything else goes through the SSL segmentation pipeline.
 
-1. **Normalization mismatch** (fixed in exp 21 rerun): Probe computed separate `KineticsNorm` from CpG data instead of reusing SSL norm.
-2. **Length mismatch** (tested in exp 23): Encoder trained on T=4096 (1024 after CNN) but probed on T=32 (8 after CNN). Reducing to T=128 didn't help.
-3. **Task misalignment**: Targets are layer-normed CNN features that shift as the encoder trains (moving target). The loss operates in cosine-similarity space disconnected from actual kinetics values.
+Each experiment lives in its own directory under `scripts/experiments/<name>/` with a `config.yaml` (resources plus hyperparameters) and a `train.py`, often a thin wrapper into a shared loop (e.g. `_shared_train.py` for the size-grid experiments). Submit with `bash run.sh scripts/experiments/<name>` and the script picks the right backend automatically. Job output lands as `<jobid>.out` in the experiment directory rather than `.gwf/logs/`. EDA plots and tests use the same pattern (`bash plot.sh report/eda/<name>`, `bash test.sh tests/<file>`). Each training script has an internal `DEFAULT` dict that fills in any keys missing from `config.yaml`, so configs from older experiments still load when the harness gains a new knob.
 
-Experiment 26 re-tests contrastive on CpG data directly (labels discarded, context=32) to isolate whether the objective or the data regime/handling is the bottleneck.
+## The blocker worth remembering
 
-### Contrastive pretraining, mask-token variant (`Smrt2VecInputMaskToken`)
+Reverse kinetics misalignment in `zarr_to_methyl_memmap.py` (now archived). The original v1 script regressed the supervised baseline from about 80% to about 70% by `np.flip`-ing whole reverse-strand reads. PacBio stores `fi`/`fp` in forward order and `ri`/`rp` already in reverse order, so flipping the read flipped `fi` correctly into reverse order but un-flipped `ri` into forward order, leaving the kinetics on the mirror-image position of the sequence. Half the training windows had misaligned features. `zarr_to_methyl_memmap_v2.py` fixes this with explicit reverse indexing (`ri[L-end:L-start]`) instead of a whole-read flip, and matches the legacy parquet pipeline byte-for-byte. `supervised_18` confirmed the fix at about 80%, `supervised_20` extended it to about 82% on full data.
 
-Not yet wired to an experiment. Same contrastive objective as `Smrt2VecInputMask`, but the masked branch injects a learnable d_model mask token at the embedding output instead of zeroing kinetics channels at the raw input. Motivation: after `KineticsNorm` (log1p + z-score), zeros are indistinguishable from real kinetics that happen to sit at the mean of the normalized distribution, so the encoder has no explicit signal that a position is masked. A learnable token gives the encoder a distinct "this position is missing" representation, matching how wav2vec 2.0 and BERT handle masking.
+Things ruled out along the way (any of which would have been a more pleasant root cause): normalization method (no effect on the regression), train/val read-level leakage (none, by `tests/test_legacy_leakage.py`), CpG site finding (both pipelines agree), uint8 truncation (PacBio CCS tags are uint8, no truncation possible in the first place).
 
-```
-Input x [B, T, 4]
-  │
-  ├─ Targets branch (no grad):
-  │    encoder.get_latents(x)              →  z_clean [B, T/4, d]
-  │    LayerNorm(z_clean)                  →  targets [B, T/4, d]
-  │
-  ├─ Masked branch:
-  │    apply_input_mask(x)                 →  input_mask [B, T]   (contiguous random spans, padding excluded)
-  │    encoder.embed(x_nuc, x_kin, x_pad)  →  x_emb [B, T, d]
-  │    x_emb[input_mask] = mask_vec        →  learnable d_model mask token at masked positions
-  │    encoder.cnn → add_pe → transformer  →  c [B, T/4, d]
-  │    MLP(d→d, GELU, d→d)                 →  c_proj [B, T/4, d]
-  │
-  └─ Loss (AgInfoNCE):
-       Same as Smrt2VecInputMask — select masked positions, L2-normalize,
-       cosine similarity / τ, cross-entropy against diagonal, all_gather
-       targets across ranks for more negatives.
-```
+## Tests
 
-The masked branch cannot reuse `encoder.get_latents()` because there is no mid-call hook to overwrite the embedding output before the CNN; the forward pass runs `encoder.embed → cnn → add_pe → forward_transformer` manually instead. Encoder weights remain interchangeable with `DirectClassifier` for fine-tuning since the underlying `SmrtEncoder` is unchanged.
+Full list in `tests/readme.md`. The ones that matter most:
 
-### Masked autoencoder pretraining (`SmrtAutoencoder`)
+- `test_cpg_pipeline_fidelity.py`: BAM to Zarr to CpG memmap, byte-exact at every stage. Pipeline parameters are read from `configs/data.yaml`, not hardcoded.
+- `test_zarr_to_methyl_memmap_v2.py`: integration tests for the v2 CpG pipeline (Zarr to shards to `LabeledMemmapDataset` to DataLoader).
+- `test_legacy_vs_new_pipeline.py`: end-to-end comparison of the legacy parquet path and the current memmap path on the same BAM reads. The test that originally caught the reverse-kinetics misalignment.
+- `test_kinetics_norm.py`: `KineticsNorm` parity with the legacy `ZNorm` and `SSLNorm`, plus the `n_continuous=4` synthetic-data tests added for the tissue task.
+- `test_autoencoder.py`: shape, masking, gradient, and weight-transfer tests for `SmrtAutoencoder`.
 
-Experiment 24. Replaces contrastive matching with direct kinetics reconstruction.
-
-```
-Input x [B, T, 4]
-  │
-  ├─ Save target: x_orig[..., 1:3]  →  kin_target [B, T, 2]
-  │
-  ├─ apply_input_mask(x)             →  x_masked [B, T, 4]
-  │
-  ├─ Encoder: SmrtEncoder(x_masked)  →  c [B, T/4, d]
-  │
-  ├─ Decoder (SmrtDecoder):
-  │    permute                        →  [B, d, T/4]
-  │    ConvTranspose1d(d, d, k=4, s=2, p=1) + GELU  →  [B, d, T/2]
-  │    ConvTranspose1d(d, d, k=4, s=2, p=1) + GELU  →  [B, d, T]
-  │    permute + Linear(d, 2)        →  kin_recon [B, T, 2]
-  │
-  └─ Loss (MaskedReconstructionLoss):
-       MSE(kin_recon[mask], kin_target[mask])
-       Targets are the original normalized kinetics (fixed, not learned)
-       No all_gather — standard DDP gradient averaging
-```
-
-The decoder is intentionally shallow (two transpose convolutions + linear) so the encoder must learn informative representations; a deep decoder could reconstruct from minimal encoder features. Normalization (`KineticsNorm`: log1p + z-score) is computed once from SSL data and reused for both training and probe evaluation.
-
-**Transfer results on full-read SSL data** (experiment 24): Probe accuracy stabilized at ~62% (no decline), a 4pp improvement over contrastive. Still 20pp below the supervised baseline (82%).
-
-**CpG data regime** (experiments 25, 26): Both architectures retrained on CpG data directly (pos+neg combined, labels discarded, context=32). Autoencoder probe improved to ~66%, contrastive to ~63%. Confirms data regime matters (+4-5pp), but the gap to supervised 82% remains large.
-
-**Fine-tuning** (experiment 27): Fine-tunes the exp 25 autoencoder encoder on labeled CpG data with a two-stage schedule (5 epochs frozen, 15 unfrozen with differential LR). Reached 79% top-1, recovering 13pp over the linear probe but landing 3pp below the supervised baseline. The deficit is confounded by optimizer schedule differences and matching data budget (see exp 28/29 in `docs/status.md`).
-
-**Fine-tuning infrastructure** (experiment 22, `scripts/experiments/supervised_22_finetune/`): The original fine-tuning experiment, loading contrastive (exp 21) encoder weights. Two-stage training: frozen encoder + classification head (5 epochs), then unfreeze all with differential LR (encoder 3e-4, head 3e-3, 15 epochs). Exp 27 reuses this infrastructure with the autoencoder encoder.
-
-### Supervised Tissue Classification*
-At least 10 samples, each with millions of reads, have labels for the provenance of each read. The kinetics of in these reads is used to make classifications for the methylation of individual CpG sites, and then these *can* be used to develop classifiers for tissue provenance. The kinetics therefore include this information, and addition information the encodes the damage process that is occuring in different tissues. The group has already showed that there is a clear mutation signature for each tissue (for example oxidative for colon and UV for skin) by looking at the contexts in which mutations occur (see COSMIC spectra). Therefore there is good reason to believe that by looking at a 4096 or 2048 section of a read, we should be able to classify its tissue provenance. At 'data/01_processed/*_read_labels.txt' we have the labels for each individual read in several different indivudals of different species, so now we just need to link that information to a memmap of reads with an integer (?) label for each exact 4096 sequence. And then we can train a classifier much like the transformer-resnet stack that is currently being used for methylation but on multiclass. We need to take into account that not all of the samples/individuals have the same set of tissues. Furthermore, it might be good to ignore blood, since the reads are very short, and in yoran it comes from only one pacbio cell. Batch effets may not be as large a concern as otherwise thought, since Peter did not have batch effects in his analysis of de novo mutations and their signatures when analyzing this dataset. Currently we do not have a tissue type classifier that works with either nucleotides or kinetics. The main interest in this task would be to 1. get a classifier for tissue, 2. see if the classifier is generalizable across samples, or if it is learning the specific damage profile of each individual (also intersesting), 3. 
-
-*This is an entirely new task, and has no bearing on the downstream CpG classification. The downstream task of this classifier would be the same as its training task: Take a large read window and identify its tissue provenance. 
-
-Concern 1: How to organize the train/val partitioning. We obviously want each read to be in exactly one of the train or val partition, but does this also apply to PacBio Cells?
-
-Concern 2: Should this task start with training on only one individual? Probably, since even if that's an easier task and it works better than it is generalizable, our first task is to see if there's a signal to work with.
-
-Caveat:  Any code that builds train/val splits, dedup tables, or read-level joins must key on the full <cell>/<ZMW> string, never on the ZMW integer alone
-
-#### Process 
-The training eval will occur on a single node of 8 H100 chips (on Gefion)
-1. data: generate memmap dataset of 2048 (cropped) reads with a label sidecar 
-2. data: split into 80/20 train/val
-3. train: (train read) -> (model) -> (vector of logits for each class) -> (cross entropy loss) 
-4. eval: (val read) -> (model (no grad)) -> vector of logits for each class -> collect top 1 scores and top 5 scores
-
-#### todo
-- generate dataset 
-- validate datset (double check that reads have the right labels)
-- split dataset
-- transfer dataset to gefion (only done by me personally)
-- organize a stack for a provenance classifier reusing as many components as possible
-- design an intitial training/eval experiment 
-
-#### later
-- eval on general dataset, and then restrict to eval on known de novo mutations (since this carries unique damage processes)
-
-
-
-## Process
-### 1. Data Pipeline (`workflow.py`)
-gwf only manages the data pipeline: BAM → Zarr → memmap → validation. The `CONFIG` dictionary at the top is a static registry that maps raw BAM files to intermediate Zarr stores and training-ready memmap tensors. Modify `CONFIG` when ingesting new datasets, then `gwf run` to process them.
-
-### 2. Experiments (`run.sh`)
-Each experiment lives in its own directory under `scripts/experiments/<name>/` with a `config.yaml` and `train.py`. Resource specs (cores, memory, walltime, GPUs) go in the config's `resources:` section so they stay with the experiment. Submit with:
-```bash
-bash run.sh scripts/experiments/ssl_21_pretrain              # uses config resources
-bash run.sh scripts/experiments/supervised_20_full_v2 --mem=512gb  # sbatch override
-```
-Auto-detects environment (local/Gefion/GenomeDK). Job output lands in the experiment directory as `<jobid>.out`. Avoids hunting through `.gwf/logs/`.
-
-### 3. EDA Plots (`plot.sh`)
-Plot scripts live in `report/eda/<name>/plot.py`. Run any of them with:
-```bash
-bash plot.sh report/eda/model_input_heatmaps              # local: runs directly
-bash plot.sh report/eda/fi_vs_ri_distributions --mem=128gb # HPC: submits sbatch with override
-```
-Auto-detects environment (local/Gefion/GenomeDK). Output goes to `report/eda/<name>/plot.svg`.
-
-### 4. Tests (`test.sh`)
-```bash
-bash test.sh tests/test_kinetics_norm.py               # local: runs pytest
-bash test.sh tests/                                      # local: all tests
-bash test.sh tests/test_cpg_pipeline_fidelity.py --mem=64gb  # HPC: sbatch
-```
-
-### 5. Model Logic & Codebase Safety Net
-The training scripts have internal `DEFAULT_SMRT2VEC` / `DEFAULT` dictionaries that establish baseline architectural parameters. This is a fail-safe so that older `config.yaml` files that don't have newly introduced variables still run without crashing.
-
-### Standard Execution Flow
-To launch a new experiment:
-1. Make a directory under `scripts/experiments/` with a `config.yaml` (hyperparameters + `resources:` section) and `train.py`.
-2. Make sure the dataset paths in `config.yaml` exist (check the `workflow.py` CONFIG registry).
-3. `bash run.sh scripts/experiments/<name>`.
-
-
-## Resolved Issues
-
-### Reverse kinetics misalignment in zarr_to_methyl_memmap.py (RESOLVED)
-
-The new memmap dataset class (original script now at `archive/zarr_to_methyl_memmap.py`) regressed to ~70% top-1 compared to the legacy parquet pipeline's ~80%. Root cause: kinetics/sequence misalignment in reverse strand windows. Experiments 17 and 18 confirmed the fix, both peaking at ~80%.
-
-PacBio stores forward and reverse kinetics in different orders: `fi[i]` = forward kinetics at position `i` (forward order), but `ri[i]` = reverse kinetics at position `L-1-i` (reverse order). The v1 script (`zarr_to_methyl_memmap.py`) processes reverse windows with `np.flip(read_rev, axis=0)`, which flips all columns together. After the flip, the sequence at position `j` represents original position `L-1-j` (correct after RC), but ri at position `j` gives reverse kinetics at position `j` (because ri was already reversed, flipping puts it in forward order). The sequence and kinetics point to different genomic positions — every reverse window has kinetics from the mirror-image positions.
-
-`np.flip` works correctly for fi/fp (forward order → flip → reverse order, matching the reversed sequence) but incorrectly for ri/rp (already reverse order → flip → forward order, opposite to the reversed sequence). Since ~50% of training windows are reverse strand, half the training data had misaligned features.
-
-The v2 script (`zarr_to_methyl_memmap_v2.py`) fixes this by using explicit reverse indexing (`ri[L-end:L-start]`) matching the legacy script, with no `np.flip` on the whole read. Experiment 17 also works because using fi/fp for both strands sidesteps the issue entirely (fi is in forward order, so flipping aligns correctly).
-
-#### What was ruled out along the way
-1. **Normalization method + hyperparameters** (Experiment 16): log1p ZNorm + matched LR/ds_limit. Same ~70%.
-2. **Train/val leakage** (`tests/test_legacy_leakage.py`): PASSED, no read_name overlap.
-3. **CpG site finding differences**: both pipelines find the same sites.
-4. **UInt16 vs uint8 kinetics truncation**: PacBio CCS tags are uint8, no truncation.
-
-### Tests
-
-See `tests/readme.md` for full documentation of all test modules. Summary:
-
-#### `tests/test_cpg_pipeline_fidelity.py`
-End-to-end fidelity: BAM -> Zarr -> CpG memmap. Verifies byte-exact kinetics transfer at every pipeline stage.
-
-#### `tests/test_legacy_vs_new_pipeline.py`
-Direct comparison between legacy parquet and new memmap pipelines. Traces the same BAM reads through both paths.
-
-#### `tests/test_zarr_to_methyl_memmap_v2.py`
-Integration tests for the v2 CpG memmap pipeline: Zarr -> shards -> LabeledMemmapDataset -> DataLoader.
-
-#### `tests/test_kinetics_norm.py`
-Equivalence tests verifying KineticsNorm matches ZNorm and SSLNorm on their respective dataset types.
-
-#### `tests/test_autoencoder.py`
-Unit tests for SmrtAutoencoder, SmrtDecoder, and MaskedReconstructionLoss. Verifies shapes, masking, gradients, and encoder weight transfer.
-
-#### `tests/test_large_pretrain.py`
-Tests for exp 29 features: random cropping, cosine LR schedule over 3000 epochs, periodic probe/checkpoint scheduling.
-
-#### `tests/test_ssl_21_train.py` -- PASSED
-Static AST analysis of ssl_21_pretrain/train.py. Verifies linear probe runs on all ranks (not gated behind `is_main_process`) and `wait_for_everyone()` synchronizes before next epoch.
-
-#### `tests/test_kinetics_distributions.py`
-Compares forward vs reverse kinetics distributions (fi vs ri, fp vs rp) at CpG sites via KS tests.
-
-#### `tests/test_legacy_leakage.py` -- PASSED
-Checks legacy parquet train/test split for read-level leakage. No overlap found.
+`bash test.sh tests/` runs the lot.
