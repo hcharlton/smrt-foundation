@@ -256,6 +256,74 @@ class CNN(nn.Module):
       return output.shape, mask.shape
 
 
+class CNNTissue(nn.Module):
+  """Deeper CNN for the tissue classifier.
+
+  Adds three more stride-2 stages on top of `CNN` so total downsampling
+  is 32x instead of 4x. With ctx=2048 the encoder output is T_latent=64
+  rather than 512. This is the lever that makes mean-pool over the
+  transformer output learnable: each position now carries 8x more
+  gradient than the shallow CNN, and 8x more receptive-field-per-latent
+  (so each latent summarises a meaningful chunk of the read).
+
+  Not used by SmrtEncoder / Smrt2Vec / DirectClassifier / SmrtAutoencoder
+  by design - those models keep the original 4x CNN. Tissue checkpoints
+  are not encoder-compatible with SSL/CpG checkpoints.
+  """
+  def __init__(self, d_model, max_len, dropout_p):
+    super().__init__()
+    self.max_len = max_len
+    self.in_channels = d_model
+    self.extractor = nn.ModuleList([
+          ResBlock(self.in_channels, self.in_channels, kernel_size=7),            # T
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # T
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # T
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # T
+
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3, stride=2),  # T/2
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # T/2
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # T/2
+
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3, stride=2),  # T/4
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # T/4
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # T/4
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # T/4
+
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3, stride=2),  # T/8
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # T/8
+
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3, stride=2),  # T/16
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # T/16
+
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3, stride=2),  # T/32
+          ResBlock(self.in_channels, self.in_channels, kernel_size=3),            # T/32
+          ])
+    self.dropout = nn.Dropout(p=dropout_p)
+    self.output_shapes = self._get_output_shape()
+    self.r0 = self._compute_r0()
+
+  def _compute_r0(self):
+    cum_rf = 1
+    cum_stride = 1
+    for block in self.extractor:
+      cum_rf += (block.kernel_size - 1) * cum_stride
+      cum_stride *= block.stride
+      cum_rf += (block.kernel_size - 1) * cum_stride
+    return cum_rf
+
+  def forward(self, x, mask):
+    for block in self.extractor:
+      x, mask = block(x, mask)
+    x = self.dropout(x)
+    return x, mask
+
+  def _get_output_shape(self):
+    dummy_x = torch.randn(1, self.in_channels, self.max_len)
+    dummy_mask = torch.randn(1, self.max_len)
+    output, mask = self.forward(dummy_x, dummy_mask)
+    return output.shape, mask.shape
+
+
 ### Encoder Class
 
 class SmrtEncoder(nn.Module):
@@ -1149,17 +1217,21 @@ class SmrtEncoderTissue(SmrtEncoder):
   """SmrtEncoder variant for the 6-channel tissue layout.
 
   Channel layout: [seq, fi, fp, ri, rp, mask] (n_continuous=4 by default).
-  Same CNN, PE, and transformer stack as SmrtEncoder. Differences:
+  Same PE and transformer stack as SmrtEncoder. Differences:
     - SmrtEmbedding constructed with n_continuous=4
+    - CNN replaced by CNNTissue (32x downsampling instead of 4x). With
+      ctx=2048 the transformer sees T_latent=64 tokens, so mean-pool
+      over the output is learnable rather than gradient-starved.
     - get_latents slices x[..., 1:1+n_continuous] for kinetics and
       x[..., -1] for the pad mask
     - layer_norm_target and the SSL-only `targets` return value are
       dropped; this class is streamlined for the supervised tissue task
 
   State-dict keys are NOT interchangeable with SmrtEncoder (the
-  embed.kin_embed Linear has different in_features and there is no
-  layer_norm_target submodule). Tissue checkpoints are not encoder-
-  compatible with SSL/CpG checkpoints by design.
+  embed.kin_embed Linear has different in_features, the cnn submodule
+  has more ResBlocks, and there is no layer_norm_target submodule).
+  Tissue checkpoints are not encoder-compatible with SSL/CpG checkpoints
+  by design.
   """
   def __init__(self, d_model=128, n_layers=4, n_head=4, max_len=2048,
                dropout_p=0.01, n_continuous=4):
@@ -1168,7 +1240,7 @@ class SmrtEncoderTissue(SmrtEncoder):
     self.n_continuous = n_continuous
     self.embed = SmrtEmbedding(d_model, n_continuous=n_continuous)
     self.pe = PositionalEncoding(d_model, max_len=max_len)
-    self.cnn = CNN(d_model, max_len=max_len, dropout_p=dropout_p)
+    self.cnn = CNNTissue(d_model, max_len=max_len, dropout_p=dropout_p)
     self.blocks = nn.ModuleList([
         TransformerBlock(d_model=d_model, n_head=n_head, max_len=max_len)
         for _ in range(n_layers)
@@ -1193,13 +1265,21 @@ class TissueClassifier(nn.Module):
   """Multiclass tissue classifier over 4-kinetics-channel SMRT reads.
 
   Mean-pools transformer latents over the time axis (no privileged
-  position for tissue). Head: Linear(d_model, d_model//2) -> GELU ->
+  position for tissue), then LayerNorm before the head. The LayerNorm
+  re-centers and re-scales the pooled vector so the head sees inputs
+  in the regime its initialization expects; without it, mean-pool of
+  T_latent tokens has variance ~1/T_latent of a single token, head
+  logits collapse near zero at init, and training stalls at the uniform
+  output (loss = ln(n_classes)).
+
+  Head: LayerNorm(d_model) -> Linear(d_model, d_model//2) -> GELU ->
   Linear(d_model//2, n_classes). Forward returns raw logits; pair with
   nn.CrossEntropyLoss and long targets.
   """
   def __init__(self, d_model, n_layers, n_head, max_len, n_classes=8, n_continuous=4):
     super().__init__()
     self.encoder = SmrtEncoderTissue(d_model, n_layers, n_head, max_len, n_continuous=n_continuous)
+    self.pool_norm = nn.LayerNorm(d_model)
     self.head = nn.Sequential(
       nn.Linear(d_model, d_model // 2),
       nn.GELU(),
@@ -1208,4 +1288,4 @@ class TissueClassifier(nn.Module):
 
   def forward(self, x):
     c = self.encoder(x)
-    return self.head(c.mean(dim=1))
+    return self.head(self.pool_norm(c.mean(dim=1)))
