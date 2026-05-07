@@ -235,6 +235,7 @@ def main():
         'resume_every_steps': 5000,
         'dataset_on_gpu': True,
         'chunk_size': 2048,
+        'save_checkpoints': True,
     }
     c = DEFAULT | config.get('classifier', {})
     config['classifier'] = c
@@ -496,6 +497,8 @@ def main():
         """Per-eval portable checkpoint. Full model + encoder-only state +
         config + per-eval metrics + KineticsNorm sidecar.
         """
+        if not c['save_checkpoints']:
+            return
         if accelerator.is_main_process:
             unwrapped = accelerator.unwrap_model(model)
             save_path = os.path.join(checkpoint_dir, f'step_{step}.pt')
@@ -682,7 +685,7 @@ def main():
         progress_state.global_step = global_step
 
     # --- Final checkpoint ---
-    if accelerator.is_main_process:
+    if c['save_checkpoints'] and accelerator.is_main_process:
         unwrapped = accelerator.unwrap_model(model)
         save_path = os.path.join(checkpoint_dir, 'final_model.pt')
         torch.save({

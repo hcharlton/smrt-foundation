@@ -24,7 +24,7 @@ classifier:
   n_classes: 8
 
   total_steps: 200000
-  eval_every_steps: 5000
+  eval_every_steps: 200
   resume_every_steps: 5000
 
   batch_size: 128    # per GPU; global = 1024 across 8 ranks
@@ -36,3 +36,4 @@ classifier:
   dataset_on_gpu: true
   chunk_size: 2048
   ds_limit: 0
+  save_checkpoints: false
