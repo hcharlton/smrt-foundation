@@ -1264,28 +1264,53 @@ class SmrtEncoderTissue(SmrtEncoder):
 class TissueClassifier(nn.Module):
   """Multiclass tissue classifier over 4-kinetics-channel SMRT reads.
 
-  Mean-pools transformer latents over the time axis (no privileged
-  position for tissue), then LayerNorm before the head. The LayerNorm
-  re-centers and re-scales the pooled vector so the head sees inputs
-  in the regime its initialization expects; without it, mean-pool of
-  T_latent tokens has variance ~1/T_latent of a single token, head
-  logits collapse near zero at init, and training stalls at the uniform
-  output (loss = ln(n_classes)).
+  Encoder output (B, T_latent, d_model) is reduced by a small CNN head
+  (two stride-2 Conv1d stages with channel reduction) to (B, 16, T/4),
+  then flattened and fed to a small MLP. At ctx=2048 (T_latent=64) the
+  flattened head input is 16 * 16 = 256, giving a head an order of
+  magnitude smaller than a Linear-from-flattened-transformer-output.
 
-  Head: LayerNorm(d_model) -> Linear(d_model, d_model//2) -> GELU ->
-  Linear(d_model//2, n_classes). Forward returns raw logits; pair with
-  nn.CrossEntropyLoss and long targets.
+  Pipeline:
+    encoder -> (B, T_latent, d_model)
+    -> permute to (B, d_model, T_latent) for Conv1d
+    -> Conv1d(d_model -> intermediate, k=3, s=2) + GroupNorm + GELU
+    -> Conv1d(intermediate -> 16,      k=3, s=2) + GroupNorm + GELU
+    -> Flatten -> (B, 16 * T_latent//4)
+    -> Linear(flat, 64) + GELU
+    -> Linear(64, n_classes)
+
+  Forward returns raw logits; pair with nn.CrossEntropyLoss and long
+  targets.
   """
   def __init__(self, d_model, n_layers, n_head, max_len, n_classes=8, n_continuous=4):
     super().__init__()
     self.encoder = SmrtEncoderTissue(d_model, n_layers, n_head, max_len, n_continuous=n_continuous)
-    self.pool_norm = nn.LayerNorm(d_model)
-    self.head = nn.Sequential(
-      nn.Linear(d_model, d_model // 2),
+    t_latent = int(self.encoder.cnn.output_shapes[0][-1])
+
+    intermediate_c = max(32, d_model // 4)
+    target_c = 16
+    self.cnn_head = nn.Sequential(
+      nn.Conv1d(d_model, intermediate_c, kernel_size=3, stride=2, padding=1),
+      nn.GroupNorm(min(intermediate_c // 4, 8), intermediate_c),
       nn.GELU(),
-      nn.Linear(d_model // 2, n_classes),
+      nn.Conv1d(intermediate_c, target_c, kernel_size=3, stride=2, padding=1),
+      nn.GroupNorm(min(target_c // 4, 4), target_c),
+      nn.GELU(),
+    )
+
+    with torch.no_grad():
+      dummy = torch.zeros(1, d_model, t_latent)
+      flat_dim = int(self.cnn_head(dummy).flatten(1).shape[-1])
+
+    self.head = nn.Sequential(
+      nn.Flatten(),
+      nn.Linear(flat_dim, 64),
+      nn.GELU(),
+      nn.Linear(64, n_classes),
     )
 
   def forward(self, x):
     c = self.encoder(x)
-    return self.head(self.pool_norm(c.mean(dim=1)))
+    c = c.permute(0, 2, 1)
+    c = self.cnn_head(c)
+    return self.head(c)
