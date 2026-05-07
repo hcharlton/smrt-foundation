@@ -1,6 +1,6 @@
 # Research Status
 
-*Last updated: 2026-05-06*
+*Last updated: 2026-05-07*
 
 ## Active objectives
 
@@ -27,26 +27,36 @@ Two parallel threads are running:
 
 **Supervised capacity sweep (supervised_51) is in flight on Gefion.** Same 4-size grid at the v40 recipe. Tests whether v40's 0.818 plateau is capacity-bound. 60-ep cosine, 24h walltime per size. Pass: any size beats v40's 0.8179 by ≥ 0.5pp. Status: pending.
 
-## New thread: tissue provenance (supervised_52)
+## Tissue provenance (supervised_52) — paused after the probe sweep falsified the premise
 
-The yoran tissue dataset (`data/01_processed/tissue_sets/yoran_ctx4096`) is built and partitioned. 8 tissues × 2 PacBio cells; the partition.csv at `<data_dir>/partition.csv` carries `read_name → split` mapping for `train` (50k, cell s1) / `val_s1` (10k, cell s1, disjoint with train) / `val_s2` (10k, cell s2, never seen in train), stratified at 6250/1250/1250 reads per tissue, seeded 42, validated by `tests/test_make_tissue_partition.py` (21 tests pass).
+`supervised_52_tissue` was the first run on the new yoran ctx4096 dataset (8 tissues × 2 PacBio cells, partition keyed by `read_name`, 50k train / 10k val_s1 / 10k val_s2). Across all four sizes (d128/d256/d512/d768) the deep classifier drives train cross-entropy to ~0 within walltime but val cross-entropy never moves. We didn't know whether this was a preprocessing bug, an alignment bug (the v1 `zarr_to_methyl_memmap.py` style), a cell-batch artefact, or simply absence of signal. **Result: the signal isn't there at this dataset size**, in the sense the supervised model is trying to extract it.
 
-The shakedown experiment supervised_52_tissue is implemented and ready to submit on Gefion. 4 size grid (d=128/256/512/768, head_dim=64). 4h walltime per size. Step-cadence harness forked from ssl_58 (per-eval CSV, per-eval `step_<N>.pt` full checkpoint, deterministic centre-crop 4096 → 2048, no augmentation). `dataset_on_gpu=true` materialises each split as a GPU TensorDataset at startup (~2.4 GB train per rank), drops the dataloader IO path entirely.
+`report/probe_tissue_yoran/` is the diagnostic sweep — 13 standalone sklearn / EDA scripts run against the same partition and `KineticsNorm` the deep model uses (10k train / 2k val_s1 / 2k val_s2 subsample). Findings (full numbers in `docs/experiment_log.md` 2026-05-07 and `docs/negative_results.md` 2026-05-07):
 
-Library additions to support the new task (additive, default args preserve all existing call sites):
-- `smrt_foundation.normalization.KineticsNorm`: `n_continuous=2|4` arg parameterises the kinetics channel list. Default 2 reproduces the SSL/CpG layout bit-for-bit. `save_stats` records `norm_n_continuous`; `load_stats` defaults missing field to 2 for legacy checkpoints.
-- `smrt_foundation.model.SmrtEncoderTissue`: subclass of `SmrtEncoder` with `n_continuous=4` embedding and 6-channel slicing `[seq, fi, fp, ri, rp, mask]`. `layer_norm_target` and the SSL-only `targets` return value are dropped (streamlined for supervised use).
-- `smrt_foundation.model.TissueClassifier`: encoder + center-latent multiclass head over 8 tissues; pair with `nn.CrossEntropyLoss`.
+- Pooled (25-d), binned (128-d), and flat (8192-d) kinetics features all collapse to chance on val (top1 ∈ [0.121, 0.137], chance = 0.125) while RF / HGB / saga-LogReg memorise to train top1 = 1.0. Per-tissue 1-vs-rest AUROC ∈ [0.50, 0.57]. The deep model is doing what these probes do: memorise.
+- Cell s1 vs s2 from the same pooled features: val 0.549 — a real but small batch effect, not the dominant blocker.
+- Read-length only and base-composition only: chance.
+- Raw vs `KineticsNorm`-normed: identical val accuracies. KineticsNorm is not destroying signal.
+- ctx=2048 vs ctx=4096: the full window is *worse*. The centre-crop is not throwing away tissue signal.
+- Reverse-kinetics alignment is correct (per-base symmetry test: `fp@fwd-C ≈ rp@fwd-G` to within 0.04 uint8 units). The build script's `ri[::-1].copy()` step does what `docs/methodology.md:243-249` claims; the v1-style misalignment is not happening.
 
-Test surface for the additions: 7 new synthetic tests in `tests/test_kinetics_norm.py::TestKineticsNormNContinuous4` cover the n_continuous=4 path and the legacy round-trip; all pass on GenomeDK (synthetic data; no cluster artefacts required). Existing data-bound tests skip locally because the CpG subset memmap isn't present here — they run on Gefion.
+Two side-effect anomalies surfaced for the tissue dataset (not blockers, worth fixing at the source):
+- `data/01_processed/tissue_sets/yoran_ctx4096/partition.csv` has one row with `'val_s1 '` (trailing space). `report.probe_tissue_yoran._shared.load_partition()` strips on load and warns; `scripts/make_tissue_partition.py` should `.str.strip_chars()` before write.
+- 580 read_names appear on multiple manifest rows (max 4 windows per read), so `pl.col('read_name').is_in(train_names)` returns 50,018 train rows rather than 50,000 (val_s1 +3, val_s2 +6). The deep model trains on the inflated set; not a correctness bug, but the on-disk "50k" claim is approximate.
 
-Pass criterion (all 4 sizes): train loss decreases monotonically; val_s1 top1 substantially above 1/8 = 0.125 (overfitting expected on 50k); measurable val_s1 vs val_s2 gap.
+**No further architecture iteration on supervised_52 at this dataset size**. The next viable moves on the tissue task are: scale labelled data well past 50k; per-cell normalisation A/B (subtract cell-mean before the global z-score); sequence-aware features beyond base composition; or exploit which genomic regions the read maps to rather than relying on whole-read kinetics. None of those is queued yet.
+
+Library additions still in place (additive, default args preserve all existing call sites):
+- `smrt_foundation.normalization.KineticsNorm`: `n_continuous=2|4` arg.
+- `smrt_foundation.model.SmrtEncoderTissue`, `TissueClassifier`.
+
+Test surface: 7 synthetic tests in `tests/test_kinetics_norm.py::TestKineticsNormNContinuous4` and 5 live-data tests in `tests/test_probe_tissue_shared.py` (auto-skip without the data dir). All pass.
 
 ## Open questions
 
 1. **CpG capacity scaling (supervised_51)**: does any size beat v40's 0.8179?
 2. **CpG SSL with masked autoencoder (ssl_58)**: does any size beat ssl_25's 66% probe?
-3. **Tissue task feasibility (supervised_52)**: does a 6-channel encoder learn the 8-way classification at 50k labelled reads, and how large is the cross-cell gap?
+3. **Tissue task feasibility (supervised_52)**: ~~does a 6-channel encoder learn the 8-way classification at 50k labelled reads~~ — answered no by the sklearn probe sweep on 2026-05-07. New question: can per-cell normalisation, more labelled data, or sequence-aware features open the task back up?
 
 ## Pending experiments
 
@@ -54,4 +64,4 @@ Pass criterion (all 4 sizes): train loss decreases monotonically; val_s1 top1 su
 |-----------|--------|
 | supervised_51 (4 sizes) | Submitted to Gefion |
 | ssl_58 (4 sizes) | Submitted to Gefion |
-| supervised_52_tissue (4 sizes) | Implemented; ready to submit on next Gefion sync |
+| supervised_52_tissue (4 sizes) | Paused — sklearn probe sweep falsified the premise; no signal at 50k labelled reads |

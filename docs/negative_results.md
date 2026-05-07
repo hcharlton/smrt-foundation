@@ -97,3 +97,33 @@ With 8 GPUs and `total_steps=1000000`, the cosine bottoms at global step **125,0
 **Conclusion:** Single-line patch — remove `scheduler = accelerator.prepare(scheduler)` from `ssl_57_inputmask_grid_lnhead/_shared_train.py:463`. The raw `LambdaLR` from `get_cosine_schedule_with_warmup` (`smrt_foundation/optim.py:5`) is correct; the training loop's per-step `scheduler.step()` advances it by 1 per global step. Applied to ssl_57 in the 1m_v3 row (`docs/experiment_log.md` 2026-05-04). `ssl_55_simclr_grid_lnhead/_shared_train.py` and `ssl_56_simclr_neighbor_invariance/_shared_train.py` carry the same bug; not patched here because those experiments are not being rerun, but the same one-line removal is needed if either is ever resubmitted.
 
 **Caveat for past SSL interpretations:** ssl_53/54/55/56/57 probe trajectories should be read with the schedule-compression confound. The 300k SSL runs effectively trained at full LR for ~37,500 global steps then idled at 1.5e-5 for the remaining 262,500. Patterns previously interpreted as "stable plateau" (300k probe trajectories), "oscillating without monotone improvement" (ssl_55 d=512), or "still climbing at 300k" (ssl_57 300k probe reading from the user-reported screenshots) were partially the encoder not actually training in the late phase. ssl_57 1m_v3 is the first Accelerate-driven SSL run to test the actual schedule horizon. Cross-experiment "did extending help?" questions across the historical SSL log are confounded by the bug.
+
+## 2026-05-07: yoran Tissue Kinetics Carry No Generalisable Tissue Signal at 50k Labelled Reads
+
+**Hypothesis:** `supervised_52_tissue` overfits because the architecture or preprocessing is suppressing tissue signal in the kinetics. A model-independent sklearn probe with comparable features should at least beat chance on val_s1 if the signal is there.
+
+**Experimental Setup:** `report/probe_tissue_yoran/` — 13 standalone scripts running on a GenomeDK interactive node (`.venv`) against the same `data/01_processed/tissue_sets/yoran_ctx4096/partition.csv` the deep model uses. 10k train / 2k val_s1 / 2k val_s2 subsample, `KineticsNorm(n_continuous=4)` + deterministic centre-crop 4096 → 2048 (matches `_shared_train.py:355-370`). Probe matrix: pooled_summary (25-d: per-channel mean/std/p10/p50/p90 + 5 base frequencies) × binned_summary (16 bins × 4 channels × 2 stats = 128-d) × flat_kinetics (2048 × 4 = 8192-d) crossed with LogisticRegression / RandomForest / HistGradientBoostingClassifier (saga LogReg L2 only on the 8192-d rep). Plus diagnostics: cell-classifier from same features, read-length only, seq-only, raw vs normed, ctx=2048 vs 4096, 8 binary 1-vs-rest, PCA scatter, per-channel densities by tissue and by cell, and a reverse-kinetics alignment EDA via per-base symmetry.
+
+**Observation:**
+
+- Every kinetics-summary representation collapses to chance on validation despite RF / HGB / saga LogReg achieving train top1 = 1.0:
+  - pooled (25-d): val_s1 ∈ {0.129, 0.137, 0.132}, val_s2 ∈ {0.136, 0.130, 0.128}.
+  - binned (128-d): val_s1 ∈ {0.132, 0.137, 0.129}, val_s2 ∈ {0.131, 0.132, 0.130}.
+  - flat (8192-d): val_s1 = 0.134, val_s2 = 0.123.
+  Chance is 1/8 = 0.125. Macro-F1 tracks accuracy.
+- All 8 binary 1-vs-rest LogReg AUROCs lie in [0.50, 0.57] on both val_s1 and val_s2. No single tissue is meaningfully separable.
+- Cell s1 vs s2 from pooled features: LogReg val 0.549 / AUROC 0.555. A weak but real batch effect, not strong enough on its own to explain the failure.
+- Read-length only: val 0.142. Seq composition only: val 0.142. Both at chance.
+- Raw vs `KineticsNorm`-normed pooled features (HistGB): val_s1 0.131 vs 0.132. Identical to two decimals — normalisation is not destroying signal.
+- ctx=2048 (centre-cropped) vs ctx=4096 (full window) (HistGB on pooled summary): val_s1 0.132 vs 0.121, val_s2 0.128 vs 0.116. The full window is *worse*; the centre-crop is not throwing away tissue signal.
+- Reverse-kinetics alignment is correct: per-base symmetry test (`results/reverse_kinetics_alignment_per_base.csv`) shows `fp@fwd-C ≈ rp@fwd-G` to within 0.04 raw uint8 units across all four base pairs. The position-level Pearson floor at ~0.15 between `fi[j]` and `ri[j]` (vs ~0.15 for the reversed pairing) is a per-read overall-rate effect, not misalignment.
+- Two on-disk anomalies surfaced as side-effects: `partition.csv` has one row with `'val_s1 '` (trailing space, byte 0x20) which silently drops one read from any string-equality filter on `split == 'val_s1'`; and 580 read_names have multiple manifest rows (max 4) so `pl.col('read_name').is_in(train_names)` produces 50,018 rather than the declared 50,000 train rows (val_s1 +3, val_s2 +6). Both detected by `report/probe_tissue_yoran/eda_partition_sanity.py`.
+
+**Conclusion:** The supervised_52_tissue val plateau reflects the data, not the architecture, the preprocessing, or any alignment bug. With a 50k-labelled-read subsample on yoran, the kinetics features at every level of granularity (per-window summary, per-bin summary, per-position) carry no extractable tissue signal that generalises across reads. The deep model is doing exactly what an sklearn probe with the same features does: memorise the training set and predict at chance on validation.
+
+The cell-batch effect exists but is small (cell-classifier val 0.55 vs chance 0.5) and not the dominant blocker. The kinetics shift between the two cells (per-channel mean shift ~0.06 z-score units, see `results/kinetics_means_by_tissue_cell.csv`) is comparable in magnitude to the within-cell between-tissue mean shift, so a global z-score (`KineticsNorm`) leaves the cell shift in the data. A per-cell normalisation step (subtract per-cell channel mean before global z-score) would test whether removing the batch shift exposes more tissue signal, but the probe results suggest the within-cell signal is also weak.
+
+Practical implications:
+1. Stop iterating supervised_52 architecture variants on this dataset size — there is no signal to fit.
+2. The next viable moves on the tissue task are: scale labelled data (50k → much larger), per-cell normalisation as an A/B, sequence-aware features beyond base composition (k-mer composition, mappability, repeat content), or exploiting which genomic regions the read maps to (the deep encoder sees raw kinetics, not where the read comes from).
+3. Two `partition.csv` anomalies should be fixed at the source (`scripts/make_tissue_partition.py` should `.str.strip_chars()` before write; the upstream BAM has duplicate primary records causing the 580 manifest duplicates and either the build script or the partition script should de-duplicate or document the inflation explicitly).
