@@ -55,6 +55,19 @@ MEMORY=$(read_resource memory 256gb)
 WALLTIME=$(read_resource walltime 24:00:00)
 GRES=$(read_resource gres gpu:8)
 NUM_PROCS=$(read_resource num_processes 8)
+PARTITION=$(read_resource partition '')
+
+# Partition-aware GPU flag selection. When `partition` is set in the config's
+# resources block (GenomeDK convention, e.g. `gpu-h200`), submit with
+# `--partition=$PARTITION --gpus=$NUM_PROCS` per the cluster's documented
+# request style. When unset (legacy / Gefion / earlier GenomeDK partitions),
+# fall through to `--gres=$GRES` so existing experiment configs keep working
+# without modification.
+if [ -n "$PARTITION" ]; then
+    GPU_FLAGS="--partition=${PARTITION} --gpus=${NUM_PROCS}"
+else
+    GPU_FLAGS="--gres=${GRES}"
+fi
 
 # Environment detection
 if [[ "$PROJECT_ROOT" == /dcai/* ]]; then
@@ -66,7 +79,7 @@ else
 fi
 
 echo "[$ENV] $SCRIPT (config: $CONFIG)"
-echo "  cores=$CORES mem=$MEMORY time=$WALLTIME gres=$GRES procs=$NUM_PROCS"
+echo "  cores=$CORES mem=$MEMORY time=$WALLTIME procs=$NUM_PROCS gpu_flags=${GPU_FLAGS}"
 
 case "$ENV" in
     local)
@@ -78,7 +91,7 @@ case "$ENV" in
         sbatch --job-name="exp_$(basename "$EXP_DIR")" \
                --account=cu_0030 \
                --cpus-per-task="$CORES" --mem="$MEMORY" --time="$WALLTIME" \
-               --gres="$GRES" \
+               ${GPU_FLAGS} \
                --output="${PROJECT_ROOT}/${EXP_DIR}/%j.out" \
                "$@" \
                --wrap="source ${PROJECT_ROOT}/.venv/bin/activate && cd ${PROJECT_ROOT} && accelerate launch --num_processes=${NUM_PROCS} --mixed_precision=no ${SCRIPT} ${CONFIG}"
@@ -87,7 +100,7 @@ case "$ENV" in
         sbatch --job-name="exp_$(basename "$EXP_DIR")" \
                --account=mutationalscanning \
                --cpus-per-task="$CORES" --mem="$MEMORY" --time="$WALLTIME" \
-               --gres="$GRES" \
+               ${GPU_FLAGS} \
                --output="${PROJECT_ROOT}/${EXP_DIR}/%j.out" \
                "$@" \
                --wrap="source \$(conda info --base)/etc/profile.d/conda.sh && conda activate data_prep && cd ${PROJECT_ROOT} && accelerate launch --num_processes=${NUM_PROCS} --mixed_precision=no ${SCRIPT} ${CONFIG}"

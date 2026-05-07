@@ -1,0 +1,57 @@
+experiment_type: 'ssl'
+experiment_name: '58_autoencoder_grid_d768_L8_h200'
+run_message: >
+  ssl_58 — d768_L8 in the masked-autoencoder grid, single-node H200
+  rerun. Hyperparameters are byte-identical to size_d768_L8 (ctx=512,
+  bs=64, 1M steps, p_mask=0.15, mask_size=10, max_lr=3e-4, pct_start=0.03,
+  eval every 10k steps). Submitted to GenomeDK's gpu-h200 partition with
+  --partition=gpu-h200 --gpus=8 (run.sh `partition` resource field added
+  for this submission). The 4-node H100 sibling (size_d768_L8) is
+  pending; this run produces a comparable trajectory on faster silicon
+  and lets the 1M-step horizon more comfortably fit the 48h walltime.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "48:00:00"
+  partition: gpu-h200
+  num_processes: 8
+
+ssl_dataset: 'yoran_raw.memmap'
+
+probe_pos_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+ssl_pair_val_train: 'data/01_processed/val_sets/ssl_pair_val_yoran_v1.memmap'
+ssl_pair_val_val:   'data/01_processed/val_sets/ssl_pair_val_ob007_v1.memmap'
+
+resume_from: ''
+
+smrt2vec:
+  d_model: 768
+  n_layers: 8
+  n_head: 12
+  context: 512
+  p_mask: 0.15
+  mask_size: 10
+  total_steps: 1000000
+  ds_limit: 0
+  batch_size: 64
+  optimizer: 'AdamW'
+  max_lr: 3.0e-4
+  weight_decay: 0.02
+  pct_start: 0.03
+  grad_clip: 5.0
+  probe_every_steps: 10000
+  checkpoint_every_steps: 10000
+  resume_every_steps: 10000
+  chunk_size: 2048
+
+probe:
+  context: 32
+  batch_size: 512
+  epochs: 3
+  lr: 3.0e-3
+  ds_limit: 500000
