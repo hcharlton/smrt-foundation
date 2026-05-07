@@ -1192,10 +1192,10 @@ class SmrtEncoderTissue(SmrtEncoder):
 class TissueClassifier(nn.Module):
   """Multiclass tissue classifier over 4-kinetics-channel SMRT reads.
 
-  Center-latent pooling matches the DirectClassifier convention. Head:
-  Linear(d_model, d_model//2) -> GELU -> Linear(d_model//2, n_classes).
-  Forward returns raw logits; pair with nn.CrossEntropyLoss and long
-  targets.
+  Mean-pools transformer latents over the time axis (no privileged
+  position for tissue). Head: Linear(d_model, d_model//2) -> GELU ->
+  Linear(d_model//2, n_classes). Forward returns raw logits; pair with
+  nn.CrossEntropyLoss and long targets.
   """
   def __init__(self, d_model, n_layers, n_head, max_len, n_classes=8, n_continuous=4):
     super().__init__()
@@ -1208,4 +1208,4 @@ class TissueClassifier(nn.Module):
 
   def forward(self, x):
     c = self.encoder(x)
-    return self.head(c[:, c.shape[1] // 2, :])
+    return self.head(c.mean(dim=1))
