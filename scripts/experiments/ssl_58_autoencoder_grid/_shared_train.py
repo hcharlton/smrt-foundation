@@ -355,6 +355,13 @@ def main():
     DEFAULT = {
         'd_model': 128, 'n_layers': 4, 'n_head': 4, 'context': 512,
         'batch_size': 512, 'total_steps': 1_000_000, 'ds_limit': 0,
+        # `schedule_steps` is the warmup+cosine horizon. When 0 (default),
+        # falls back to `total_steps` — preserves the legacy single-knob
+        # behavior. Set explicitly to decouple curve shape from loop
+        # length: `schedule_steps=1_000_000, total_steps=10_000_000` means
+        # the cosine reaches min_lr by step 1M (identical to a 1M-step
+        # run) and then sits at min_lr until walltime / step 10M.
+        'schedule_steps': 0,
         'max_lr': 3e-4,
         'p_mask': 0.15, 'mask_size': 10,
         'weight_decay': 0.02, 'pct_start': 0.03,
@@ -508,7 +515,8 @@ def main():
     accelerator.unwrap_model(model).encoder.register_forward_hook(_capture_c)
 
     total_steps = int(c['total_steps'])
-    scheduler = get_cosine_schedule_with_warmup(optimizer, total_steps=total_steps, pct_start=c['pct_start'])
+    schedule_steps = int(c.get('schedule_steps') or 0) or total_steps
+    scheduler = get_cosine_schedule_with_warmup(optimizer, total_steps=schedule_steps, pct_start=c['pct_start'])
 
     progress_state = ProgressState()
     accelerator.register_for_checkpointing(progress_state)
@@ -523,7 +531,12 @@ def main():
 
     if accelerator.is_main_process:
         print(f"Steps per epoch: {len(dl)}, Total steps: {total_steps}")
-        print(f"Warmup steps: {int(total_steps * c['pct_start'])}")
+        print(f"Warmup steps: {int(schedule_steps * c['pct_start'])}")
+        if schedule_steps != total_steps:
+            print(
+                f"Schedule steps: {schedule_steps} (cosine reaches min_lr at step "
+                f"{schedule_steps}, then constant min_lr through step {total_steps})"
+            )
         print(
             f"Probe every {c['probe_every_steps']} global steps "
             f"(encoder milestone .pt + probe_history.csv row tied to each probe), "
