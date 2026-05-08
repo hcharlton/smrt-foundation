@@ -537,16 +537,20 @@ def main():
 
     model, optimizer, dl = accelerator.prepare(model, optimizer, dl)
 
-    # Forward hook on the encoder submodule to capture the transformer output
-    # `c` for diagnostic logging without changing the autoencoder's forward
-    # contract (which is shared with ssl_30 and SmrtAutoencoder). The hook
-    # fires on every encoder forward — training, probe, pair-val — but we
-    # read `_diag['c']` immediately after `model(batch)` in the training
-    # loop, so the value reflects the training batch.
+    # Forward hook on the *last transformer block* of the encoder, NOT the
+    # encoder module itself. SmrtAutoencoderMAE.forward bypasses the encoder
+    # as a unit — it calls encoder.get_latents / encoder.add_pe and iterates
+    # encoder.blocks directly so it can drop 75% of latents between the CNN
+    # and the transformer. The encoder-level __call__ is never invoked during
+    # MAE training, so a hook on `encoder` would never fire (KeyError on
+    # _diag['c'] on the first training step). Hooking blocks[-1] captures
+    # the transformer output equivalently and fires regardless of whether the
+    # outer encoder is invoked as a unit (ssl_58 pattern) or block-by-block
+    # (MAE pattern), since `block(...)` always goes through __call__.
     _diag = {}
     def _capture_c(module, _input, output):
         _diag['c'] = output
-    accelerator.unwrap_model(model).encoder.register_forward_hook(_capture_c)
+    accelerator.unwrap_model(model).encoder.blocks[-1].register_forward_hook(_capture_c)
 
     total_steps = int(c['total_steps'])
     schedule_steps = int(c.get('schedule_steps') or 0) or total_steps
