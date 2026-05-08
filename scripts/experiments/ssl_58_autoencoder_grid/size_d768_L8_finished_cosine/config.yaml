@@ -1,0 +1,60 @@
+experiment_type: 'ssl'
+experiment_name: '58_autoencoder_grid_d768_L8_finished_cosine'
+run_message: >
+  ssl_58 — d768_L8 with a cosine that actually finishes inside walltime.
+  The original size_d768_L8 sets total_steps=1M with schedule_steps=1M, but
+  d=768 throughput is ~150k steps per 48h, which means the canonical
+  schedule needs ~320h to bottom out — the 48h base run never reaches the
+  cosine bottom, and the "_long" 96h variant doesn't either. This variant
+  shortens the schedule to 350k steps so the cosine actually completes
+  within a 120h walltime budget (~112h at d=768 throughput).
+  Cleanly answers: did the d=768 plateau in size_d768_L8 reflect capacity,
+  or did the cosine simply not finish?
+  d=768, L=8, H=12, ctx=512, bs=64.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "120:00:00"
+  gres: gpu:8
+  num_processes: 8
+
+ssl_dataset: 'yoran_raw.memmap'
+
+probe_pos_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+ssl_pair_val_train: 'data/01_processed/val_sets/ssl_pair_val_yoran_v1.memmap'
+ssl_pair_val_val:   'data/01_processed/val_sets/ssl_pair_val_ob007_v1.memmap'
+
+resume_from: ''
+
+smrt2vec:
+  d_model: 768
+  n_layers: 8
+  n_head: 12
+  context: 512
+  p_mask: 0.15
+  mask_size: 10
+  total_steps: 350000
+  schedule_steps: 350000
+  ds_limit: 0
+  batch_size: 64
+  optimizer: 'AdamW'
+  max_lr: 3.0e-4
+  weight_decay: 0.02
+  pct_start: 0.03
+  grad_clip: 5.0
+  probe_every_steps: 10000
+  checkpoint_every_steps: 10000
+  resume_every_steps: 10000
+  chunk_size: 2048
+
+probe:
+  context: 32
+  batch_size: 512
+  epochs: 3
+  lr: 3.0e-3
+  ds_limit: 500000

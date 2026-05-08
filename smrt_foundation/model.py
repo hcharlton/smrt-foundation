@@ -371,6 +371,25 @@ class SmrtEncoder(nn.Module):
     for block in self.blocks:
       c = block(c, z_pad)
     return c
+
+  def forward_to_layer(self, x, layer_idx):
+    """Run encoder up to and including transformer block `layer_idx` (0-indexed).
+    layer_idx=-1 (or any index >= n_layers - 1) returns the final layer output.
+
+    Used for middle-layer probing / fine-tuning. The autoencoder's reconstruction
+    objective pressures the top layer to be reconstruction-specialised; a
+    middle layer often carries more classification-relevant features.
+    """
+    z, z_pad, _ = self.get_latents(x)
+    z = self.add_pe(z)
+    c = z
+    target_idx = layer_idx if layer_idx >= 0 else len(self.blocks) - 1
+    for i, block in enumerate(self.blocks):
+      c = block(c, z_pad)
+      if i == target_idx:
+        return c
+    return c
+
   def forward(self, x):
     z, z_pad, _ = self.get_latents(x)
     z = self.add_pe(z)
@@ -842,6 +861,99 @@ class SmrtAutoencoderSmallRF(SmrtAutoencoder):
     self.mask_size = mask_size
 
 
+class SmrtAutoencoderMAE(nn.Module):
+  """True MAE: encoder transformer sees only unmasked latents, decoder
+  reconstructs kinetics at all masked positions.
+
+  Differs from SmrtAutoencoder (BERT-style in-place input masking) in two
+  structural ways:
+    - Mask is applied AFTER the CNN, on the T/4 latents — not at the input.
+      Stride-2 CNN convs assume contiguous inputs, so dropping pre-CNN
+      tokens would break locality. Post-CNN, the latents are already at
+      T/4 resolution and dropping is safe.
+    - The encoder transformer processes only the kept (~25%) latents. A
+      learnable [mask] token is scattered into the dropped slots before the
+      decoder runs, mirroring He et al. 2022's asymmetric encoder/decoder.
+      A small decoder transformer (default 2 layers) attends across the
+      full T/4 sequence to fill in the masked latents, then a transposed-
+      conv stack upsamples back to T and predicts kinetics.
+
+  Loss target: kinetics MSE at input positions covered by *masked latents*
+  (4 input positions per latent, given the 4x downsample). Returns the
+  same (kin_recon, kin_target, mask) tuple as SmrtAutoencoder so
+  MaskedReconstructionLoss can be reused without modification.
+  """
+
+  def __init__(self, d_model=128, n_layers=4, n_head=4, max_len=512,
+               mask_ratio=0.75, decoder_n_layers=2):
+    super().__init__()
+    self.encoder = SmrtEncoderSmallRF(d_model, n_layers, n_head, max_len)
+    self.mask_token = nn.Parameter(torch.zeros(1, 1, d_model))
+    nn.init.normal_(self.mask_token, std=0.02)
+    self.decoder_blocks = nn.ModuleList([
+        TransformerBlock(d_model=d_model, n_head=n_head, max_len=max_len // 4)
+        for _ in range(decoder_n_layers)
+    ])
+    self.decoder_pe = PositionalEncoding(d_model, max_len=max_len // 4)
+    self.decoder_upsample = SmrtDecoder(d_model)
+    self.mask_ratio = mask_ratio
+
+  def random_mask(self, z, z_pad):
+    """Per-sample random shuffle; keep the first (1 - mask_ratio) fraction
+    of non-pad latents. Returns indices for gather/scatter and a per-position
+    boolean mask (True = dropped from encoder input)."""
+    B, L, _ = z.shape
+    keep_count = max(1, int(L * (1 - self.mask_ratio)))
+    noise = torch.rand(B, L, device=z.device)
+    # Push padding to the back of the shuffle so kept latents are real data.
+    noise = noise + z_pad.float() * 2.0
+    ids_shuffle = noise.argsort(dim=1)
+    ids_keep = ids_shuffle[:, :keep_count]
+    ids_restore = ids_shuffle.argsort(dim=1)
+    mask_latent = torch.ones(B, L, device=z.device)
+    mask_latent.scatter_(1, ids_keep, 0.0)
+    return ids_keep, ids_restore, mask_latent.bool(), keep_count
+
+  def forward(self, x):
+    # 1. CNN-encode the full input to T/4 latents.
+    z, z_pad, _ = self.encoder.get_latents(x)
+    B, L, d = z.shape
+
+    # 2. Add full-sequence positional encoding then gather kept latents.
+    z = self.encoder.add_pe(z)
+    ids_keep, ids_restore, mask_latent, keep_count = self.random_mask(z, z_pad)
+    z_kept = torch.gather(z, 1, ids_keep.unsqueeze(-1).expand(-1, -1, d))
+    pad_kept = torch.gather(z_pad, 1, ids_keep)
+
+    # 3. Encoder transformer on kept latents only. ~4x speedup vs full-seq.
+    for block in self.encoder.blocks:
+      z_kept = block(z_kept, pad_kept)
+
+    # 4. Scatter the kept latents back into a full sequence with mask tokens
+    #    at the dropped positions, then add decoder PE.
+    n_masked = L - keep_count
+    mask_tokens = self.mask_token.expand(B, n_masked, d)
+    z_full = torch.cat([z_kept, mask_tokens], dim=1)
+    z_full = torch.gather(z_full, 1, ids_restore.unsqueeze(-1).expand(-1, -1, d))
+    z_full = self.decoder_pe(z_full)
+
+    # 5. Decoder transformer attends across full T/4 sequence to fill in masks.
+    for block in self.decoder_blocks:
+      z_full = block(z_full, z_pad)
+
+    # 6. Upsample T/4 -> T and predict kinetics.
+    kin_recon = self.decoder_upsample(z_full)
+
+    # 7. Build the input-resolution loss mask: each masked latent covers
+    #    4 input positions (4x CNN downsample). Padding positions are excluded
+    #    explicitly via x[..., 3] (1.0 = padding).
+    T_in = x.shape[1]
+    mask_input = mask_latent.repeat_interleave(4, dim=1)[:, :T_in]
+    mask_input = mask_input & ~(x[..., 3].bool())
+
+    return kin_recon, x[..., 1:3], mask_input
+
+
 class DirectClassifierSmallRF(nn.Module):
   """Supervised classifier using SmrtEncoderSmallRF (CNN RF=27) instead of
   the default SmrtEncoder (RF=107). Intended for fine-tuning small-RF
@@ -868,6 +980,129 @@ class DirectClassifierSmallRF(nn.Module):
     c = self.encoder.forward(x)
     logits = self.head(c[:, c.shape[1] // 2, :])
     return logits
+
+
+### Fine-tune revamp variants (supervised_53_finetune_revamp / F-series)
+#
+# Three classifier variants built for the F1/F3/F4 axes of the fine-tune
+# revamp. They share the same encoder family (default or small-RF) as
+# DirectClassifier / DirectClassifierSmallRF but differ in (a) where they
+# read out from the encoder, (b) what sits between the encoder and the
+# classification head, and (c) head capacity.
+
+
+class DirectClassifierMidLayer(nn.Module):
+  """F1: read out from a configurable middle transformer layer of the encoder.
+
+  The autoencoder objective directly pressures the *top* transformer layer
+  to be reconstruction-specialised. At scale (d=512 / d=768) this can
+  displace classification-relevant features into middle layers, leaving
+  the top-layer-only fine-tune (which is what DirectClassifier does) with
+  much less to work with than the LP→FT lift on smaller models suggests.
+  This class lets the supervised harness read out from `layer_idx` instead
+  of always using the final layer.
+
+  A LayerNorm on the read-out stabilises intermediate representations
+  before the linear head — the encoder doesn't apply a post-block norm
+  inside the transformer stack, so a fresh LN here keeps the head input
+  scale consistent with what the existing DirectClassifier head expects.
+  """
+
+  def __init__(self, d_model, n_layers, n_head, max_len, layer_idx,
+               cnn_variant='default'):
+    super().__init__()
+    EncoderCls = SmrtEncoderSmallRF if cnn_variant == 'small_rf' else SmrtEncoder
+    self.encoder = EncoderCls(d_model, n_layers, n_head, max_len)
+    self.layer_idx = int(layer_idx)
+    self.head_ln = nn.LayerNorm(d_model)
+    self.head = nn.Sequential(
+        nn.Linear(d_model, d_model // 2),
+        nn.GELU(),
+        nn.Linear(d_model // 2, 1),
+    )
+
+  def forward(self, x):
+    c = self.encoder.forward_to_layer(x, self.layer_idx)
+    return self.head(self.head_ln(c[:, c.shape[1] // 2, :]))
+
+
+class DirectClassifierWithDecoder(nn.Module):
+  """F3: warm-start fine-tune that re-uses the SSL autoencoder's
+  ConvTranspose1d upsample stack as a feature mixer between the encoder
+  and the classification head.
+
+  Tests the "don't throw the projection head away" claim from the SSL
+  literature. The autoencoder's `SmrtDecoder` ends in `Linear(d, 2)` for
+  kinetics prediction; here we keep only the `upsample` portion (two
+  ConvTranspose1d + GELU) and drop the kinetics-prediction Linear, since
+  the supervised task wants logits not kinetics. Encoder runs at T/4
+  resolution; the upsample reshapes to T (input resolution) before
+  the classifier head reads the centre position.
+
+  State-dict load contract: the decoder weights live under
+  `decoder.upsample.*` in the SSL checkpoint (see SmrtDecoder.upsample);
+  this class exposes `decoder_upsample.*` so a re-keying step is needed
+  during checkpoint load. The fine-tune harness handles that mapping.
+  """
+
+  def __init__(self, d_model, n_layers, n_head, max_len, cnn_variant='small_rf'):
+    super().__init__()
+    EncoderCls = SmrtEncoderSmallRF if cnn_variant == 'small_rf' else SmrtEncoder
+    self.encoder = EncoderCls(d_model, n_layers, n_head, max_len)
+    # Mirror SmrtDecoder.upsample exactly — same kernel sizes / strides /
+    # paddings — so SSL upsample weights load without remapping beyond the
+    # `decoder.upsample.*` -> `decoder_upsample.*` prefix translation.
+    self.decoder_upsample = nn.Sequential(
+        nn.ConvTranspose1d(d_model, d_model, kernel_size=4, stride=2, padding=1),
+        nn.GELU(),
+        nn.ConvTranspose1d(d_model, d_model, kernel_size=4, stride=2, padding=1),
+        nn.GELU(),
+    )
+    self.head = nn.Sequential(
+        nn.Linear(d_model, d_model // 2),
+        nn.GELU(),
+        nn.Linear(d_model // 2, 1),
+    )
+
+  def forward(self, x):
+    c = self.encoder.forward(x)            # [B, T/4, d]
+    c = c.permute(0, 2, 1)                 # [B, d, T/4]
+    c = self.decoder_upsample(c)           # [B, d, T]
+    c = c.permute(0, 2, 1)                 # [B, T, d]
+    return self.head(c[:, c.shape[1] // 2, :])
+
+
+class DirectClassifierBigHead(nn.Module):
+  """F4: supervised_20-recipe-matched classifier with a deeper MLP head.
+
+  The DirectClassifier head is a 2-layer MLP `Linear(d, d/2) → GELU →
+  Linear(d/2, 1)`. At d=128 (where supervised_20 runs) this is fine; at
+  d=768 the first projection from 768→384 may be undersized to extract
+  classification signal from a representation tuned for kinetics
+  reconstruction. F4 widens the head to a 3-layer MLP that keeps full
+  width before the final projection.
+
+  Pairs with a recipe matching supervised_20 (max_lr=3e-3, pct_start=0.1,
+  weight_decay=0.02, 20 epochs, batch_size=512). Acts as a control for the
+  middle-layer hypothesis: if F4 closes the LP→FT gap on its own, the
+  problem is the head/recipe, not the read-out layer.
+  """
+
+  def __init__(self, d_model, n_layers, n_head, max_len, cnn_variant='default'):
+    super().__init__()
+    EncoderCls = SmrtEncoderSmallRF if cnn_variant == 'small_rf' else SmrtEncoder
+    self.encoder = EncoderCls(d_model, n_layers, n_head, max_len)
+    self.head = nn.Sequential(
+        nn.Linear(d_model, d_model),
+        nn.GELU(),
+        nn.Linear(d_model, d_model // 2),
+        nn.GELU(),
+        nn.Linear(d_model // 2, 1),
+    )
+
+  def forward(self, x):
+    c = self.encoder.forward(x)
+    return self.head(c[:, c.shape[1] // 2, :])
 
 
 ### SimCLR v1 wrapper

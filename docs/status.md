@@ -1,13 +1,15 @@
 # Research Status
 
-*Last updated: 2026-05-07*
+*Last updated: 2026-05-08*
 
 ## Active objectives
 
 Two parallel threads are running:
 
-1. **Tissue provenance (new task)**: Can a 4-channel-kinetics encoder + 8-way head learn to classify the tissue of origin of a PacBio HiFi read, and how large is the within-cell vs across-cell generalisation gap?
-2. **CpG methylation foundation model**: Can self-supervised pretraining on PacBio kinetics produce representations that beat the supervised baseline (~82% top-1)? Open across two SSL families: contrastive (currently failing) and masked autoencoder (currently the only family with positive transfer).
+1. **Tissue provenance**: paused after the sklearn probe sweep falsified the premise on 50k labelled reads.
+2. **CpG methylation foundation model**: scaling autoencoder pretraining and revamping fine-tuning to close the LP→FT gap.
+
+The Gefion grant expires in ~144 hours (2026-05-14). 7,500 H100-hours remaining; this is the last weekend window of unconstrained compute. After expiry, capacity drops sharply.
 
 ## Established CpG results
 
@@ -15,53 +17,65 @@ Two parallel threads are running:
 |--------|-----------|-------|
 | Supervised baseline ~82% top-1 | supervised_20 | DirectClassifier d=128/L=4, 20ep, full ds |
 | Supervised v40 still climbing at ep20: 0.808 → 0.818 | supervised_40_baseline_v2 | Scheduler-fix preserved (no AcceleratedScheduler wrap) |
-| Autoencoder probe 66% top-1 | ssl_25 | First ssl variant with positive transfer |
-| Fine-tune ssl_25 encoder → 79% | supervised_27 | 3pp below supervised, schedule-confounded |
-| Every contrastive variant ssl_50–57 either fails to beat random init or collapses | — | See `docs/negative_results.md` for the dimensional-collapse / augmentation-mismatch chain |
+| Autoencoder probe 66% top-1 | ssl_25 | First SSL variant with positive transfer |
+| Fine-tune ssl_25 encoder → 79% (+13pp over LP) | supervised_27 | 3pp below supervised, schedule-confounded |
+| Every contrastive variant ssl_50–57 fails to beat random init or collapses | — | See `docs/negative_results.md` |
 
 ## Current state of CpG work
 
-**Contrastive thread is paused after ssl_57's collapse chain.** The diagnosis is structural: contrastive learning makes the encoder invariant to whatever defines the positive pair. Both `random_subcrop` (any-position-within-read) and `neighbor_pair_subcrop` failed to produce monotone-improving probe trajectories without collapse. ssl_55 added LN to the projection head to fix the magnitude-runaway pathway; ssl_56 changed the invariant; ssl_57 moved to input-masked prediction with AgInfoNCE; v3 fixed the AcceleratedScheduler step-multiplier bug; v5 cut RF from 107 → 27. All eventually collapse. Conclusion: contrastive objectives in this domain suppress the per-position kinetic variation methylation lives in.
+### Why the new wave of experiments
 
-**Autoencoder thread is the active SSL bet.** ssl_58 launched 2026-05-05 across the same 4-size grid (d128_L4 / d256_L8 / d512_L8 / d768_L8) with `SmrtAutoencoderSmallRF` + `MaskedReconstructionLoss` at ctx=512, 1M steps, 8 GPUs × 4 nodes × 48h walltime. Modernised harness inherits all bug fixes (no AcceleratedScheduler wrap, non-finite-grad skip, ProgressState resume, ChunkedRandomSampler, encoder-only step_<N>.pt milestones, step-0 baseline, dual-set pair-val on yoran in-dist + ob007 held-out). Diagnostic `embed_z_std`/`embed_z_norm` log on encoder transformer output `c` via forward hook. Pass at d=128: probe_top1 ≥ 0.67 (beats ssl_25's 66%) and non-decreasing last 3 evals. Status: pending Gefion results.
+`supervised_51_finetune_ssl58_grid` showed a much smaller LP→FT lift on the ssl_58 checkpoints than ssl_25 saw: at d=512/d=768, fine-tuning barely beats the linear probe, where ssl_25 had +13pp. This is structurally suspicious. Three candidate explanations the new experiments target:
 
-**Supervised capacity sweep (supervised_51) is in flight on Gefion.** Same 4-size grid at the v40 recipe. Tests whether v40's 0.818 plateau is capacity-bound. 60-ep cosine, 24h walltime per size. Pass: any size beats v40's 0.8179 by ≥ 0.5pp. Status: pending.
+1. **Top-layer reconstruction-saturation**: at scale, the autoencoder loss may pressure the top transformer layer to be reconstruction-specialised, displacing classification-relevant features into middle layers. Fine-tune always reads the top layer, so the read-out is wrong, not the representation.
+2. **Recipe mismatch**: uniform-LR unfreeze shocks the encoder; layer-wise LR decay and an LP-FT warmup are standard MAE/BERT fine-tune practice and ssl_58 fine-tunes use neither.
+3. **Cosine never finished at scale**: d=768's 1M-step schedule needs ~320h of d=768 throughput; the 96h base/long variants never reach min-lr. So the d=768 plateau may be a schedule artefact, not a capacity limit.
 
-## Tissue provenance (supervised_52) — paused after the probe sweep falsified the premise
+### What's queued for the weekend
 
-`supervised_52_tissue` was the first run on the new yoran ctx4096 dataset (8 tissues × 2 PacBio cells, partition keyed by `read_name`, 50k train / 10k val_s1 / 10k val_s2). Across all four sizes (d128/d256/d512/d768) the deep classifier drives train cross-entropy to ~0 within walltime but val cross-entropy never moves. We didn't know whether this was a preprocessing bug, an alignment bug (the v1 `zarr_to_methyl_memmap.py` style), a cell-batch artefact, or simply absence of signal. **Result: the signal isn't there at this dataset size**, in the sense the supervised model is trying to extract it.
+**Pretraining (3 new SSL jobs, each 1 node × 8 H100, 120h walltime)**
 
-`report/probe_tissue_yoran/` is the diagnostic sweep — 13 standalone sklearn / EDA scripts run against the same partition and `KineticsNorm` the deep model uses (10k train / 2k val_s1 / 2k val_s2 subsample). Findings (full numbers in `docs/experiment_log.md` 2026-05-07 and `docs/negative_results.md` 2026-05-07):
+- `ssl_58_autoencoder_grid/size_d1024_L8` (A1) — one tier wider than the existing grid. bs=32/rank to preserve activation memory at d=1024.
+- `ssl_58_autoencoder_grid/size_d768_L8_finished_cosine` (A3) — total_steps=350k so the cosine actually bottoms inside walltime at d=768 throughput.
+- `ssl_59_mae/size_d512_L8` (B1) — true MAE sparse encoder (`SmrtAutoencoderMAE`): encoder transformer sees only the kept ~25% post-CNN latents, decoder fills in [mask] tokens and reconstructs kinetics. mask_ratio=0.75, decoder_n_layers=2, bs=192/rank.
 
-- Pooled (25-d), binned (128-d), and flat (8192-d) kinetics features all collapse to chance on val (top1 ∈ [0.121, 0.137], chance = 0.125) while RF / HGB / saga-LogReg memorise to train top1 = 1.0. Per-tissue 1-vs-rest AUROC ∈ [0.50, 0.57]. The deep model is doing what these probes do: memorise.
-- Cell s1 vs s2 from the same pooled features: val 0.549 — a real but small batch effect, not the dominant blocker.
-- Read-length only and base-composition only: chance.
-- Raw vs `KineticsNorm`-normed: identical val accuracies. KineticsNorm is not destroying signal.
-- ctx=2048 vs ctx=4096: the full window is *worse*. The centre-crop is not throwing away tissue signal.
-- Reverse-kinetics alignment is correct (per-base symmetry test: `fp@fwd-C ≈ rp@fwd-G` to within 0.04 uint8 units). The build script's `ri[::-1].copy()` step does what `docs/methodology.md:243-249` claims; the v1-style misalignment is not happening.
+**Fine-tune revamp (4 new supervised jobs, 24 combos each, 1 node × 8 H100, 24h walltime)**
 
-Two side-effect anomalies surfaced for the tissue dataset (not blockers, worth fixing at the source):
-- `data/01_processed/tissue_sets/yoran_ctx4096/partition.csv` has one row with `'val_s1 '` (trailing space). `report.probe_tissue_yoran._shared.load_partition()` strips on load and warns; `scripts/make_tissue_partition.py` should `.str.strip_chars()` before write.
-- 580 read_names appear on multiple manifest rows (max 4 windows per read), so `pl.col('read_name').is_in(train_names)` returns 50,018 train rows rather than 50,000 (val_s1 +3, val_s2 +6). The deep model trains on the inflated set; not a correctness bug, but the on-disk "50k" claim is approximate.
+All under `supervised_53_finetune_revamp/`, driven by new `scripts/ds_grid_v3.py` (treatment-aware extension of v2). All four read ssl_58 checkpoints via `scripts/utils/select_best_ssl_checkpoint.py` — picks the best-probe step per size, not `final_model.pt`, since smaller ssl_58 sizes peak before the end of training.
 
-**No further architecture iteration on supervised_52 at this dataset size**. The next viable moves on the tissue task are: scale labelled data well past 50k; per-cell normalisation A/B (subtract cell-mean before the global z-score); sequence-aware features beyond base composition; or exploit which genomic regions the read maps to rather than relying on whole-read kinetics. None of those is queued yet.
+| Treatment | What it tests | New class |
+|---|---|---|
+| `midlayer/` (F1) | Top-layer-saturation hypothesis; reads from configurable `layer_idx` | `DirectClassifierMidLayer` + `SmrtEncoder.forward_to_layer` |
+| `lpft_lldr/` (F2) | Recipe-mismatch hypothesis; LP-FT + layer-wise LR decay (decay=0.7) | (uses `DirectClassifier(SmallRF)` + new optimizer wiring) |
+| `decoder_init/` (F3) | "Don't throw the projection head away"; reuses SSL `SmrtDecoder.upsample` | `DirectClassifierWithDecoder` |
+| `recipe_match/` (F4) | Head / recipe control for F1; supervised_20 recipe + 3-layer MLP head | `DirectClassifierBigHead` |
 
-Library additions still in place (additive, default args preserve all existing call sites):
-- `smrt_foundation.normalization.KineticsNorm`: `n_continuous=2|4` arg.
-- `smrt_foundation.model.SmrtEncoderTissue`, `TissueClassifier`.
+### Free harness improvements (apply to all new runs)
 
-Test surface: 7 synthetic tests in `tests/test_kinetics_norm.py::TestKineticsNormNContinuous4` and 5 live-data tests in `tests/test_probe_tissue_shared.py` (auto-skip without the data dir). All pass.
+- `train_history.csv` (per-LOG_EVERY): step, train_loss, lr, grad_norm, embed_z_std/norm, step_time_ms, iters_per_sec, nonfinite_skip_count.
+- `pair_val_history.csv` (long format): one row per (step, split, gap) for clean post-hoc plotting.
+- ssl_58 milestones now bundle `decoder_state_dict` (`SmrtDecoder.upsample` + Linear(d, 2)) and `mask_config` so F3 can warm-start the supervised classifier from them. ssl_59 milestones bundle the full non-encoder portion of the model under `decoder_state_dict` (decoder_blocks/decoder_pe/decoder_upsample/mask_token) for symmetric reusability.
+
+## Tissue provenance — paused
+
+Sklearn probe sweep (2026-05-07) confirmed: at 50k labelled yoran reads, kinetics features at every granularity (per-window summary, per-bin summary, per-position) carry no extractable tissue signal that generalises across reads or cells. Per-tissue 1-vs-rest AUROCs lie in [0.50, 0.57]. Cell s1-vs-s2 LogReg val 0.55 — small but real batch effect. The deep model trains to memorisation; an sklearn probe with the same features does the same. No further iteration on supervised_52 at this dataset size.
 
 ## Open questions
 
-1. **CpG capacity scaling (supervised_51)**: does any size beat v40's 0.8179?
-2. **CpG SSL with masked autoencoder (ssl_58)**: does any size beat ssl_25's 66% probe?
-3. **Tissue task feasibility (supervised_52)**: ~~does a 6-channel encoder learn the 8-way classification at 50k labelled reads~~ — answered no by the sklearn probe sweep on 2026-05-07. New question: can per-cell normalisation, more labelled data, or sequence-aware features open the task back up?
+1. **MAE vs BERT-style autoencoder**: does the asymmetric encoder/decoder produce a cleaner LP→FT lift than ssl_58's in-place input masking?
+2. **Top-layer saturation**: does F1 (middle-layer read-out) close the LP→FT gap?
+3. **Recipe vs representation**: does F2 (LP-FT + LLDR) close the gap on its own? If so, F1's middle-layer story is weakened.
+4. **Decoder reuse**: does F3 beat the random-init upsample baseline?
+5. **Capacity ceiling**: does d=1024 (A1) keep paying past d=768?
+6. **Cosine artefact**: does A3 (d=768 with finished cosine) beat the existing d=768 plateau?
 
 ## Pending experiments
 
 | Experiment | Status |
 |-----------|--------|
-| supervised_51 (4 sizes) | Submitted to Gefion |
-| ssl_58 (4 sizes) | Submitted to Gefion |
-| supervised_52_tissue (4 sizes) | Paused — sklearn probe sweep falsified the premise; no signal at 50k labelled reads |
+| ssl_58_autoencoder_grid/{d128_L4, d256_L8, d512_L8, d768_L8, *_long, *_ctx4096} | In flight on Gefion |
+| ssl_58_autoencoder_grid/size_d1024_L8 (A1) | Built, ready to submit |
+| ssl_58_autoencoder_grid/size_d768_L8_finished_cosine (A3) | Built, ready to submit |
+| ssl_59_mae/size_d512_L8 (B1) | Built, tests pass, ready to submit |
+| supervised_53_finetune_revamp/{midlayer, lpft_lldr, decoder_init, recipe_match} (F1-F4) | Built, tests pass, midlayer probe sweep pending before submit |
+| supervised_52_tissue (4 sizes) | Paused — sklearn probe sweep falsified premise |

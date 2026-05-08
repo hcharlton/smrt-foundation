@@ -1,13 +1,20 @@
-"""Shared masked-autoencoder training loop for ssl_58.
+"""Shared training loop for ssl_59_mae (true MAE sparse encoder).
 
-Scales the autoencoder lineage (ssl_24/25/29/30 → SmrtAutoencoder /
-SmrtAutoencoderSmallRF + MaskedReconstructionLoss) to ctx=512 across
-the 4-size grid (d128_L4 / d256_L8 / d512_L8 / d768_L8) under the modern
-ssl_57 harness. The bet: every contrastive variant in this project has
-collapsed or failed to beat random-init probe, while autoencoder runs at
-ctx=32–128 have consistently produced positive transfer (62–66% probe).
-MSE on masked kinetics directly preserves per-position kinetic
-variation — the signal CpG methylation lives in — by construction.
+Branches from ssl_58's harness (which uses BERT-style in-place input
+masking on SmrtAutoencoderSmallRF). ssl_59 swaps in SmrtAutoencoderMAE,
+where the encoder transformer sees only the kept (~25%) post-CNN latents
+and a small decoder transformer plus the existing upsample stack
+reconstruct kinetics at masked positions. He et al. 2022's asymmetric
+encoder/decoder, lifted onto our CNN-transformer hybrid: the mask is
+applied AFTER the CNN so stride-2 conv locality is preserved.
+
+The bet: ssl_58 already established that masked kinetics reconstruction
+preserves per-position variation. The MAE asymmetry is supposed to push
+the encoder representation harder by forcing it to produce features
+useful for cross-position reconstruction, not just within-context
+denoising. If the LP→FT gap on ssl_58 is structural (top layer becomes
+reconstruction-saturated as we scale), MAE either suffers the same fate
+or escapes it — that's the experiment.
 
 Inherited from ssl_57's harness (verbatim):
 
@@ -82,7 +89,7 @@ from smrt_foundation.dataset import (
     ShardedMemmapDataset, LabeledMemmapDataset,
     PairedGapMemmapDataset, ChunkedRandomSampler,
 )
-from smrt_foundation.model import SmrtAutoencoderSmallRF
+from smrt_foundation.model import SmrtAutoencoderMAE
 from smrt_foundation.loss import MaskedReconstructionLoss
 from smrt_foundation.optim import get_cosine_schedule_with_warmup
 from smrt_foundation.normalization import KineticsNorm
@@ -164,7 +171,7 @@ def _check_resume_compatible(resume_dir, config):
     cur = config.get('smrt2vec', {})
     prev = stored.get('smrt2vec', {})
     arch_keys = ('d_model', 'n_layers', 'n_head', 'context',
-                 'p_mask', 'mask_size')
+                 'mask_ratio', 'decoder_n_layers')
     for k in arch_keys:
         if cur.get(k) != prev.get(k):
             raise RuntimeError(
@@ -363,7 +370,9 @@ def main():
         # run) and then sits at min_lr until walltime / step 10M.
         'schedule_steps': 0,
         'max_lr': 3e-4,
-        'p_mask': 0.15, 'mask_size': 10,
+        # MAE-specific: mask_ratio canonical 0.75 (He et al. 2022).
+        # decoder_n_layers stays small per the asymmetric-decoder design.
+        'mask_ratio': 0.75, 'decoder_n_layers': 2,
         'weight_decay': 0.02, 'pct_start': 0.03,
         'grad_clip': 5.0,
         # Pair-val temperature is used only by the sim-matrix in
@@ -507,10 +516,11 @@ def main():
     )
 
     # --- Model / loss / optim ---
-    model = SmrtAutoencoderSmallRF(
+    model = SmrtAutoencoderMAE(
         d_model=c['d_model'], n_layers=c['n_layers'], n_head=c['n_head'],
         max_len=c['context'],
-        p_mask=float(c['p_mask']), mask_size=int(c['mask_size']),
+        mask_ratio=float(c['mask_ratio']),
+        decoder_n_layers=int(c['decoder_n_layers']),
     )
 
     if accelerator.is_main_process and tracker is not None:
@@ -593,20 +603,26 @@ def main():
         Tied to every probe eval (including step-0 baseline) so each row
         of probe_history.csv has a corresponding loadable artifact.
 
-        Includes the autoencoder decoder weights and the mask config so the
-        full autoencoder is reconstructible. Required by F3 (decoder-init
-        warm-start fine-tune) which uses the upsample stack as a feature
-        mixer between the encoder and the supervised classifier head.
+        For SmrtAutoencoderMAE the "decoder" is split across decoder_blocks,
+        decoder_pe, decoder_upsample, and the mask_token parameter. We save
+        the encoder by name (compatible with the standard fine-tune
+        harnesses) plus a `decoder_state_dict` that bundles the rest of the
+        model under their own prefixes — F3 can extract the upsample
+        sub-stack from the bundle.
         """
         if accelerator.is_main_process:
             unwrapped = accelerator.unwrap_model(model)
+            full_sd = unwrapped.state_dict()
+            decoder_sd = {
+                k: v for k, v in full_sd.items() if not k.startswith('encoder.')
+            }
             save_path = os.path.join(checkpoint_dir, f'step_{step}.pt')
             torch.save({
                 'encoder_state_dict': unwrapped.encoder.state_dict(),
-                'decoder_state_dict': unwrapped.decoder.state_dict(),
+                'decoder_state_dict': decoder_sd,
                 'mask_config': {
-                    'p_mask': float(c['p_mask']),
-                    'mask_size': int(c['mask_size']),
+                    'mask_ratio': float(c['mask_ratio']),
+                    'decoder_n_layers': int(c['decoder_n_layers']),
                 },
                 'config': config,
                 'epoch': epoch_idx,
@@ -953,13 +969,17 @@ def main():
     # --- Final checkpoint + pass-criterion summary ---
     if accelerator.is_main_process:
         unwrapped = accelerator.unwrap_model(model)
+        full_sd = unwrapped.state_dict()
+        decoder_sd = {
+            k: v for k, v in full_sd.items() if not k.startswith('encoder.')
+        }
         save_path = os.path.join(checkpoint_dir, 'final_model.pt')
         torch.save({
             'encoder_state_dict': unwrapped.encoder.state_dict(),
-            'decoder_state_dict': unwrapped.decoder.state_dict(),
+            'decoder_state_dict': decoder_sd,
             'mask_config': {
-                'p_mask': float(c['p_mask']),
-                'mask_size': int(c['mask_size']),
+                'mask_ratio': float(c['mask_ratio']),
+                'decoder_n_layers': int(c['decoder_n_layers']),
             },
             'config': config,
             'epoch': epoch,

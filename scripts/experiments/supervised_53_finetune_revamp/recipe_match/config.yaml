@@ -1,0 +1,60 @@
+experiment_type: 'supervised'
+experiment_name: '53_finetune_revamp_recipe_match'
+run_message: >-
+  F4: bigger head + supervised_20-recipe-matched fine-tune.
+  DirectClassifierBigHead replaces the 2-layer Linear(d, d/2) -> GELU ->
+  Linear(d/2, 1) head with a 3-layer MLP that keeps full d_model width
+  before the final projection. Recipe locked to supervised_20 exactly:
+  max_lr=3e-3, pct_start=0.1, weight_decay=0.02, batch_size=512, 20
+  epochs.
+  Acts as the head/recipe control for F1 (middle-layer): if F4 closes
+  the LP->FT gap on its own, the problem is the head/recipe, not the
+  read-out layer.
+  4 archs x 2 inits x 3 train_sizes = 24 runs.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "24:00:00"
+  gres: gpu:8
+  num_processes: 1
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+architectures:
+  d128_L4: { d_model: 128, n_layers: 4, n_head: 2 }
+  d256_L8: { d_model: 256, n_layers: 8, n_head: 4 }
+  d512_L8: { d_model: 512, n_layers: 8, n_head: 8 }
+  d768_L8: { d_model: 768, n_layers: 8, n_head: 12 }
+
+inits:
+  random:
+    checkpoint: null
+  ssl_58_best:
+    checkpoint: 'auto_best'
+    ssl_exp_root: 'scripts/experiments/ssl_58_autoencoder_grid'
+
+skip: []
+
+train_sizes: [10000, 100000, 8000000]
+
+# supervised_20 recipe: bs=512, max_lr=3e-3, pct_start=0.1, weight_decay=0.02
+classifier:
+  context: 32
+  weight_decay: 0.02
+  pct_start: 0.1
+  max_lr: 3e-3
+  batch_size: 512
+  cnn_variant: 'small_rf'
+  treatment: 'big_head'
+
+scaling:
+  val_limit: 1000000
+  max_epochs: 20
+  min_steps: 100
+  max_steps: 400000
+  n_evals: 20
+  first_eval_step: 100

@@ -1,0 +1,62 @@
+experiment_type: 'supervised'
+experiment_name: '53_finetune_revamp_lpft_lldr'
+run_message: >-
+  F2: linear-probe-then-fine-tune (LP-FT) with layer-wise LR decay.
+  Stage 1: encoder frozen for warmup_epochs=5 epochs, head trains at
+  max_lr=3e-3.
+  Stage 2: encoder unfrozen with per-layer LR scaling -- head at max_lr,
+  block i at max_lr * decay^(L-i), embed/cnn at max_lr * decay^(L+1)
+  (decay=0.7). Cosine schedule across the entire run; the stage
+  transition just flips requires_grad on the encoder.
+  Tests the recipe-mismatch hypothesis: ssl_58's small LP->FT gap may be
+  a too-aggressive uniform-LR unfreeze shocking the encoder, not a
+  representation problem.
+  4 archs x 2 inits x 3 train_sizes = 24 runs.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "24:00:00"
+  gres: gpu:8
+  num_processes: 1
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+architectures:
+  d128_L4: { d_model: 128, n_layers: 4, n_head: 2 }
+  d256_L8: { d_model: 256, n_layers: 8, n_head: 4 }
+  d512_L8: { d_model: 512, n_layers: 8, n_head: 8 }
+  d768_L8: { d_model: 768, n_layers: 8, n_head: 12 }
+
+inits:
+  random:
+    checkpoint: null
+  ssl_58_best:
+    checkpoint: 'auto_best'
+    ssl_exp_root: 'scripts/experiments/ssl_58_autoencoder_grid'
+
+skip: []
+
+train_sizes: [10000, 100000, 8000000]
+
+classifier:
+  context: 32
+  weight_decay: 0.02
+  pct_start: 0.1
+  max_lr: 3e-3
+  batch_size: 4096
+  cnn_variant: 'small_rf'
+  treatment: 'lpft_lldr'
+  warmup_epochs: 5
+  lldr_decay: 0.7
+
+scaling:
+  val_limit: 1000000
+  max_epochs: 200
+  min_steps: 100
+  max_steps: 400000
+  n_evals: 40
+  first_eval_step: 100
