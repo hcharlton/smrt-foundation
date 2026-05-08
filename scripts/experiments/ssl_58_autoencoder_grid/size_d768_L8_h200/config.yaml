@@ -38,7 +38,7 @@ smrt2vec:
   mask_size: 10
   total_steps: 1000000
   ds_limit: 0
-  batch_size: 64
+  batch_size: 128
   optimizer: 'AdamW'
   max_lr: 3.0e-4
   weight_decay: 0.02
