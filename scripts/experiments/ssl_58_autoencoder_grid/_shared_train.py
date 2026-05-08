@@ -434,7 +434,9 @@ def main():
 
     # --- Dataset & normalization ---
     dataset_name = config.get('ssl_dataset', 'yoran_raw.memmap')
-    memmap_path = f"data/01_processed/ssl_sets/{dataset_name}"
+    # SMRT_SSL_MEMMAP_DIR overrides the default path when run.sh has staged
+    # the SSL shards to local NVMe ($TMPDIR) on GenomeDK.
+    memmap_path = os.environ.get('SMRT_SSL_MEMMAP_DIR') or f"data/01_processed/ssl_sets/{dataset_name}"
 
     ds = ShardedMemmapDataset(memmap_path, limit=c['ds_limit'])
     if accelerator.is_main_process:

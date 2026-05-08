@@ -57,6 +57,26 @@ GRES=$(read_resource gres gpu:8)
 NUM_PROCS=$(read_resource num_processes 8)
 PARTITION=$(read_resource partition '')
 
+# Read a value from the optional `stage:` block in config.yaml.
+# Used on GenomeDK to copy the SSL memmap to local NVMe ($TMPDIR) before
+# launching training. Ignored on Gefion / local.
+read_stage() {
+    python3 - "$CONFIG" "$1" "$2" <<'PYEOF'
+import sys, yaml
+config_path, key, default = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(config_path) as f:
+    c = yaml.safe_load(f)
+print((c.get('stage') or {}).get(key, default))
+PYEOF
+}
+
+STAGE_ENABLED=$(read_stage enabled "false")
+STAGE_N_SHARDS=$(read_stage n_shards "0")
+STAGE_SHUFFLE=$(read_stage shuffle "false")
+STAGE_SEED=$(read_stage seed "42")
+STAGE_PARALLEL=$(read_stage parallel "16")
+SSL_DATASET=$(python3 -c "import yaml; c=yaml.safe_load(open('$CONFIG')); print(c.get('ssl_dataset','yoran_raw.memmap'))")
+
 # Partition-aware GPU flag selection. When `partition` is set in the config's
 # resources block (GenomeDK convention, e.g. `gpu-h200`), submit with
 # `--partition=$PARTITION --gpus=$NUM_PROCS` per the cluster's documented
@@ -81,6 +101,19 @@ fi
 echo "[$ENV] $SCRIPT (config: $CONFIG)"
 echo "  cores=$CORES mem=$MEMORY time=$WALLTIME procs=$NUM_PROCS gpu_flags=${GPU_FLAGS}"
 
+# Build the GenomeDK staging prefix. On other environments STAGE_CMD is a
+# no-op (`true`). $TMPDIR is intentionally NOT expanded here — it must be
+# resolved inside the SLURM allocation, where the per-job /tmp/<jobid> exists.
+STAGE_CMD="true"
+if [ "$ENV" = "genomedk" ] && { [ "$STAGE_ENABLED" = "true" ] || [ "$STAGE_ENABLED" = "True" ]; }; then
+    SHUFFLE_FLAG=""
+    if [ "$STAGE_SHUFFLE" = "true" ] || [ "$STAGE_SHUFFLE" = "True" ]; then
+        SHUFFLE_FLAG="--shuffle"
+    fi
+    STAGE_CMD="bash ${PROJECT_ROOT}/scripts/stage_ssl_to_tmpdir.sh ${PROJECT_ROOT}/data/01_processed/ssl_sets/${SSL_DATASET} \$TMPDIR/${SSL_DATASET} --n-shards ${STAGE_N_SHARDS} ${SHUFFLE_FLAG} --seed ${STAGE_SEED} --parallel ${STAGE_PARALLEL} && export SMRT_SSL_MEMMAP_DIR=\$TMPDIR/${SSL_DATASET}"
+    echo "  stage=enabled n_shards=${STAGE_N_SHARDS} shuffle=${STAGE_SHUFFLE} seed=${STAGE_SEED} parallel=${STAGE_PARALLEL}"
+fi
+
 case "$ENV" in
     local)
         echo "WARNING: Running locally (no GPU). Use HPC for real training."
@@ -103,6 +136,6 @@ case "$ENV" in
                ${GPU_FLAGS} \
                --output="${PROJECT_ROOT}/${EXP_DIR}/%j.out" \
                "$@" \
-               --wrap="source ${PROJECT_ROOT}/.venv/bin/activate && cd ${PROJECT_ROOT} && accelerate launch --num_processes=${NUM_PROCS} --mixed_precision=no ${SCRIPT} ${CONFIG}"
+               --wrap="source ${PROJECT_ROOT}/.venv/bin/activate && cd ${PROJECT_ROOT} && ${STAGE_CMD} && accelerate launch --num_processes=${NUM_PROCS} --mixed_precision=no ${SCRIPT} ${CONFIG}"
         ;;
 esac

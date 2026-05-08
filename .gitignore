@@ -20,6 +20,7 @@ randnn_images_neylon.ipynb
 *.out
 CLAUDE.md
 .claude/
+.venv.bak/
 \.claude
 checkpoints_*/
 checkpoints/

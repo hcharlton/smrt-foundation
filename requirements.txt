@@ -1,5 +1,6 @@
 torch
 torchvision
+torchmetrics
 accelerate>=0.26.0
 ninja
 numpy

@@ -27,6 +27,19 @@ resources:
 
 ssl_dataset: 'yoran_raw.memmap'
 
+# Stage the SSL memmap to local NVMe ($TMPDIR) on GenomeDK only. Ignored on
+# Gefion / local. n_shards=0 stages all shards. shuffle=true picks a
+# reproducible random subset (seeded), else takes the first n_shards in
+# sort order. The yoran_raw.memmap source has 8197 shards (~280 MB each);
+# 1000 random shards is ~280 GB and well within the 5.8 TB local NVMe on
+# gpu-h200 nodes.
+stage:
+  enabled: true
+  n_shards: 1000
+  shuffle: true
+  seed: 42
+  parallel: 16
+
 probe_pos_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
 probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
 probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
@@ -46,7 +59,7 @@ smrt2vec:
   mask_size: 10
   total_steps: 1000000
   ds_limit: 0
-  batch_size: 256
+  batch_size: 512
   optimizer: 'AdamW'
   max_lr: 3.0e-4
   weight_decay: 0.02
