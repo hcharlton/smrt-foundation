@@ -2,20 +2,28 @@ experiment_type: 'ssl'
 experiment_name: '58_autoencoder_grid_d768_L8_h200'
 run_message: >
   ssl_58 — d768_L8 in the masked-autoencoder grid, single-node H200
-  rerun. Hyperparameters are byte-identical to size_d768_L8 (ctx=512,
-  bs=64, 1M steps, p_mask=0.15, mask_size=10, max_lr=3e-4, pct_start=0.03,
-  eval every 10k steps). Submitted to GenomeDK's gpu-h200 partition with
-  --partition=gpu-h200 --gpus=8 (run.sh `partition` resource field added
-  for this submission). The 4-node H100 sibling (size_d768_L8) is
-  pending; this run produces a comparable trajectory on faster silicon
-  and lets the 1M-step horizon more comfortably fit the 48h walltime.
+  rerun. GenomeDK gpu-h200 nodes are 4xH200 (verified via job 37890295,
+  which SLURM spread across 2 nodes when --gpus=8 was requested), so
+  this run uses --nodes=1 --gpus-per-node=4. Per-process batch_size
+  was bumped from 128 to 256 to preserve global batch=1024 across the
+  4-GPU layout, keeping the optimization trajectory comparable to the
+  4-node H100 sibling (size_d768_L8) where global batch was also 1024
+  at 8 ranks x bs=128. All other hyperparameters are byte-identical to
+  the sibling (ctx=512, 1M steps, p_mask=0.15, mask_size=10,
+  max_lr=3e-4, pct_start=0.03, probe every 10k steps).
+
+  Walltime caveat: throughput on 4 H200s is roughly half what 8 GPUs
+  would provide, so 1M steps is unlikely to fit in a single 48h slot.
+  The run relies on Accelerate's resume-on-requeue path
+  (resume_every_steps=10000, checkpoint_every_steps=10000) to span
+  multiple submissions.
 
 resources:
   cores: 32
   memory: 256gb
   walltime: "48:00:00"
   partition: gpu-h200
-  num_processes: 8
+  num_processes: 4
 
 ssl_dataset: 'yoran_raw.memmap'
 
@@ -38,7 +46,7 @@ smrt2vec:
   mask_size: 10
   total_steps: 1000000
   ds_limit: 0
-  batch_size: 128
+  batch_size: 256
   optimizer: 'AdamW'
   max_lr: 3.0e-4
   weight_decay: 0.02

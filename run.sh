@@ -64,7 +64,7 @@ PARTITION=$(read_resource partition '')
 # fall through to `--gres=$GRES` so existing experiment configs keep working
 # without modification.
 if [ -n "$PARTITION" ]; then
-    GPU_FLAGS="--partition=${PARTITION} --gpus=${NUM_PROCS}"
+    GPU_FLAGS="--partition=${PARTITION} --nodes=1 --ntasks=1 --gpus-per-node=${NUM_PROCS}"
 else
     GPU_FLAGS="--gres=${GRES}"
 fi
@@ -103,6 +103,6 @@ case "$ENV" in
                ${GPU_FLAGS} \
                --output="${PROJECT_ROOT}/${EXP_DIR}/%j.out" \
                "$@" \
-               --wrap="source \$(conda info --base)/etc/profile.d/conda.sh && conda activate data_prep && cd ${PROJECT_ROOT} && accelerate launch --num_processes=${NUM_PROCS} --mixed_precision=no ${SCRIPT} ${CONFIG}"
+               --wrap="source ${PROJECT_ROOT}/.venv/bin/activate && cd ${PROJECT_ROOT} && accelerate launch --num_processes=${NUM_PROCS} --mixed_precision=no ${SCRIPT} ${CONFIG}"
         ;;
 esac

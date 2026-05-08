@@ -1,0 +1,65 @@
+experiment_type: 'ssl'
+experiment_name: '58_autoencoder_grid_d768_L8_h200_gefion'
+run_message: >
+  ssl_58 — Gefion-side reproduction of size_d768_L8_h200's exact workload
+  (4 GPUs, per-process bs=256, global batch=1024). Purpose: isolate
+  whether the IndexError seen on GenomeDK h200's apply_input_mask
+  (`x_masked[mask_full, 1] = 0.0`, mask [128,512] vs indexed tensor
+  [128,4]) is environment-specific (h200 / GenomeDK torch stack) or a
+  real code/config bug. The same indexing primitive runs cleanly on
+  Gefion CUDA in isolation; this variant runs the full training path
+  end-to-end to confirm. If this passes step-0 baseline + first training
+  batch, the GenomeDK fault is environmental and we patch the model;
+  if it fails identically, the bug is in our code or config.
+
+  Hyperparameters byte-identical to size_d768_L8_h200 (post 4-GPU
+  re-tuning): per-process bs=256, num_processes=4, ctx=512, p_mask=0.15,
+  mask_size=10, max_lr=3e-4, total_steps=1M. Diagnostic run, not a
+  scientific experiment — short walltime, expected to be killed once
+  it gets past the failing step or fails the same way.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "01:00:00"
+  gres: gpu:4
+  num_processes: 4
+
+ssl_dataset: 'yoran_raw.memmap'
+
+probe_pos_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+ssl_pair_val_train: 'data/01_processed/val_sets/ssl_pair_val_yoran_v1.memmap'
+ssl_pair_val_val:   'data/01_processed/val_sets/ssl_pair_val_ob007_v1.memmap'
+
+resume_from: ''
+
+smrt2vec:
+  d_model: 768
+  n_layers: 8
+  n_head: 12
+  context: 512
+  p_mask: 0.15
+  mask_size: 10
+  total_steps: 1000000
+  ds_limit: 0
+  batch_size: 256
+  optimizer: 'AdamW'
+  max_lr: 3.0e-4
+  weight_decay: 0.02
+  pct_start: 0.03
+  grad_clip: 5.0
+  probe_every_steps: 10000
+  checkpoint_every_steps: 10000
+  resume_every_steps: 10000
+  chunk_size: 2048
+
+probe:
+  context: 32
+  batch_size: 512
+  epochs: 3
+  lr: 3.0e-3
+  ds_limit: 500000
