@@ -561,10 +561,22 @@ def main():
 
     if resume_from:
         accelerator.load_state(resume_from)
+        # Scheduler is intentionally NOT in accelerator.prepare() (the
+        # AcceleratedScheduler step-multiplier bug, see negative_results
+        # 2026-05-04) and not registered for checkpointing, so its
+        # last_epoch stays at -1 after load_state. Replay scheduler.step()
+        # to align it with progress_state.global_step — otherwise the next
+        # scheduler.step() in the training loop treats it as step 0 and
+        # the LR walks back up the warmup ramp from min_lr to max_lr.
+        steps_to_replay = progress_state.global_step - (scheduler.last_epoch + 1)
+        for _ in range(max(0, steps_to_replay)):
+            scheduler.step()
         if accelerator.is_main_process:
             print(
                 f"[resume] restored from {resume_from}: "
-                f"epoch={progress_state.epoch}, global_step={progress_state.global_step}"
+                f"epoch={progress_state.epoch}, global_step={progress_state.global_step}, "
+                f"scheduler.last_epoch={scheduler.last_epoch} (replayed {steps_to_replay} step()s), "
+                f"lr={scheduler.get_last_lr()[0]:.3e}"
             )
 
     if accelerator.is_main_process:

@@ -127,3 +127,19 @@ Practical implications:
 1. Stop iterating supervised_52 architecture variants on this dataset size — there is no signal to fit.
 2. The next viable moves on the tissue task are: scale labelled data (50k → much larger), per-cell normalisation as an A/B, sequence-aware features beyond base composition (k-mer composition, mappability, repeat content), or exploiting which genomic regions the read maps to (the deep encoder sees raw kinetics, not where the read comes from).
 3. Two `partition.csv` anomalies should be fixed at the source (`scripts/make_tissue_partition.py` should `.str.strip_chars()` before write; the upstream BAM has duplicate primary records causing the 580 manifest duplicates and either the build script or the partition script should de-duplicate or document the inflation explicitly).
+
+## 2026-05-11: Resume Silently Reset the Cosine Scheduler to last_epoch=-1
+
+**Hypothesis:** `accelerator.load_state(resume_from)` on the ssl_58 / ssl_59 / ssl_60 harness restores enough state (model + optimizer + RNG + progress_state) that a resumed run continues the cosine LR schedule from where the previous run left off.
+
+**Experimental Setup:** `size_d1024_L8_long` was scaffolded as a continuation of `size_d1024_L8` (base run completed 1M-step cosine inside walltime, cosine bottomed at min_lr=3e-6). `resume_from` pointed at `size_d1024_L8/checkpoints/latest/`; `schedule_steps=1_000_000` and `total_steps=10_000_000` were chosen so the resumed run should sit at min_lr for the full 48h.
+
+**Observation:** TB `learning_rate` chart showed the resumed run starting at `global_step=1_000_000` with LR ≈ 0 (-warmup start) and ramping back up to `max_lr=3e-4` over ~30k steps — i.e. the cosine scheduler did a fresh warmup followed by a new cosine cycle, NOT a flat tail at min_lr.
+
+**Conclusion:** `_shared_train.py` only registers `progress_state` with `accelerator.register_for_checkpointing(...)`, never the scheduler (the AcceleratedScheduler wrap was removed 2026-05-04 to fix the step-multiplier bug, and nothing replaced the checkpointing path). `accelerator.save_state` therefore never persists `scheduler.state_dict()` and `accelerator.load_state` cannot restore it. The freshly-constructed `LambdaLR` has `last_epoch=-1`; on the first `scheduler.step()` of the resumed loop it advances to 0 and re-enters warmup. `progress_state.global_step=1_000_000` only governs the outer-loop bookkeeping and TB step axis, hiding the misalignment.
+
+**Patched** in `_shared_train.py` for ssl_58, ssl_59, ssl_60: after `accelerator.load_state`, replay `scheduler.step()` `progress_state.global_step - (scheduler.last_epoch + 1)` times so the scheduler's internal step count matches the outer loop's. Cheap (~1s at 1M steps). Works for both old checkpoints (no scheduler.bin on disk) and any future checkpoint format. Also extends the resume log line to print `scheduler.last_epoch` and `get_last_lr()` so the alignment can be verified at job start without waiting for TB.
+
+**Practical implications:**
+1. The d=1024_L8_long run was producing a warm-restart-with-new-cosine, not the intended min_lr tail. Job killed and re-submitted after the patch.
+2. Any other resumed runs on the ssl_58 / ssl_59 / ssl_60 harness *before* this patch had the same silent corruption. ssl_58 base runs that resumed across walltime boundaries (the `_long` variants were fresh-start, so unaffected; the per-checkpoint `resume_every_steps` mechanism inside a single sbatch is also unaffected — only cross-job resumes hit this) were the at-risk pattern. Audit before treating any of those probe trajectories as a single coherent schedule.

@@ -1,0 +1,61 @@
+experiment_type: 'ssl'
+experiment_name: '60_ctx1024_grid_d512_L8'
+run_message: >
+  ssl_60 context-axis ablation at d=512_L8: train at ctx=1024 (vs the
+  ctx=512 in ssl_58_autoencoder_grid/size_d512_L8_long, the matched
+  size baseline). Apples-to-apples vs
+  size_d512_L8_long: all hyperparameters byte-identical (max_lr=3e-4,
+  pct_start=0.03, batch_size=128, p_mask=0.15, mask_size=10,
+  grad_clip=5.0), schedule_steps=1_000_000 preserves the same cosine
+  shape, total_steps=10_000_000 makes walltime the binding exit.
+  Only deltas from size_d512_L8_long: context 512 -> 1024,
+  walltime 96h -> 48h. Expected ~1.15M steps in 48h (cosine
+  reaches min_lr at step 1M, ~150k tail).
+  d=512, L=8, H=8, ctx=1024, bs=128.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "48:00:00"
+  gres: gpu:8
+  num_processes: 8
+
+ssl_dataset: 'yoran_raw.memmap'
+
+probe_pos_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
+probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+
+ssl_pair_val_train: 'data/01_processed/val_sets/ssl_pair_val_yoran_v1.memmap'
+ssl_pair_val_val:   'data/01_processed/val_sets/ssl_pair_val_ob007_v1.memmap'
+
+resume_from: ''
+
+smrt2vec:
+  d_model: 512
+  n_layers: 8
+  n_head: 8
+  context: 1024
+  p_mask: 0.15
+  mask_size: 10
+  total_steps: 10000000
+  schedule_steps: 1000000
+  ds_limit: 0
+  batch_size: 128
+  optimizer: 'AdamW'
+  max_lr: 3.0e-4
+  weight_decay: 0.02
+  pct_start: 0.03
+  grad_clip: 5.0
+  probe_every_steps: 10000
+  checkpoint_every_steps: 10000
+  resume_every_steps: 10000
+  chunk_size: 2048
+
+probe:
+  context: 32
+  batch_size: 512
+  epochs: 3
+  lr: 3.0e-3
+  ds_limit: 500000
