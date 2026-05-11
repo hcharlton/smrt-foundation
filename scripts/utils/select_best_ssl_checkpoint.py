@@ -39,15 +39,57 @@ def _load_run_metadata(exp_dir: str | Path) -> tuple[str, str]:
 
 
 def _latest_tb_run_dir(training_logs_root: Path, exp_type: str, exp_name: str) -> Path | None:
-    """The TB writer creates a fresh subdir per Accelerate `init_trackers` call.
-    Pick the most-recently-modified one."""
+    """Locate the directory containing probe_history.csv for `<exp_type>/<exp_name>`.
+
+    This codebase's Accelerate TB writer logs directly into
+    `<training_logs_root>/<exp_type>/<exp_name>/` (flat layout — events
+    files, hparams.yaml, and probe_history.csv all sit next to each
+    other in the exp_name dir). Earlier versions of this resolver
+    assumed a nested `run_N/` subdir layout that the writer never
+    actually creates; that gave the false "No TB run dir" error
+    despite probe_history.csv being right there.
+
+    Flat layout is checked first; the nested fallback stays for
+    compatibility with the test fixtures and any future writer change.
+    """
     parent = training_logs_root / exp_type / exp_name
     if not parent.exists():
         return None
-    candidates = [p for p in parent.iterdir() if p.is_dir()]
+    # Flat layout: probe_history.csv directly under the exp_name dir.
+    if (parent / 'probe_history.csv').exists():
+        return parent
+    # Nested fallback: a subdir containing probe_history.csv.
+    candidates = [p for p in parent.iterdir() if p.is_dir() and (p / 'probe_history.csv').exists()]
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _latest_step_checkpoint(ckpt_dir: Path) -> Path | None:
+    """Return the path to the highest-numbered step_<N>.pt in ckpt_dir, or None."""
+    if not ckpt_dir.exists():
+        return None
+    candidates = list(ckpt_dir.glob('step_*.pt'))
+    if not candidates:
+        return None
+
+    def _step_num(p: Path) -> int:
+        try:
+            return int(p.stem.split('_')[1])
+        except (IndexError, ValueError):
+            return -1
+    return max(candidates, key=_step_num)
+
+
+def _fallback_checkpoint(ckpt_dir: Path) -> Path | None:
+    """When probe_history.csv is unreadable, prefer the highest-step
+    milestone over `final_model.pt` (which most SSL runs never emit).
+    Returns whichever exists, or None."""
+    latest = _latest_step_checkpoint(ckpt_dir)
+    if latest is not None:
+        return latest
+    final = ckpt_dir / 'final_model.pt'
+    return final if final.exists() else None
 
 
 def _read_probe_history(csv_path: Path) -> list[dict]:
@@ -100,49 +142,57 @@ def select_best_ssl_checkpoint(
 
     Algorithm:
       1. Read experiment_type/name from `<exp_dir>/config.yaml`.
-      2. Locate the most-recent TB run dir under
-         `<training_logs_root>/<type>/<name>/`.
+      2. Locate the TB run dir under `<training_logs_root>/<type>/<name>/`
+         (flat layout in this codebase; nested-subdir fallback for tests).
       3. Read `probe_history.csv`. Smooth the metric column with a centered
          moving average (window=smooth_window).
       4. Pick the step with the highest smoothed metric where step >= min_step.
       5. Map that step to `<exp_dir>/checkpoints/step_<step>.pt`. If that file
          doesn't exist (e.g., probe-eval landed but milestone not yet flushed
          to disk), fall back to the next-best step that does exist.
-      6. If no probe_history.csv is readable or the candidates list is empty,
-         fall back to `<exp_dir>/checkpoints/final_model.pt`. If that doesn't
-         exist either, raise FileNotFoundError.
+      6. If no probe_history.csv is readable or it has no usable rows,
+         fall back to the highest-numbered `step_<N>.pt` in `checkpoints/`.
+         If no step_<N>.pt exists either, fall back to `final_model.pt`.
+         If none of those exist, raise FileNotFoundError. Most SSL runs in
+         this repo never emit final_model.pt — the step_<N>.pt fallback is
+         the practical path.
 
     Raises FileNotFoundError if no usable checkpoint is found.
     """
     exp_dir = Path(exp_dir).resolve()
     ckpt_dir = exp_dir / 'checkpoints'
-    final_path = ckpt_dir / 'final_model.pt'
 
     exp_type, exp_name = _load_run_metadata(exp_dir)
     run_dir = _latest_tb_run_dir(Path(training_logs_root).resolve(), exp_type, exp_name)
     if run_dir is None:
-        if final_path.exists():
-            return str(final_path)
+        fb = _fallback_checkpoint(ckpt_dir)
+        if fb is not None:
+            return str(fb)
         raise FileNotFoundError(
-            f"No TB run dir under {training_logs_root}/{exp_type}/{exp_name}/ "
-            f"and no final_model.pt at {final_path}. Cannot resolve a checkpoint."
+            f"No probe_history.csv under {training_logs_root}/{exp_type}/{exp_name}/ "
+            f"and no step_<N>.pt or final_model.pt in {ckpt_dir}. "
+            f"Cannot resolve a checkpoint."
         )
 
     csv_path = run_dir / 'probe_history.csv'
     if not csv_path.exists():
-        if final_path.exists():
-            return str(final_path)
+        fb = _fallback_checkpoint(ckpt_dir)
+        if fb is not None:
+            return str(fb)
         raise FileNotFoundError(
-            f"No probe_history.csv in {run_dir} and no final_model.pt at {final_path}."
+            f"No probe_history.csv in {run_dir} and no step_<N>.pt or "
+            f"final_model.pt in {ckpt_dir}."
         )
 
     rows = _read_probe_history(csv_path)
     rows = [r for r in rows if r['step'] >= min_step and r[metric] == r[metric]]  # NaN-drop
     if not rows:
-        if final_path.exists():
-            return str(final_path)
+        fb = _fallback_checkpoint(ckpt_dir)
+        if fb is not None:
+            return str(fb)
         raise FileNotFoundError(
-            f"probe_history.csv at {csv_path} has no usable rows >= min_step={min_step}."
+            f"probe_history.csv at {csv_path} has no usable rows >= min_step={min_step} "
+            f"and no step_<N>.pt or final_model.pt fallback exists."
         )
 
     smoothed = _smooth([r[metric] for r in rows], smooth_window)
@@ -152,11 +202,12 @@ def select_best_ssl_checkpoint(
         candidate = ckpt_dir / f'step_{step}.pt'
         if candidate.exists():
             return str(candidate)
-    if final_path.exists():
-        return str(final_path)
+    fb = _fallback_checkpoint(ckpt_dir)
+    if fb is not None:
+        return str(fb)
     raise FileNotFoundError(
         f"No step_<N>.pt under {ckpt_dir} matches a probe_history.csv row "
-        f"and no final_model.pt fallback exists."
+        f"and no fallback (step_<N>.pt or final_model.pt) exists."
     )
 
 

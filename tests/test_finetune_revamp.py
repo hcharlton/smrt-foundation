@@ -239,7 +239,54 @@ class TestSelectBestCheckpoint:
         )
         assert path.endswith('step_200.pt')
 
-    def test_falls_back_to_final_when_no_csv(self, tmp_path: Path):
+    def test_picks_max_top1_flat_layout(self, tmp_path: Path):
+        """Production layout: TB writer drops probe_history.csv directly
+        under training_logs/<exp_type>/<exp_name>/ (no run_N/ subdir)."""
+        from scripts.utils.select_best_ssl_checkpoint import select_best_ssl_checkpoint
+
+        exp_dir = tmp_path / 'exp'
+        ckpt_dir = exp_dir / 'checkpoints'
+        ckpt_dir.mkdir(parents=True)
+        for step in (0, 100, 200, 300, 400):
+            (ckpt_dir / f'step_{step}.pt').write_bytes(b'x')
+        (exp_dir / 'config.yaml').write_text(
+            "experiment_type: ssl\nexperiment_name: testexp\n"
+        )
+
+        flat = tmp_path / 'tb' / 'ssl' / 'testexp'
+        flat.mkdir(parents=True)
+        with open(flat / 'probe_history.csv', 'w', newline='') as f:
+            w = csv.writer(f)
+            w.writerow(['step', 'probe_top1', 'probe_auroc'])
+            w.writerow([100, 0.55, 0.60])
+            w.writerow([200, 0.62, 0.68])  # peak
+            w.writerow([300, 0.60, 0.66])
+
+        path = select_best_ssl_checkpoint(
+            exp_dir, training_logs_root=str(tmp_path / 'tb'),
+        )
+        assert path.endswith('step_200.pt')
+
+    def test_falls_back_to_latest_step_when_no_csv(self, tmp_path: Path):
+        """When probe_history.csv is unreadable, prefer the highest-numbered
+        step_<N>.pt over final_model.pt. Most SSL runs never emit a
+        final_model.pt — they only save step_<N>.pt milestones."""
+        from scripts.utils.select_best_ssl_checkpoint import select_best_ssl_checkpoint
+        exp_dir = tmp_path / 'exp'
+        ckpt_dir = exp_dir / 'checkpoints'
+        ckpt_dir.mkdir(parents=True)
+        for step in (100, 200, 300):
+            (ckpt_dir / f'step_{step}.pt').write_bytes(b'x')
+        # final_model.pt deliberately absent.
+        (exp_dir / 'config.yaml').write_text(
+            "experiment_type: ssl\nexperiment_name: testexp\n"
+        )
+        path = select_best_ssl_checkpoint(
+            exp_dir, training_logs_root=str(tmp_path / 'tb_missing'),
+        )
+        assert path.endswith('step_300.pt')
+
+    def test_falls_back_to_final_when_no_csv_and_no_steps(self, tmp_path: Path):
         from scripts.utils.select_best_ssl_checkpoint import select_best_ssl_checkpoint
         exp_dir = tmp_path / 'exp'
         ckpt_dir = exp_dir / 'checkpoints'
