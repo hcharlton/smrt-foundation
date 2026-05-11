@@ -11,7 +11,8 @@ run_message: >-
   encoder->head baseline; otherwise the upsample stack adds parameter
   count for no gain.
   Requires ssl_58 checkpoints saved with decoder_state_dict (Phase 0.2
-  of the harness change). 4 archs x 2 inits x 3 train_sizes = 24 runs.
+  of the harness change). 5 archs x 2 inits x 3 train_sizes = 30 runs.
+  All ssl_58 inits target the size_d*_L8_long continuations.
 
 resources:
   cores: 32
@@ -26,17 +27,23 @@ pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
 neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
 
 architectures:
-  d128_L4: { d_model: 128, n_layers: 4, n_head: 2 }
-  d256_L8: { d_model: 256, n_layers: 8, n_head: 4 }
-  d512_L8: { d_model: 512, n_layers: 8, n_head: 8 }
-  d768_L8: { d_model: 768, n_layers: 8, n_head: 12 }
+  d128_L4:  { d_model: 128,  n_layers: 4, n_head: 2 }
+  d256_L8:  { d_model: 256,  n_layers: 8, n_head: 4 }
+  d512_L8:  { d_model: 512,  n_layers: 8, n_head: 8 }
+  d768_L8:  { d_model: 768,  n_layers: 8, n_head: 12 }
+  d1024_L8: { d_model: 1024, n_layers: 8, n_head: 16 }
 
 inits:
   random:
     checkpoint: null
   ssl_58_best:
     checkpoint: 'auto_best'
-    ssl_exp_root: 'scripts/experiments/ssl_58_autoencoder_grid'
+    ssl_exp_dirs:
+      d128_L4:  'scripts/experiments/ssl_58_autoencoder_grid/size_d128_L4_long'
+      d256_L8:  'scripts/experiments/ssl_58_autoencoder_grid/size_d256_L8_long'
+      d512_L8:  'scripts/experiments/ssl_58_autoencoder_grid/size_d512_L8_long'
+      d768_L8:  'scripts/experiments/ssl_58_autoencoder_grid/size_d768_L8_long'
+      d1024_L8: 'scripts/experiments/ssl_58_autoencoder_grid/size_d1024_L8_long'
 
 skip: []
 

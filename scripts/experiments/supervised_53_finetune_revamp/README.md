@@ -20,7 +20,7 @@ context. Four candidate explanations:
 | **recipe_match** (F4) | The classifier head is undersized for d=512/d=768, and the LR schedule may need exact supervised_20 matching. | `DirectClassifierBigHead` (3-layer MLP head keeping full width before projection). Recipe locked to supervised_20's. |
 
 Each treatment is a separate `bash run.sh ...` job. Internally each
-treatment fans out to 4 archs × 2 inits × 3 train_sizes = 24 combos
+treatment fans out to 5 archs × 2 inits × 3 train_sizes = 30 combos
 (with the random-init baseline included for clean A/Bs against the
 ssl_58-init treatment).
 
@@ -28,10 +28,18 @@ ssl_58-init treatment).
 
 All ssl_58-init treatments use `checkpoint: 'auto_best'` instead of
 `final_model.pt`. The `scripts/utils/select_best_ssl_checkpoint`
-resolver reads `probe_history.csv` for the size's TB run dir, picks the
-step with the highest `probe_top1`, and returns that step's
+resolver reads `probe_history.csv` for the SSL experiment's TB run dir,
+picks the step with the highest `probe_top1`, and returns that step's
 `step_<N>.pt`. This matters most for the smaller arches in the grid,
 whose probe trajectory often peaks well before the final step.
+
+Each arch declares the *specific* SSL experiment directory it's
+fine-tuning from via the init spec's `ssl_exp_dirs:` block (keyed by
+arch_name). All five archs currently point at their `size_d*_L8_long`
+continuations rather than the base `size_d*_L8` directories, so
+fine-tune always reads from the longer-trained (post-cosine-tail)
+representation. To target a different SSL run for a given arch, edit
+the dict entry — no code change.
 
 ## Layout
 
@@ -49,11 +57,12 @@ All four can be queued at once; Slurm stages them.
 
 ## Compute
 
-24 combos per treatment × 4 treatments = 96 combos total. ds_grid_v3
+30 combos per treatment × 4 treatments = 120 combos total. ds_grid_v3
 load-balances combos across the 8 GPUs of one node, so each treatment
-is one 8-GPU job that internally cycles through ~3 combos per GPU.
+is one 8-GPU job that internally cycles through ~4 combos per GPU.
 Expected walltime: 24h per treatment job, 4 treatments × 8 GPUs × 24h
-= 768 GPU-hours.
+= 768 GPU-hours (the d=1024 combos are the long-pole on each GPU but
+fit within the 24h budget).
 
 ## Reading the F1 layer_idx
 

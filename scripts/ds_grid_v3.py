@@ -21,10 +21,21 @@ Init checkpoint resolution:
   - Literal path under `checkpoint:` works as in v2.
   - `checkpoint_template:` with `{arch}` placeholder works as in v2.
   - NEW: special value `'auto_best'` for either field resolves at runtime
-    via scripts.utils.select_best_ssl_checkpoint, so each arch picks its
-    own best-probe milestone instead of a hardcoded step. Required by F1
-    and useful for F3/F4 since smaller-arch ssl_58 trajectories peak
-    before final.
+    via scripts.utils.select_best_ssl_checkpoint. Requires the init spec
+    to carry an `ssl_exp_dirs` dict mapping each arch_name to the SSL
+    experiment directory whose probe_history.csv should be searched:
+
+        ssl_58_best:
+          checkpoint: 'auto_best'
+          ssl_exp_dirs:
+            d128_L4: 'scripts/experiments/ssl_58_autoencoder_grid/size_d128_L4_long'
+            d512_L8: 'scripts/experiments/ssl_58_autoencoder_grid/size_d512_L8_long'
+            ...
+
+    This is the explicit replacement for an earlier implicit form that
+    constructed `<ssl_exp_root>/size_<arch_name>/` automatically; the
+    dict form makes it obvious which SSL run each arch is fine-tuning
+    from (base vs _long vs _finished_cosine vs ssl_59_mae).
 
 Usage (via thin per-experiment train.py wrapper):
   bash run.sh scripts/experiments/supervised_53_finetune_revamp/<treatment>/
@@ -135,27 +146,26 @@ def _merge_arch_overrides(classifier_base, arch_override):
     return merged
 
 
-def _resolve_checkpoint(ckpt_spec: str, arch_name: str, ssl_exp_root: Optional[str]) -> Optional[str]:
+def _resolve_checkpoint(ckpt_spec: str, arch_name: str, ssl_exp_dir: Optional[str]) -> Optional[str]:
     """Resolve a checkpoint spec to an absolute path.
 
     Special values:
       - None -> random init.
-      - 'auto_best' -> pick best-probe milestone for this arch under
-        `<ssl_exp_root>/size_<arch_name>/`. Requires `ssl_exp_root` set in
-        init_spec (so different inits can point to different SSL grids).
+      - 'auto_best' -> pick best-probe milestone for this arch from
+        `ssl_exp_dir` (the explicit SSL experiment directory for this
+        arch, looked up from `init_spec.ssl_exp_dirs[arch_name]`).
       - literal path or `{arch}`-template -> v2 behaviour.
     """
     if ckpt_spec is None:
         return None
     if ckpt_spec == 'auto_best':
-        if not ssl_exp_root:
+        if not ssl_exp_dir:
             raise ValueError(
-                "checkpoint='auto_best' requires init_spec.ssl_exp_root set "
-                "to the SSL experiment root (e.g. "
-                "'scripts/experiments/ssl_58_autoencoder_grid')."
+                f"checkpoint='auto_best' for arch={arch_name!r} requires "
+                f"init_spec.ssl_exp_dirs[{arch_name!r}] to point at an SSL "
+                f"experiment directory."
             )
-        size_dir = os.path.join(ssl_exp_root, f'size_{arch_name}')
-        return select_best_ssl_checkpoint(size_dir)
+        return select_best_ssl_checkpoint(ssl_exp_dir)
     if '{arch}' in ckpt_spec:
         return os.path.abspath(os.path.expandvars(ckpt_spec.format(arch=arch_name)))
     return os.path.abspath(os.path.expandvars(ckpt_spec))
@@ -182,19 +192,19 @@ def expand_combos(config):
             if ckpt_spec is None and init_spec.get('checkpoint_template') is not None:
                 ckpt_spec = init_spec['checkpoint_template']
 
-            ssl_exp_root = init_spec.get('ssl_exp_root')
+            ssl_exp_dirs = init_spec.get('ssl_exp_dirs') or {}
+            ssl_exp_dir = ssl_exp_dirs.get(arch_name)
 
-            if ckpt_spec == 'auto_best' and not os.path.isdir(
-                str(ssl_exp_root or '') + f'/size_{arch_name}'
-            ):
+            if ckpt_spec == 'auto_best' and ssl_exp_dir and not os.path.isdir(ssl_exp_dir):
                 # Cluster-side resolve at runtime; remember to validate later.
                 deferred_auto_best.append((arch_name, init_name))
                 checkpoint = 'auto_best'  # unresolved sentinel; resolved in worker.
-                # Stash ssl_exp_root onto arch_cfg so the worker can resolve.
-                arch_cfg = {**arch_cfg, '_ssl_exp_root': ssl_exp_root}
+                # Stash the explicit per-arch SSL dir onto arch_cfg so the
+                # worker can resolve without re-reading the init spec.
+                arch_cfg = {**arch_cfg, '_ssl_exp_dir': ssl_exp_dir}
             else:
                 try:
-                    checkpoint = _resolve_checkpoint(ckpt_spec, arch_name, ssl_exp_root)
+                    checkpoint = _resolve_checkpoint(ckpt_spec, arch_name, ssl_exp_dir)
                 except FileNotFoundError as e:
                     missing_checkpoints.append((arch_name, init_name, str(e)))
                     checkpoint = None
@@ -405,11 +415,10 @@ def train_one_combo(rank, combo, config, experiment_dir, tb_dir):
 
     # Resolve auto_best lazily on the cluster (where the checkpoints exist).
     if combo.checkpoint == 'auto_best':
-        ssl_root = c.get('_ssl_exp_root')
-        if not ssl_root:
-            raise RuntimeError(f"{tag} auto_best requested but _ssl_exp_root is unset")
-        size_dir = os.path.join(ssl_root, f'size_{combo.arch_name}')
-        combo.checkpoint = select_best_ssl_checkpoint(size_dir)
+        ssl_dir = c.get('_ssl_exp_dir')
+        if not ssl_dir:
+            raise RuntimeError(f"{tag} auto_best requested but _ssl_exp_dir is unset")
+        combo.checkpoint = select_best_ssl_checkpoint(ssl_dir)
         print(f"{tag} Resolved auto_best -> {combo.checkpoint}")
 
     if combo.checkpoint:
