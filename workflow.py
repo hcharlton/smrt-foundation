@@ -395,7 +395,7 @@ def memmap_fwdrev_conversion(
 def memmap_cpg_conversion(
     zarr_path, output_path, config_path,
     shard_size=4*2**20, shards=0, context=32,
-    val_pct=0.2, seed=42, profile=False
+    val1_pct=0.10, val2_pct=0.10, val3_pct=0.10, seed=42, profile=False
 ):
     inputs = {'in_file': zarr_path}
     outputs = {'out_file': f'{output_path}'}
@@ -414,7 +414,9 @@ def memmap_cpg_conversion(
         --shard_size {shard_size} \
         --max_shards {shards} \
         --context {context} \
-        --val_pct {val_pct} \
+        --val1_pct {val1_pct} \
+        --val2_pct {val2_pct} \
+        --val3_pct {val3_pct} \
         --seed {seed}
     """
     return AnonymousTarget(inputs=inputs, outputs=outputs, options=options, spec=spec)

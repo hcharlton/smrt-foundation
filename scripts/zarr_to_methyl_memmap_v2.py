@@ -1,15 +1,15 @@
 """
-CpG methylation memmap creation (v2) — clean rewrite mirroring the
-unmodified legacy script's extraction logic.
+CpG methylation memmap creation.
 
 Reads from Zarr (BAM→Zarr fidelity is verified by existing tests),
 extracts forward-strand CpG windows with correctly aligned kinetics,
-and writes sharded .npy files for LabeledMemmapDataset.
+and writes sharded .npy files for LabeledMemmapDataset under a four-way
+read-level split (train / val1 / val2 / val3).
 
-Key differences from zarr_to_methyl_memmap.py (v1):
-  - Forward-strand CpGs only (matching legacy)
+Pipeline characteristics:
+  - Forward-strand CpGs only
   - Reverse kinetics use explicit reverse indexing (ri[L-end:L-start])
-    instead of np.flip on the whole read
+    so ri/rp stay aligned with the reverse-complemented sequence
   - Writes both fwd (fi/fp) and rev (aligned ri/rp) views per CpG
   - Simple direct slicing — no stride tricks or complex index mapping
 
