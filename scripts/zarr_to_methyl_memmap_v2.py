@@ -154,24 +154,26 @@ def extract_cpg_windows(read_data, feature_idx, context, rc_lookup):
 def zarr_to_methyl_memmap_v2(
     zarr_path, output_dir, config,
     context=32, shard_size=4194304, max_shards=0,
-    val_pct=0.2, seed=42
+    val1_pct=0.10, val2_pct=0.10, val3_pct=0.10, seed=42
 ):
-    """Convert Zarr to CpG methylation shards.
+    """Convert Zarr to CpG methylation shards with a four-way read-level split.
 
     Args:
         zarr_path: Path to Zarr store (from bam_to_zarr.py)
-        output_dir: Output directory (will contain train/ and val/ subdirs)
+        output_dir: Output directory (will contain train/, val1/, val2/, val3/ subdirs)
         config: Parsed data.yaml config dict
         context: Window size around each CpG
         shard_size: Max rows per shard file
         max_shards: Stop after this many train shards (0 = no limit)
-        val_pct: Fraction of reads for validation
-        seed: Random seed for train/val split
+        val1_pct: Fraction of reads for val1 (SSL checkpoint selection)
+        val2_pct: Fraction of reads for val2 (FT recipe selection within an experiment)
+        val3_pct: Fraction of reads for val3 (cross-experiment final report; one shot)
+        seed: Random seed for the permutation
     """
-    train_dir = os.path.join(output_dir, "train")
-    val_dir = os.path.join(output_dir, "val")
-    os.makedirs(train_dir, exist_ok=True)
-    os.makedirs(val_dir, exist_ok=True)
+    split_names = ("train", "val1", "val2", "val3")
+    split_dirs = {name: os.path.join(output_dir, name) for name in split_names}
+    for d in split_dirs.values():
+        os.makedirs(d, exist_ok=True)
 
     # Load Zarr
     root = zarr.open(zarr_path, mode='r')
@@ -197,27 +199,46 @@ def zarr_to_methyl_memmap_v2(
         "context": context,
         "dtype": "float16",
         "source": "zarr_to_methyl_memmap_v2",
+        "splits": {
+            "train_pct": 1.0 - val1_pct - val2_pct - val3_pct,
+            "val1_pct": val1_pct,
+            "val2_pct": val2_pct,
+            "val3_pct": val3_pct,
+            "seed": seed,
+            "scheme": "permutation_v1",
+        },
     }
-    for split_dir in (train_dir, val_dir):
+    for split_dir in split_dirs.values():
         with open(os.path.join(split_dir, "schema.json"), "w") as f:
             json.dump(schema, f, indent=4)
 
-    # Train/val split at read level
+    # Four-way read-level split: 0=train, 1=val1, 2=val2, 3=val3
     total_reads = len(indptr) - 1
     rng = np.random.RandomState(seed)
-    is_val = np.zeros(total_reads, dtype=bool)
-    val_indices = rng.choice(total_reads, int(total_reads * val_pct), replace=False)
-    is_val[val_indices] = True
+    perm = rng.permutation(total_reads)
+
+    n_val1 = int(total_reads * val1_pct)
+    n_val2 = int(total_reads * val2_pct)
+    n_val3 = int(total_reads * val3_pct)
+
+    split = np.zeros(total_reads, dtype=np.uint8)
+    split[perm[:n_val1]] = 1
+    split[perm[n_val1:n_val1 + n_val2]] = 2
+    split[perm[n_val1 + n_val2:n_val1 + n_val2 + n_val3]] = 3
+    # remaining indices stay 0 (train)
 
     # Writers
-    train_writer = ShardWriter(train_dir, shard_size, context, len(output_feats))
-    val_writer = ShardWriter(val_dir, shard_size, context, len(output_feats))
+    writers = {
+        name: ShardWriter(split_dirs[name], shard_size, context, len(output_feats))
+        for name in split_names
+    }
+    split_lookup = ("train", "val1", "val2", "val3")
 
     # Process reads in batches for Zarr read efficiency
     batch_size = 500
 
     for batch_start in range(0, total_reads, batch_size):
-        if max_shards and train_writer.shard_idx >= max_shards:
+        if max_shards and writers["train"].shard_idx >= max_shards:
             break
 
         batch_end = min(batch_start + batch_size, total_reads)
@@ -234,16 +255,15 @@ def zarr_to_methyl_memmap_v2(
             read_end = indptr[r + 1] - chunk_start
             read_data = chunk[read_start:read_end, :]
 
-            writer = val_writer if is_val[r] else train_writer
+            writer = writers[split_lookup[split[r]]]
             windows = extract_cpg_windows(read_data, feature_idx, context, rc_lookup)
 
             for fwd_row, rev_row in windows:
                 writer.add(fwd_row)
                 writer.add(rev_row)
 
-    train_count = train_writer.finalize()
-    val_count = val_writer.finalize()
-    print(f"Done. Train: {train_count} windows, Val: {val_count} windows")
+    counts = {name: w.finalize() for name, w in writers.items()}
+    print("Done. " + ", ".join(f"{name}: {n} windows" for name, n in counts.items()))
 
 
 if __name__ == "__main__":
@@ -254,7 +274,9 @@ if __name__ == "__main__":
     parser.add_argument("--context", type=int, default=32)
     parser.add_argument("--shard_size", type=int, default=4194304)
     parser.add_argument("--max_shards", type=int, default=0)
-    parser.add_argument("--val_pct", type=float, default=0.2)
+    parser.add_argument("--val1_pct", type=float, default=0.10)
+    parser.add_argument("--val2_pct", type=float, default=0.10)
+    parser.add_argument("--val3_pct", type=float, default=0.10)
     parser.add_argument("--seed", type=int, default=42)
 
     args = parser.parse_args()
@@ -268,6 +290,8 @@ if __name__ == "__main__":
         context=args.context,
         shard_size=args.shard_size,
         max_shards=args.max_shards,
-        val_pct=args.val_pct,
+        val1_pct=args.val1_pct,
+        val2_pct=args.val2_pct,
+        val3_pct=args.val3_pct,
         seed=args.seed,
     )
