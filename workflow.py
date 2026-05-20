@@ -44,7 +44,7 @@ CONFIG = {
         'da1': {
             'bam': 'data/00_raw/unlabeled/da1_kinetics_diploid.bam',
             'zarr': 'data/01_processed/ssl_sets/da1.zarr',
-            'memmap': 'data/01_processed/ssl_sets/da1.memmap',
+            'memmap_raw': 'data/01_processed/ssl_sets/da1_raw.memmap',
             'optional_tags': [],
             'n_reads': 0,
         },
