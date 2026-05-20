@@ -513,6 +513,7 @@ def train_one_combo(rank, combo, config, experiment_dir, tb_dir):
     eval_point = 0
     eval_bs = c['batch_size']
     stage = 1
+    best_val_acc = float('-inf')
 
     print(f"{tag} Eval schedule ({n_evals} points): {eval_steps[:5]}{'...' if n_evals > 5 else ''}")
 
@@ -575,6 +576,20 @@ def train_one_combo(rank, combo, config, experiment_dir, tb_dir):
                   f"loss={avg_train_loss:.4f} val={avg_val_loss:.4f} "
                   f"acc={eval_results['accuracy']:.4f} "
                   f"auroc={eval_results['auroc']:.4f}")
+
+            if eval_results['accuracy'] > best_val_acc:
+                best_val_acc = eval_results['accuracy']
+                unwrapped = model._orig_mod if hasattr(model, '_orig_mod') else model
+                torch.save({
+                    'model_state_dict': unwrapped.state_dict(),
+                    'encoder_state_dict': unwrapped.encoder.state_dict(),
+                    'config': config,
+                    'arch_cfg': c,
+                    'treatment': treatment,
+                    'step': step,
+                    'best_val_accuracy': best_val_acc,
+                    **norm_fn.save_stats(),
+                }, os.path.join(combo_dir, 'best_ckpt.pt'))
 
     csv_file.close()
     print(f"{tag} Done. {eval_point} checkpoints recorded.")

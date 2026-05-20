@@ -17,7 +17,6 @@ Importable:
 from __future__ import annotations
 
 import csv
-import sys
 from pathlib import Path
 
 import yaml
@@ -131,57 +130,73 @@ def _smooth(values: list[float], window: int) -> list[float]:
     return out
 
 
+DEFAULT_METRIC_CSV_PREFERENCE = ['probe_history_val1.csv', 'probe_history.csv']
+
+
 def select_best_ssl_checkpoint(
     exp_dir: str | Path,
     metric: str = 'probe_top1',
     smooth_window: int = 1,
     min_step: int = 0,
     training_logs_root: str | Path = 'training_logs',
+    metric_csv: str | None = None,
 ) -> str:
     """Return the absolute path to the best-metric step_<N>.pt for `exp_dir`.
 
     Algorithm:
-      1. Read experiment_type/name from `<exp_dir>/config.yaml`.
-      2. Locate the TB run dir under `<training_logs_root>/<type>/<name>/`
-         (flat layout in this codebase; nested-subdir fallback for tests).
-      3. Read `probe_history.csv`. Smooth the metric column with a centered
-         moving average (window=smooth_window).
+      1. Resolve the metric CSV to argmax over. If `metric_csv` is None
+         (the default), try `probe_history_val1.csv` first then
+         `probe_history.csv`. This implements the post-2026-05-19 convention:
+         if `scripts/utils/reprobe_ssl_checkpoint.py` has written a val1-based
+         probe history, prefer it; otherwise fall back to the historical
+         in-training probe history. If `metric_csv` is an explicit string,
+         only that filename is tried.
+      2. For each candidate filename: check `<exp_dir>/<filename>` (post-hoc
+         reprobe convention, in the experiment dir alongside config.yaml).
+         Then check `<training_logs_root>/<exp_type>/<exp_name>/<filename>`
+         (in-training probe convention, where Accelerate's TB writer logs to).
+         First existing file wins.
+      3. Smooth the metric column with a centered moving average
+         (window=smooth_window).
       4. Pick the step with the highest smoothed metric where step >= min_step.
       5. Map that step to `<exp_dir>/checkpoints/step_<step>.pt`. If that file
          doesn't exist (e.g., probe-eval landed but milestone not yet flushed
          to disk), fall back to the next-best step that does exist.
-      6. If no probe_history.csv is readable or it has no usable rows,
-         fall back to the highest-numbered `step_<N>.pt` in `checkpoints/`.
-         If no step_<N>.pt exists either, fall back to `final_model.pt`.
-         If none of those exist, raise FileNotFoundError. Most SSL runs in
-         this repo never emit final_model.pt — the step_<N>.pt fallback is
-         the practical path.
+      6. If no metric CSV is readable or it has no usable rows, fall back to
+         the highest-numbered `step_<N>.pt` in `checkpoints/`; then
+         `final_model.pt`; otherwise raise FileNotFoundError.
 
     Raises FileNotFoundError if no usable checkpoint is found.
     """
     exp_dir = Path(exp_dir).resolve()
     ckpt_dir = exp_dir / 'checkpoints'
+    candidates = [metric_csv] if metric_csv is not None else DEFAULT_METRIC_CSV_PREFERENCE
 
-    exp_type, exp_name = _load_run_metadata(exp_dir)
-    run_dir = _latest_tb_run_dir(Path(training_logs_root).resolve(), exp_type, exp_name)
-    if run_dir is None:
+    csv_path: Path | None = None
+    for cand in candidates:
+        direct = exp_dir / cand
+        if direct.exists():
+            csv_path = direct
+            break
+
+    if csv_path is None:
+        exp_type, exp_name = _load_run_metadata(exp_dir)
+        run_dir = _latest_tb_run_dir(Path(training_logs_root).resolve(), exp_type, exp_name)
+        if run_dir is not None:
+            for cand in candidates:
+                rd_csv = run_dir / cand
+                if rd_csv.exists():
+                    csv_path = rd_csv
+                    break
+
+    if csv_path is None:
         fb = _fallback_checkpoint(ckpt_dir)
         if fb is not None:
             return str(fb)
         raise FileNotFoundError(
-            f"No probe_history.csv under {training_logs_root}/{exp_type}/{exp_name}/ "
-            f"and no step_<N>.pt or final_model.pt in {ckpt_dir}. "
-            f"Cannot resolve a checkpoint."
-        )
-
-    csv_path = run_dir / 'probe_history.csv'
-    if not csv_path.exists():
-        fb = _fallback_checkpoint(ckpt_dir)
-        if fb is not None:
-            return str(fb)
-        raise FileNotFoundError(
-            f"No probe_history.csv in {run_dir} and no step_<N>.pt or "
-            f"final_model.pt in {ckpt_dir}."
+            f"None of {candidates} found in {exp_dir} or under "
+            f"{training_logs_root}/<type>/<name>/, and no step_<N>.pt or "
+            f"final_model.pt in {ckpt_dir}. Cannot resolve a checkpoint."
         )
 
     rows = _read_probe_history(csv_path)
@@ -212,12 +227,19 @@ def select_best_ssl_checkpoint(
 
 
 def main():
-    if len(sys.argv) < 2:
-        print(__doc__, file=sys.stderr)
-        sys.exit(2)
-    exp_dir = sys.argv[1]
-    smooth_window = int(sys.argv[2]) if len(sys.argv) > 2 else 1
-    print(select_best_ssl_checkpoint(exp_dir, smooth_window=smooth_window))
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
+    ap.add_argument('exp_dir', help='SSL experiment directory')
+    ap.add_argument('smooth_window', nargs='?', type=int, default=1,
+                    help='Centered moving-average window (1 = no smoothing). '
+                         'Positional for backwards compat with the old CLI.')
+    ap.add_argument('--metric_csv', default=None,
+                    help='CSV filename to argmax over. Default (None) auto-prefers '
+                         'probe_history_val1.csv then probe_history.csv. Pass an explicit '
+                         'filename to override. Checked under exp_dir first, then training_logs.')
+    args = ap.parse_args()
+    print(select_best_ssl_checkpoint(args.exp_dir, smooth_window=args.smooth_window,
+                                     metric_csv=args.metric_csv))
 
 
 if __name__ == '__main__':

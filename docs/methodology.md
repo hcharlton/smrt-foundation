@@ -331,3 +331,73 @@ Compute cost is trivial. Regenerating the v2 memmaps is a few hours of single-no
 - Experiment configs (ssl_58 / ssl_59 / ssl_60 / supervised_53): `probe_pos_val` / `probe_neg_val` and `pos_data_val` / `neg_data_val` keys need their subdirectory swapped from `…/val` to `…/val1` and `…/val2` respectively, plus new `pos_data_test` / `neg_data_test` keys at `…/val3` on the supervised side. The memmap path string itself (`cpg_pos_v2.memmap`) does not change — only the trailing subdirectory. Done at launch time, one experiment at a time.
 - `scripts/ds_grid_v3.py:431-445` — needs a parallel `test_ds` construction and an end-of-training forward pass that emits `test_top1` / `test_loss` to the run's metrics output. This is the only structural change on the supervised side; the existing `val_ds` path is unchanged.
 - `tests/test_zarr_to_methyl_memmap_v2.py` — currently hardcodes `train`/`val` and asserts the 80/20 fraction. Tests fail under the new layout until reworked; the test fixtures also still pass the removed `val_pct=0.2` kwarg to the now-renamed signature, which is a separate import/call fix. Reworked after a first regeneration on Gefion confirms the four-way output is well-formed.
+
+## 2026-05-19: Four-Way Partition — Consolidated FT Evaluation Pipeline (scripts/ft_eval.py)
+
+**Decision:** The FT-side evaluation pipeline downstream of the four-way partition is implemented as a single file `scripts/ft_eval.py` with two subcommands (`reprobe`, `evaluate`), plus a small ckpt-save addition to `scripts/ds_grid_v3.py` and a one-flag change to `scripts/utils/select_best_ssl_checkpoint.py`. The figure (val1 → SSL ckpt selection, val2 → FT recipe selection, val3 → cross-experiment eval) is implemented as logical separation between subcommands, not file separation. Val3 lives exclusively in `ft_eval evaluate` — `ds_grid_v3.py` has no awareness of val3, which **reverses** the earlier 2026-05-19 entry's proposal to wire `test_top1` plumbing into FT.
+
+Two earlier drafts of this work split the pipeline differently — first across `scripts/utils/{reprobe_ssl_checkpoint,select_best_ft_recipe,inter_ssl_eval}.py` plus `scripts/run_ft_pipeline.sh` (a bash orchestrator), then collapsed into one `ft_eval.py` with three subcommands (the third being `all`, a Python-via-subprocess sbatch orchestrator). The current shape drops `all` too: orchestration is shell concern (Slurm `--dependency=afterok`), not Python concern, and folding it into the pipeline file blurred that boundary. The runbook below is the replacement.
+
+**Components:**
+
+- **`scripts/ft_eval.py`** (new). Single file with two subcommands and shared helpers. Each invocation handles one logical unit:
+  - `python -m scripts.ft_eval reprobe --exp_dir <ssl_size_dir>` — post-hoc linear probe over every `step_*.pt` in **one SSL experiment dir** against val1. Writes `probe_history_val1.csv` into the exp_dir (preserving the historical `probe_history.csv` written by the in-training probe in `training_logs/`). Resume-safe. Probe recipe mirrors the in-training probe exactly: Adam lr=3e-3, 3 epochs, `nn.Linear(d_model, 1)` head on center-position pooled features `c[:, T//2, :]`, BCEWithLogitsLoss, balanced sampling, ds_limit=500k.
+  - `python -m scripts.ft_eval evaluate --ft_exp_dir <ft_dir> [--init_name ssl_58_best]` — walks **one FT experiment dir** (`<ft_exp_dir>/<recipe>/<init>/<arch>/n<size>/results.csv`, recipes default `midlayer,lpft_lldr,decoder_init,recipe_match`), picks the row with max val_accuracy per (init, arch, size), loads each winner's `best_ckpt.pt`, runs a single forward pass over val3 with `BinaryAccuracy/AUROC/AveragePrecision/F1Score` + BCE loss, writes `inter_ssl_eval.csv`. Prints the row with max `test_top1` as the "Best" Finetuned Artifact. Recipe selection and val3 eval are combined in one pass — no intermediate manifest file on disk (an optional `--manifest_out` writes one for debugging).
+
+- **`scripts/utils/select_best_ssl_checkpoint.py`** (companion, modified). Default `metric_csv` changed from `'probe_history.csv'` to `None` — which now auto-prefers `probe_history_val1.csv` then falls back to `probe_history.csv`. `DEFAULT_METRIC_CSV_PREFERENCE = ['probe_history_val1.csv', 'probe_history.csv']` is the explicit constant. The check looks under `exp_dir/` first then under `training_logs/<type>/<name>/`. The behavioral implication: `ds_grid_v3.py:421`'s call `select_best_ssl_checkpoint(ssl_dir)` transparently picks the val1 winner as soon as `ft_eval reprobe` has written the CSV; pre-reprobe experiments keep using the historical probe history. CLI converted from `sys.argv` slicing to argparse.
+
+- **`scripts/ds_grid_v3.py`** (augmentation, ~15 lines). Per-eval-block addition: tracks `best_val_acc`; when a new max val_accuracy is hit, saves `<combo_dir>/best_ckpt.pt` containing `model_state_dict`, `encoder_state_dict`, `config`, `arch_cfg`, `treatment`, `step`, `best_val_accuracy`, plus the canonical `**norm_fn.save_stats()`. The model is unwrapped from `torch.compile` via `_orig_mod` before saving so loading into a fresh uncompiled instance works without prefix surgery. Disk cost: one ckpt per combo (~10-200MB depending on d_model), bounded.
+
+**Config swaps done in the same commit:**
+- `scripts/experiments/supervised_53_finetune_revamp/{midlayer,lpft_lldr,decoder_init,recipe_match}/config.yaml`: `pos_data_val` and `neg_data_val` swapped from `…/val` to `…/val2` (four files, one-line each). `train` paths unchanged.
+
+**End-to-end runbook (paste-and-modify):** orchestration is shell. The Python script does work; chaining is `sbatch --dependency=afterok` between bash commands. Save as a personal scratch file or run inline.
+
+```bash
+# Defaults for ssl_58 + supervised_53. Edit SSL_ROOT / FT_DIR / SIZES / RECIPES.
+SSL_ROOT=scripts/experiments/ssl_58_autoencoder_grid
+FT_DIR=scripts/experiments/supervised_53_finetune_revamp
+INIT_NAME=ssl_58_best
+SIZES="d128_L4_long d256_L8_long d512_L8_long d768_L8_long d1024_L8_long"
+RECIPES="midlayer lpft_lldr decoder_init recipe_match"
+SBATCH_BASE="--account=cu_0030 --gres=gpu:1 --cpus-per-task=8 --mem=64gb"
+
+# [1/3] reprobe per SSL size (parallel)
+REPROBE_JOBIDS=()
+for size in $SIZES; do
+  exp_dir="${SSL_ROOT}/size_${size}"
+  jobid=$(sbatch --parsable $SBATCH_BASE --time=04:00:00 \
+    --job-name="reprobe_${size}" \
+    --output="${exp_dir}/reprobe_%j.out" \
+    --wrap="source .venv/bin/activate && python -m scripts.ft_eval reprobe --exp_dir ${exp_dir}")
+  echo "  reprobe ${size} -> ${jobid}"
+  REPROBE_JOBIDS+=($jobid)
+done
+REPROBE_DEPS=$(IFS=:; echo "${REPROBE_JOBIDS[*]}")
+
+# [2/3] FT recipes via run.sh (depends on reprobe; run.sh forwards --dependency through to sbatch)
+FT_JOBIDS=()
+for recipe in $RECIPES; do
+  out=$(bash run.sh "${FT_DIR}/${recipe}" --dependency=afterok:${REPROBE_DEPS})
+  jobid=$(echo "$out" | grep -oE 'Submitted batch job [0-9]+' | awk '{print $NF}')
+  echo "  ft ${recipe} -> ${jobid}"
+  FT_JOBIDS+=($jobid)
+done
+FT_DEPS=$(IFS=:; echo "${FT_JOBIDS[*]}")
+
+# [3/3] evaluate (depends on FT)
+sbatch $SBATCH_BASE --time=02:00:00 \
+  --dependency=afterok:${FT_DEPS} \
+  --job-name="ft_eval_${INIT_NAME}" \
+  --output="${FT_DIR}/ft_eval_%j.out" \
+  --wrap="source .venv/bin/activate && python -m scripts.ft_eval evaluate --ft_exp_dir ${FT_DIR} --init_name ${INIT_NAME}"
+```
+
+Smoke test: drop all but one entry from `SIZES` and `RECIPES`, otherwise same. SSL encoder weights are byte-identical throughout — no SSL re-training. Final output lands at `${FT_DIR}/inter_ssl_eval.csv`.
+
+Promoting orchestration to gwf is reserved for when this becomes a recurrent evaluation harness across multiple SSL families. The dependency graph is currently just three sbatch dispatches; a paste-friendly bash snippet is sufficient.
+
+**Out of scope, deferred:**
+- Extracting the probe-fit code into `smrt_foundation/probe.py` so the in-training probe (`_shared_train.py`), `midlayer_probe_sweep.py`, and `ft_eval.reprobe` share a single implementation. Reasonable cleanup; not urgent.
+- Aggregating `inter_ssl_eval.csv` rows into `docs/experiment_log.md` automatically. Manual paste for now.
+- Reworking `tests/test_zarr_to_methyl_memmap_v2.py` for the four-way layout (still flagged from the prior plan).

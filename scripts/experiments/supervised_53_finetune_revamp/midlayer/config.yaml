@@ -24,8 +24,8 @@ resources:
 
 pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
 neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
-pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
-neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val2'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val2'
 
 # Per-arch layer_idx: midpoint default (n_layers // 2 - 1, 0-indexed) until the
 # layer-sweep probe pins down the empirical best. Sweep at d=128_L4 over
