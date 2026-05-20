@@ -348,6 +348,8 @@ def cmd_evaluate(args) -> None:
         arch_cfg = ckpt['arch_cfg']
         model = _build_model(arch_cfg)
         model.load_state_dict(ckpt['model_state_dict'])
+        params = sum(p.numel() for p in model.parameters())
+        print(f"  params={params:,}")
         model = model.to(device)
         norm = KineticsNorm.load_stats(ckpt)
 
@@ -360,7 +362,7 @@ def cmd_evaluate(args) -> None:
         metrics = _evaluate_model(model, dl, device)
         for k, v in metrics.items():
             print(f"  {k}={v:.4f}")
-        rows.append({**entry, **metrics})
+        rows.append({**entry, 'params': params, **metrics})
 
         del model, ds, dl
         if device.type == 'cuda':
