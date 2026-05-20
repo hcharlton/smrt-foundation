@@ -21,21 +21,19 @@ size, one FT recipe, ~2-3 hours total walltime.
 
 ```bash
 # 1. Reprobe just d128_L4_long
-sbatch --parsable --account=cu_0030 --gres=gpu:1 --cpus-per-task=8 \
-  --mem=64gb --time=04:00:00 \
-  --job-name=reprobe_smoke \
-  --output=scripts/experiments/ssl_58_autoencoder_grid/size_d128_L4_long/reprobe_%j.out \
-  --wrap="source .venv/bin/activate && python -m scripts.ft_eval reprobe \
-    --exp_dir scripts/experiments/ssl_58_autoencoder_grid/size_d128_L4_long"
+REPROBE_DEPS=$(bash scripts/reprobe_grid.sh \
+  scripts/experiments/ssl_58_autoencoder_grid d128_L4_long)
 
 # Wait for that to complete (squeue -u $USER). Confirm probe_history_val1.csv
 # lands in size_d128_L4_long/ with one row per step_*.pt.
 
-# 2. FT just midlayer recipe (depends on the reprobe jobid above)
-bash run.sh scripts/experiments/supervised_53_finetune_revamp/midlayer \
-  --dependency=afterok:<REPROBE_JOBID>
+# 2. FT just midlayer recipe (chained on the reprobe job above)
+FT_DEPS=$(bash scripts/ft_grid.sh \
+  scripts/experiments/supervised_53_finetune_revamp \
+  --dependency=afterok:${REPROBE_DEPS} \
+  midlayer)
 
-# 3. After FT completes, evaluate filtered to one arch
+# 3. After FT completes (squeue -u $USER), evaluate filtered to one arch
 python -m scripts.ft_eval evaluate \
   --ft_exp_dir scripts/experiments/supervised_53_finetune_revamp \
   --init_name ssl_58_best \
@@ -52,40 +50,24 @@ the pipeline is wired correctly.
 SSL_ROOT=scripts/experiments/ssl_58_autoencoder_grid
 FT_DIR=scripts/experiments/supervised_53_finetune_revamp
 INIT_NAME=ssl_58_best
-SIZES="d128_L4_long d256_L8_long d512_L8_long d768_L8_long d1024_L8_long"
-RECIPES="midlayer lpft_lldr decoder_init recipe_match"
-SBATCH_BASE="--account=cu_0030 --gres=gpu:1 --cpus-per-task=8 --mem=64gb"
 
-# [1/3] reprobe per SSL size (parallel)
-REPROBE_JOBIDS=()
-for size in $SIZES; do
-  exp_dir="${SSL_ROOT}/size_${size}"
-  jobid=$(sbatch --parsable $SBATCH_BASE --time=04:00:00 \
-    --job-name="reprobe_${size}" \
-    --output="${exp_dir}/reprobe_%j.out" \
-    --wrap="source .venv/bin/activate && python -m scripts.ft_eval reprobe --exp_dir ${exp_dir}")
-  echo "  reprobe ${size} -> ${jobid}"
-  REPROBE_JOBIDS+=($jobid)
-done
-REPROBE_DEPS=$(IFS=:; echo "${REPROBE_JOBIDS[*]}")
+# [1/3] reprobe per SSL size (one sbatch per size_* under SSL_ROOT, parallel)
+REPROBE_DEPS=$(bash scripts/reprobe_grid.sh $SSL_ROOT)
 
-# [2/3] FT recipes (depends on reprobe)
-FT_JOBIDS=()
-for recipe in $RECIPES; do
-  out=$(bash run.sh "${FT_DIR}/${recipe}" --dependency=afterok:${REPROBE_DEPS})
-  jobid=$(echo "$out" | grep -oE 'Submitted batch job [0-9]+' | awk '{print $NF}')
-  echo "  ft ${recipe} -> ${jobid}"
-  FT_JOBIDS+=($jobid)
-done
-FT_DEPS=$(IFS=:; echo "${FT_JOBIDS[*]}")
+# [2/3] FT recipes (one sbatch per recipe under FT_DIR, chained on reprobe)
+FT_DEPS=$(bash scripts/ft_grid.sh $FT_DIR --dependency=afterok:${REPROBE_DEPS})
 
-# [3/3] evaluate (depends on FT)
-sbatch $SBATCH_BASE --time=02:00:00 \
+# [3/3] evaluate on val3 (chained on FT)
+sbatch --account=cu_0030 --gres=gpu:1 --cpus-per-task=8 --mem=64gb --time=02:00:00 \
   --dependency=afterok:${FT_DEPS} \
   --job-name="ft_eval_${INIT_NAME}" \
   --output="${FT_DIR}/ft_eval_%j.out" \
   --wrap="source .venv/bin/activate && python -m scripts.ft_eval evaluate --ft_exp_dir ${FT_DIR} --init_name ${INIT_NAME}"
 ```
+
+The two wrappers auto-discover sizes (any `size_*` subdir under `SSL_ROOT`) and
+recipes (any subdir with `config.yaml` under `FT_DIR`). Pass an explicit list as
+trailing args to either if you want a subset.
 
 Final output: `${FT_DIR}/inter_ssl_eval.csv`. Monitor: `squeue -u $USER`.
 
@@ -94,9 +76,11 @@ Final output: `${FT_DIR}/inter_ssl_eval.csv`. Monitor: `squeue -u $USER`.
 Use case: you trained ssl_60 and want it to be an init alongside ssl_58 in the
 existing supervised_53 grid.
 
-1. **Reprobe each ssl_60 size on val1** (one sbatch per size, as in Recipe 2 step 1
-   but with `${SSL_ROOT}=scripts/experiments/ssl_60_ctx1024_grid` and the appropriate
-   `SIZES` list).
+1. **Reprobe each ssl_60 size on val1**:
+   ```bash
+   REPROBE_DEPS=$(bash scripts/reprobe_grid.sh \
+     scripts/experiments/ssl_60_ctx1024_grid)
+   ```
 
 2. **Add an `inits:` block to each of the four supervised_53 recipe configs**
    (`midlayer/config.yaml`, `lpft_lldr/config.yaml`, `decoder_init/config.yaml`,
