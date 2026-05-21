@@ -537,49 +537,59 @@ def process_dataset(name, data):
             )
         return
 
-    memmap_target = gwf.target_from_template(
-        name=f'{name}_to_memmap',
-        template=memmap_conversion(
-            zarr_path=zarr_target.outputs['out_file'],
-            output_path=data['memmap'],
-            config_path=CONFIG['data_config'],
-            profile=True,
-            normalize=True
+    # SSL memmap variants are independently optional, mirroring the cpg
+    # branch's `memmap_fwdrev` conditional. A dataset entry need only
+    # declare the variants it actually wants built. ssl_61's DA1 source,
+    # for example, declares `memmap_raw` only.
+    memmap_target = None
+    if 'memmap' in data:
+        memmap_target = gwf.target_from_template(
+            name=f'{name}_to_memmap',
+            template=memmap_conversion(
+                zarr_path=zarr_target.outputs['out_file'],
+                output_path=data['memmap'],
+                config_path=CONFIG['data_config'],
+                profile=True,
+                normalize=True
+            )
         )
-    )
 
-    memmap_target_raw = gwf.target_from_template(
-        name=f'{name}_to_memmap_raw',
-        template=memmap_conversion(
-            zarr_path=zarr_target.outputs['out_file'],
-            output_path=data['memmap_raw'],
-            config_path=CONFIG['data_config'],
-            profile=True,
-            normalize=False,
-            shards=0
+    memmap_target_raw = None
+    if 'memmap_raw' in data:
+        memmap_target_raw = gwf.target_from_template(
+            name=f'{name}_to_memmap_raw',
+            template=memmap_conversion(
+                zarr_path=zarr_target.outputs['out_file'],
+                output_path=data['memmap_raw'],
+                config_path=CONFIG['data_config'],
+                profile=True,
+                normalize=False,
+                shards=0
+            )
         )
-    )
 
-    memmap_target_filtered = gwf.target_from_template(
-        name=f'{name}_to_memmap_filter_qual',
-        template=memmap_conversion(
-            zarr_path=zarr_target.outputs['out_file'],
-            output_path=data['memmap_filter_qual'],
-            config_path=CONFIG['data_config'],
-            profile=True,
-            normalize=False,
-            filter_qual=True,
-            shards=500
+    if 'memmap_filter_qual' in data:
+        gwf.target_from_template(
+            name=f'{name}_to_memmap_filter_qual',
+            template=memmap_conversion(
+                zarr_path=zarr_target.outputs['out_file'],
+                output_path=data['memmap_filter_qual'],
+                config_path=CONFIG['data_config'],
+                profile=True,
+                normalize=False,
+                filter_qual=True,
+                shards=500
+            )
         )
-    )
 
-    gwf.target_from_template(
-        name=f'{name}_validation',
-        template=validate_memmap(
-            memmap_path=memmap_target.outputs['out_file'],
-            config_path=CONFIG['data_config']
+    if memmap_target is not None:
+        gwf.target_from_template(
+            name=f'{name}_validation',
+            template=validate_memmap(
+                memmap_path=memmap_target.outputs['out_file'],
+                config_path=CONFIG['data_config']
+            )
         )
-    )
 
     if 'ssl_pair_val' in data:
         gwf.target_from_template(
