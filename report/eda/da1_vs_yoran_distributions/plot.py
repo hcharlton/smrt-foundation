@@ -152,19 +152,60 @@ def _histogram_chart(hist_df):
     )
 
 
-def _stats_chart(stats_df):
-    """Text-table panel: one cell per (source, channel) showing mean ± std
-    and the q05/q50/q95 quantiles. Mirrors the at-a-glance summary the
-    tissue_dataset_overview chart bakes into its title strip."""
-    return alt.Chart(stats_df).mark_text(size=11, align='left', baseline='middle').encode(
-        alt.X('channel:N').title(None),
+def _quantile_summary_chart(stats_df):
+    """Per-(source, channel) quantile summary: q05-q95 range rule, median
+    dot, mean diamond. Faceted by channel so x-scales are channel-specific
+    and the two sources are directly comparable within each facet.
+
+    Replaces an earlier text-table panel whose long labels overflowed
+    between columns; this version conveys the same numerical content
+    spatially and makes a between-source shift visually obvious.
+    """
+    base = alt.Chart(stats_df).encode(
         alt.Y('source:N').title(None).sort(None),
-        alt.Text('label:N'),
+        alt.Color('source:N').legend(None),
+    )
+    range_layer = base.mark_rule(strokeWidth=6, opacity=0.45).encode(
+        alt.X('q05:Q').title('Value'),
+        alt.X2('q95:Q'),
+        tooltip=[
+            alt.Tooltip('source:N'),
+            alt.Tooltip('channel:N'),
+            alt.Tooltip('q05:Q', format='.3f'),
+            alt.Tooltip('q50:Q', format='.3f', title='median'),
+            alt.Tooltip('q95:Q', format='.3f'),
+            alt.Tooltip('mean:Q', format='.3f'),
+            alt.Tooltip('std:Q', format='.3f'),
+            alt.Tooltip('n:Q', format=','),
+        ],
+    )
+    median_layer = base.mark_point(size=140, filled=True).encode(
+        alt.X('q50:Q'),
+        tooltip=[
+            alt.Tooltip('source:N'),
+            alt.Tooltip('q50:Q', format='.3f', title='median'),
+        ],
+    )
+    mean_layer = base.mark_point(size=120, shape='diamond', filled=False, strokeWidth=2).encode(
+        alt.X('mean:Q'),
+        tooltip=[
+            alt.Tooltip('source:N'),
+            alt.Tooltip('mean:Q', format='.3f'),
+            alt.Tooltip('std:Q', format='.3f'),
+        ],
+    )
+    layered = alt.layer(range_layer, median_layer, mean_layer).properties(
+        width=380, height=110,
+    )
+    return layered.facet(
+        column=alt.Column('channel:N').title(None),
+    ).resolve_scale(
+        x='independent',
     ).properties(
-        width=860, height=120,
         title=alt.TitleParams(
-            text='Per-channel summary',
-            subtitle='mean ± std and q05/q50/q95 quantiles per (source, channel).',
+            text='Per-channel quantile summary',
+            subtitle=('Bar = q05 to q95. Filled circle = median. '
+                      'Open diamond = mean. Same sample as the histograms above.'),
         ),
     )
 
@@ -251,15 +292,7 @@ def main(output_path, n_reads_per_source, n_bins, chunk_size, batch_size):
                 })
 
     hist_df = pl.DataFrame(hist_rows)
-    stats_df = pl.DataFrame(stats_rows).with_columns(
-        (
-            pl.col('mean').round(3).cast(pl.Utf8) + pl.lit(' ± ') +
-            pl.col('std').round(3).cast(pl.Utf8) + pl.lit('   q05/50/95: ') +
-            pl.col('q05').round(3).cast(pl.Utf8) + pl.lit(' / ') +
-            pl.col('q50').round(3).cast(pl.Utf8) + pl.lit(' / ') +
-            pl.col('q95').round(3).cast(pl.Utf8)
-        ).alias('label')
-    )
+    stats_df = pl.DataFrame(stats_rows)
     ks_df = pl.DataFrame(ks_rows) if ks_rows else None
 
     base, _ = os.path.splitext(output_path)
@@ -276,7 +309,7 @@ def main(output_path, n_reads_per_source, n_bins, chunk_size, batch_size):
     print(f'[save] summary -> {summary_path}')
 
     print('[charts] composing')
-    panels = [_histogram_chart(hist_df), _stats_chart(stats_df)]
+    panels = [_histogram_chart(hist_df), _quantile_summary_chart(stats_df)]
     if ks_df is not None:
         panels.append(_ks_chart(ks_df))
 
