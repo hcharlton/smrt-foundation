@@ -396,6 +396,34 @@ class PairedViewDataset(Dataset):
         return v1, v2
 
 
+class NormedDataset(Dataset):
+    """Thin wrapper that applies a normalization callable to each sample,
+    plus an optional random crop down to `crop_len` along the time axis.
+
+    Expects `inner[idx]` to return a Tensor (not a `(x, y)` tuple). When
+    `crop_len` is set and the sample is longer along axis 0, a random
+    contiguous window of length `crop_len` is taken — this is how
+    short-context SSL runs train on native-length (~4096 bp) reads
+    without the model's PositionalEncoding buffer hitting a shape
+    mismatch. ssl_29 set the precedent ("random cropping from 4096->128").
+    """
+
+    def __init__(self, inner, norm_fn, crop_len=None):
+        self.inner = inner
+        self.norm_fn = norm_fn
+        self.crop_len = crop_len
+
+    def __len__(self):
+        return len(self.inner)
+
+    def __getitem__(self, idx):
+        sample = self.norm_fn(self.inner[idx])
+        if self.crop_len is not None and sample.shape[0] > self.crop_len:
+            start = int(torch.randint(0, sample.shape[0] - self.crop_len + 1, (1,)).item())
+            sample = sample[start:start + self.crop_len]
+        return sample
+
+
 class LegacyMethylDataset(IterableDataset):
     def __init__(self, data_path, means, stds, context, restrict_row_groups=100, single_strand=False, inference=False, norm=True):
         super().__init__()
