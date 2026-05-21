@@ -30,6 +30,85 @@ class ChunkedRandomSampler(Sampler):
         return self.num_samples
 
 
+class BalancedChunkedSampler(Sampler):
+    """Round-robin chunked sampler over a `ConcatDataset` of multiple sources.
+
+    Each source contributes an equal share of the sampler's output (1/N of
+    `sum(source_lengths)` for N sources). When a source is smaller than its
+    quota, its chunk list is re-shuffled and cycled until the quota is met,
+    so the larger source is never under-exposed and the smaller source is
+    over-sampled rather than padded with repeats.
+
+    Within each source, indices are emitted in groups of `chunk_size` before
+    switching to the next source. That preserves the sequential-shard I/O
+    speedup that `ChunkedRandomSampler` exploits (memmap reads stay
+    contiguous within a shard before the OS page cache has to evict it).
+
+    Args:
+        source_lengths: iterable of int. Per-source dataset lengths in the
+            same order they were passed to `ConcatDataset`. Source i
+            occupies indices [sum(source_lengths[:i]), sum(source_lengths[:i+1])).
+        chunk_size: size of each contiguous index group emitted before the
+            sampler switches to the next source.
+        shuffle_within: shuffle indices within each chunk.
+    """
+
+    def __init__(self, source_lengths, chunk_size, shuffle_within=True):
+        self.source_lengths = list(source_lengths)
+        self.chunk_size = chunk_size
+        self.shuffle_within = shuffle_within
+        self.total_len = sum(self.source_lengths)
+        self.offsets = []
+        cum = 0
+        for L in self.source_lengths:
+            self.offsets.append(cum)
+            cum += L
+
+    def __len__(self):
+        return self.total_len
+
+    def __iter__(self):
+        n = len(self.source_lengths)
+        per_source = [self.total_len // n] * n
+        for i in range(self.total_len % n):
+            per_source[i] += 1
+        streams = [
+            self._source_stream(self.offsets[i], self.source_lengths[i], per_source[i])
+            for i in range(n)
+        ]
+        active = [True] * n
+        while any(active):
+            for i in range(n):
+                if not active[i]:
+                    continue
+                emitted = 0
+                while emitted < self.chunk_size:
+                    try:
+                        yield next(streams[i])
+                        emitted += 1
+                    except StopIteration:
+                        active[i] = False
+                        break
+
+    def _source_stream(self, offset, length, target):
+        emitted = 0
+        while emitted < target:
+            n_chunks = (length + self.chunk_size - 1) // self.chunk_size
+            chunk_order = torch.randperm(n_chunks).tolist()
+            for ci in chunk_order:
+                start = ci * self.chunk_size
+                end = min(start + self.chunk_size, length)
+                indices = list(range(offset + start, offset + end))
+                if self.shuffle_within:
+                    perm = torch.randperm(len(indices)).tolist()
+                    indices = [indices[j] for j in perm]
+                for idx in indices:
+                    if emitted >= target:
+                        return
+                    yield idx
+                    emitted += 1
+
+
 class ShardedMemmapDataset(Dataset):
     def __init__(self, data_dir, cache_size=100, limit=0):
         expanded_dir = os.path.expandvars(data_dir)

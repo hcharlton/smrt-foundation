@@ -77,6 +77,20 @@ STAGE_SEED=$(read_stage seed "42")
 STAGE_PARALLEL=$(read_stage parallel "16")
 SSL_DATASET=$(python3 -c "import yaml; c=yaml.safe_load(open('$CONFIG')); print(c.get('ssl_dataset','yoran_raw.memmap'))")
 
+# Multi-source datasets (ssl_61+): config can declare `ssl_datasets:` as a
+# dict of {source_name: path}. When present, run.sh stages every path under
+# $TMPDIR (preserving each basename) and exports SMRT_SSL_MEMMAP_DIR to the
+# parent ($TMPDIR), so the training script can resolve each source as
+# $SMRT_SSL_MEMMAP_DIR/<basename>. Single-source `ssl_dataset:` continues
+# to work unchanged when `ssl_datasets:` is absent.
+HAS_SSL_DATASETS=$(python3 -c "import yaml; c=yaml.safe_load(open('$CONFIG')); print('1' if c.get('ssl_datasets') else '0')")
+SSL_DATASETS_PATHS=$(python3 -c "
+import yaml
+c = yaml.safe_load(open('$CONFIG'))
+for v in (c.get('ssl_datasets') or {}).values():
+    print(v)
+")
+
 # Partition-aware GPU flag selection. When `partition` is set in the config's
 # resources block (GenomeDK convention, e.g. `gpu-h200`), submit with
 # `--partition=$PARTITION --gpus=$NUM_PROCS` per the cluster's documented
@@ -110,8 +124,24 @@ if [ "$ENV" = "genomedk" ] && { [ "$STAGE_ENABLED" = "true" ] || [ "$STAGE_ENABL
     if [ "$STAGE_SHUFFLE" = "true" ] || [ "$STAGE_SHUFFLE" = "True" ]; then
         SHUFFLE_FLAG="--shuffle"
     fi
-    STAGE_CMD="bash ${PROJECT_ROOT}/scripts/stage_ssl_to_tmpdir.sh ${PROJECT_ROOT}/data/01_processed/ssl_sets/${SSL_DATASET} \$TMPDIR/${SSL_DATASET} --n-shards ${STAGE_N_SHARDS} ${SHUFFLE_FLAG} --seed ${STAGE_SEED} --parallel ${STAGE_PARALLEL} && export SMRT_SSL_MEMMAP_DIR=\$TMPDIR/${SSL_DATASET}"
-    echo "  stage=enabled n_shards=${STAGE_N_SHARDS} shuffle=${STAGE_SHUFFLE} seed=${STAGE_SEED} parallel=${STAGE_PARALLEL}"
+    if [ "$HAS_SSL_DATASETS" = "1" ]; then
+        STAGE_CMD=""
+        while IFS= read -r DS_PATH; do
+            [ -z "$DS_PATH" ] && continue
+            DS_BASENAME=$(basename "$DS_PATH")
+            STAGE_CMD+="bash ${PROJECT_ROOT}/scripts/stage_ssl_to_tmpdir.sh ${PROJECT_ROOT}/${DS_PATH} \$TMPDIR/${DS_BASENAME} --n-shards ${STAGE_N_SHARDS} ${SHUFFLE_FLAG} --seed ${STAGE_SEED} --parallel ${STAGE_PARALLEL} && "
+        done <<< "$SSL_DATASETS_PATHS"
+        STAGE_CMD+="export SMRT_SSL_MEMMAP_DIR=\$TMPDIR"
+        echo "  stage=enabled (multi-source) n_shards=${STAGE_N_SHARDS} shuffle=${STAGE_SHUFFLE} seed=${STAGE_SEED} parallel=${STAGE_PARALLEL}"
+        echo "  sources:"
+        while IFS= read -r DS_PATH; do
+            [ -z "$DS_PATH" ] && continue
+            echo "    - $DS_PATH"
+        done <<< "$SSL_DATASETS_PATHS"
+    else
+        STAGE_CMD="bash ${PROJECT_ROOT}/scripts/stage_ssl_to_tmpdir.sh ${PROJECT_ROOT}/data/01_processed/ssl_sets/${SSL_DATASET} \$TMPDIR/${SSL_DATASET} --n-shards ${STAGE_N_SHARDS} ${SHUFFLE_FLAG} --seed ${STAGE_SEED} --parallel ${STAGE_PARALLEL} && export SMRT_SSL_MEMMAP_DIR=\$TMPDIR/${SSL_DATASET}"
+        echo "  stage=enabled n_shards=${STAGE_N_SHARDS} shuffle=${STAGE_SHUFFLE} seed=${STAGE_SEED} parallel=${STAGE_PARALLEL}"
+    fi
 fi
 
 case "$ENV" in

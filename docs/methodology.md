@@ -401,3 +401,18 @@ Promoting orchestration to gwf is reserved for when this becomes a recurrent eva
 - Extracting the probe-fit code into `smrt_foundation/probe.py` so the in-training probe (`_shared_train.py`), `midlayer_probe_sweep.py`, and `ft_eval.reprobe` share a single implementation. Reasonable cleanup; not urgent.
 - Aggregating `inter_ssl_eval.csv` rows into `docs/experiment_log.md` automatically. Manual paste for now.
 - Reworking `tests/test_zarr_to_methyl_memmap_v2.py` for the four-way layout (still flagged from the prior plan).
+
+## 2026-05-21: Per-Source Normalization + Balanced 50/50 Sampling for Multi-Sample SSL (ssl_61)
+
+**Motivation:** ssl_61 pretrains on a mix of DA1 (Sequel II) and yoran (Revio). Two open questions: (a) how to z-normalize when the two sources may have meaningfully different IPD/PW distributions; (b) how to mix them when one source is much larger than the other.
+
+**Method:**
+- *Per-source norm.* Each source builds its own `KineticsNorm` from its own data (16K-sample chunked-random read), then is wrapped in its own `NormedDataset(inner, source_norm, crop_len=ctx)`. The two normed streams are composed into a single `ConcatDataset`. Each source therefore enters the encoder in *its own z-space*, with per-channel mean ~0 and std ~1.
+- *Balanced 50/50 sampling.* New `BalancedChunkedSampler` (in `smrt_foundation/dataset.py`) round-robins chunks across sources at chunk granularity. The smaller source's chunk list is re-shuffled and cycled to meet its 1/N quota, so 50/50 holds over the sampler's full output regardless of size ratio.
+- *Per-source norms persisted in checkpoints* under `ckpt['norms'] = {src: save_stats(), ...}` and on resume under `norm_stats_<src>.pt` so downstream tasks pick the source-matched normalizer.
+
+**Justification:** A combined-stats norm averages the two sources, producing inputs that are slightly wrong-scaled for both — the encoder either learns to absorb the chemistry-specific scale offset internally or is biased toward whichever source dominates the sample. Per-source norm sidesteps this; the encoder sees consistently distributed inputs in both sources' own spaces, which also matches what a source-matched downstream classifier would do at inference time. The balanced sampler ensures the "does mixing help?" signal is not collapsed by size imbalance (a 10:1 ratio under proportional sampling makes it indistinguishable from running on the larger source alone). Both choices fall out cleanly from the existing `NormedDataset` abstraction; no new model code required.
+
+**Downstream contract:** A Sequel II classifier (e.g. the existing CpG probe) should load `ckpt['norms']['da1']`; a Revio classifier should load `ckpt['norms']['yoran']`. In-training probe uses DA1's norm (CpG data is Sequel II-derived); in-training pair-val uses yoran's norm on both yoran and ob007 splits for trajectory comparability against ssl_58.
+
+**Pre-launch EDA:** `report/eda/da1_vs_yoran_distributions/plot.py` (run via `bash plot.sh report/eda/da1_vs_yoran_distributions`) characterizes per-channel distributions between the two sources and prints a 2-sample KS statistic. Heavily-overlapping distributions are a signal the combined-stats norm would also work; a large KS confirms per-source is the right call.
