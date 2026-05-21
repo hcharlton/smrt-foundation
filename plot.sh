@@ -53,6 +53,6 @@ case "$ENV" in
                --cpus-per-task=4 --mem=32gb --time=00:30:00 \
                --output="${PLOT_DIR}/slurm_%j.log" \
                "$@" \
-               --wrap="source \$(conda info --base)/etc/profile.d/conda.sh && conda activate data_prep && cd ${PROJECT_ROOT} && python ${SCRIPT} --output_path ${OUTPUT}"
+               --wrap="source ${PROJECT_ROOT}/.venv/bin/activate && cd ${PROJECT_ROOT} && python ${SCRIPT} --output_path ${OUTPUT}"
         ;;
 esac

@@ -1,0 +1,66 @@
+{
+  "sources": {
+    "da1": "data/01_processed/ssl_sets/da1_raw.memmap",
+    "yoran": "data/01_processed/ssl_sets/yoran_raw.memmap"
+  },
+  "n_reads_per_source": 1024,
+  "n_bins": 80,
+  "per_channel_stats": [
+    {
+      "source": "da1",
+      "channel": "IPD",
+      "n": 3769890,
+      "mean": 18.983308792114258,
+      "std": 16.891403198242188,
+      "q05": 5.0,
+      "q50": 14.0,
+      "q95": 49.0
+    },
+    {
+      "source": "yoran",
+      "channel": "IPD",
+      "n": 3672404,
+      "mean": 28.388885498046875,
+      "std": 23.25527000427246,
+      "q05": 7.0,
+      "q50": 21.0,
+      "q95": 73.0
+    },
+    {
+      "source": "da1",
+      "channel": "PW",
+      "n": 3769890,
+      "mean": 20.17534637451172,
+      "std": 10.86194133758545,
+      "q05": 8.0,
+      "q50": 18.0,
+      "q95": 41.0
+    },
+    {
+      "source": "yoran",
+      "channel": "PW",
+      "n": 3672404,
+      "mean": 17.55513572692871,
+      "std": 10.758007049560547,
+      "q05": 7.0,
+      "q50": 15.0,
+      "q95": 37.0
+    }
+  ],
+  "ks_2sample": [
+    {
+      "channel": "IPD",
+      "ks_statistic": 0.24930673217760957,
+      "p_value_approx": 0.0,
+      "a": "da1",
+      "b": "yoran"
+    },
+    {
+      "channel": "PW",
+      "ks_statistic": 0.1359413162637121,
+      "p_value_approx": 0.0,
+      "a": "da1",
+      "b": "yoran"
+    }
+  ]
+}
