@@ -91,9 +91,15 @@ DEFAULT_CLASSIFIER = {
     # F2 (lpft_lldr): warmup_epochs (head-only) and lldr_decay live here.
     'warmup_epochs': 5,
     'lldr_decay': 0.7,
+    # supervised_54 decoupled-LR knobs. Both default to None, which means
+    # "use max_lr for the whole model" (v2-equivalent). Set both to a number
+    # to drive the head and encoder at different uniform LRs without invoking
+    # lpft_lldr's per-layer decay.
+    'head_lr': None,
+    'encoder_lr': None,
 }
 
-VALID_TREATMENTS = {'baseline', 'midlayer', 'lpft_lldr', 'decoder_init', 'big_head'}
+VALID_TREATMENTS = {'baseline', 'midlayer', 'lpft_lldr', 'decoder_init', 'big_head', 'linear_probe'}
 
 
 # ---------------------------------------------------------------------------
@@ -266,9 +272,10 @@ def _build_model(arch_cfg):
         return DirectClassifierWithDecoder(**common, cnn_variant=cnn_variant)
     if treatment == 'big_head':
         return DirectClassifierBigHead(**common, cnn_variant=cnn_variant)
-    # 'baseline' and 'lpft_lldr' both use the standard DirectClassifier (or
-    # SmallRF). The two-stage logic in 'lpft_lldr' is in the optimizer wiring,
-    # not the model class.
+    # 'baseline', 'lpft_lldr', and 'linear_probe' all use the standard
+    # DirectClassifier (or SmallRF). The two-stage logic in 'lpft_lldr' and the
+    # permanent encoder freeze in 'linear_probe' live in the optimizer wiring
+    # and the training loop, not the model class.
     if cnn_variant == 'small_rf':
         return DirectClassifierSmallRF(**common)
     return DirectClassifier(**common)
@@ -318,6 +325,18 @@ def _load_pretrained(model, checkpoint_path, treatment):
     return model
 
 
+def _is_head_param(name: str) -> bool:
+    """Match parameters that belong to the classification head.
+
+    The DirectClassifier* family stores the head module as ``head`` (a
+    Sequential) and, in `DirectClassifierMidLayer`, an additional pre-head
+    LayerNorm at ``head_ln``. Both are part of the classifier and stay
+    trainable under `linear_probe`. Anything else (encoder.*, decoder_upsample.*
+    in F3) counts as encoder-side and gets frozen / picks up `encoder_lr`.
+    """
+    return name.startswith('head.') or name.startswith('head_ln.')
+
+
 def _build_optimizer(model, arch_cfg, total_steps):
     """Single-stage AdamW for baseline/midlayer/decoder_init/big_head;
     LP-FT two-stage parameter groups for lpft_lldr.
@@ -330,11 +349,46 @@ def _build_optimizer(model, arch_cfg, total_steps):
     max_lr = float(arch_cfg['max_lr'])
     weight_decay = float(arch_cfg['weight_decay'])
     pct_start = float(arch_cfg['pct_start'])
+    head_lr_raw = arch_cfg.get('head_lr')
+    encoder_lr_raw = arch_cfg.get('encoder_lr')
+    head_lr = float(head_lr_raw) if head_lr_raw is not None else max_lr
+    encoder_lr = float(encoder_lr_raw) if encoder_lr_raw is not None else max_lr
+
+    if treatment == 'linear_probe':
+        # Head only; the encoder is frozen in train_one_combo and stays frozen.
+        head_params = [
+            p for n, p in model.named_parameters() if _is_head_param(n)
+        ]
+        opt = torch.optim.AdamW(
+            head_params, lr=head_lr, weight_decay=weight_decay,
+        )
+        sched = get_cosine_schedule_with_warmup(
+            opt, total_steps=total_steps, pct_start=pct_start,
+        )
+        return opt, sched, 0
 
     if treatment != 'lpft_lldr':
-        opt = torch.optim.AdamW(
-            model.parameters(), lr=max_lr, weight_decay=weight_decay,
-        )
+        if head_lr != encoder_lr:
+            # Decoupled head / encoder LR. Two param groups, single cosine
+            # schedule. Cosine scaling is per-group, so each group keeps its
+            # own initial_lr through warmup + decay.
+            head_params = [
+                p for n, p in model.named_parameters() if _is_head_param(n)
+            ]
+            enc_params = [
+                p for n, p in model.named_parameters() if not _is_head_param(n)
+            ]
+            opt = torch.optim.AdamW(
+                [
+                    {'params': head_params, 'lr': head_lr, 'name': 'head'},
+                    {'params': enc_params,  'lr': encoder_lr, 'name': 'encoder'},
+                ],
+                weight_decay=weight_decay,
+            )
+        else:
+            opt = torch.optim.AdamW(
+                model.parameters(), lr=max_lr, weight_decay=weight_decay,
+            )
         sched = get_cosine_schedule_with_warmup(
             opt, total_steps=total_steps, pct_start=pct_start,
         )
@@ -348,8 +402,7 @@ def _build_optimizer(model, arch_cfg, total_steps):
     # LR per "layer group": index 0 = head (full max_lr); 1..n_layers = transformer
     # blocks top-down (block n_layers-1 = top = max_lr * decay^1, ..., block 0 =
     # bottom = max_lr * decay^n_layers); n_layers+1 = embed + cnn (deepest).
-    head_params = [p for n, p in model.named_parameters()
-                   if n.startswith('head.') or n.startswith('head_ln.')]
+    head_params = [p for n, p in model.named_parameters() if _is_head_param(n)]
     block_params = []
     for i in range(n_layers):
         block_params.append([
@@ -475,12 +528,25 @@ def train_one_combo(rank, combo, config, experiment_dir, tb_dir):
     optimizer, scheduler, stage_boundary = _build_optimizer(model, c, total_steps)
 
     is_lpft = treatment == 'lpft_lldr'
+    is_lp = treatment == 'linear_probe'
     boundary_step = stage_boundary * steps_per_epoch if is_lpft else 0
     if is_lpft:
         print(f"{tag} LP-FT: stage1 head-only for {stage_boundary} epochs "
               f"({boundary_step} steps); stage2 unfreezes encoder with "
               f"LLDR decay={c.get('lldr_decay', 0.7)}")
         _set_encoder_requires_grad(model, False)
+    elif is_lp:
+        print(f"{tag} linear_probe: encoder frozen for the whole run; "
+              f"only head params will be trained")
+        _set_encoder_requires_grad(model, False)
+
+    # Resolve effective head/encoder LRs for logging & CSV. None means
+    # "fall back to max_lr". Both equal => single-group optimizer (v2 behaviour).
+    head_lr_resolved = float(c['head_lr']) if c.get('head_lr') is not None else float(c['max_lr'])
+    encoder_lr_resolved = (
+        0.0 if is_lp else
+        (float(c['encoder_lr']) if c.get('encoder_lr') is not None else float(c['max_lr']))
+    )
 
     tb_run_dir = os.path.join(
         tb_dir, combo.init_name, combo.arch_name, f'n{combo.train_size}',
@@ -493,13 +559,16 @@ def train_one_combo(rank, combo, config, experiment_dir, tb_dir):
     writer.add_scalar("train_size", combo.train_size, 0)
     writer.add_scalar("train_bs", train_bs, 0)
     writer.add_scalar("max_lr", float(c['max_lr']), 0)
+    writer.add_scalar("head_lr", head_lr_resolved, 0)
+    writer.add_scalar("encoder_lr", encoder_lr_resolved, 0)
 
     csv_path = os.path.join(combo_dir, 'results.csv')
     csv_file = open(csv_path, 'w', newline='')
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow([
         'arch_name', 'init_name', 'treatment', 'train_size', 'train_bs',
-        'max_lr', 'eval_point', 'step', 'stage',
+        'max_lr', 'head_lr', 'encoder_lr',
+        'eval_point', 'step', 'stage',
         'train_loss', 'val_loss',
         'val_f1', 'val_auroc', 'val_auprc', 'val_accuracy',
         'epochs_completed',
@@ -564,6 +633,7 @@ def train_one_combo(rank, combo, config, experiment_dir, tb_dir):
             csv_writer.writerow([
                 combo.arch_name, combo.init_name, treatment,
                 combo.train_size, train_bs, float(c['max_lr']),
+                head_lr_resolved, encoder_lr_resolved,
                 eval_point, step, stage,
                 f'{avg_train_loss:.6f}', f'{avg_val_loss:.6f}',
                 f'{eval_results["f1"]:.6f}', f'{eval_results["auroc"]:.6f}',

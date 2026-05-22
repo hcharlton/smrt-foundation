@@ -1,0 +1,60 @@
+experiment_type: 'supervised'
+experiment_name: '54_d768_lr_recipe_phase_b_current_lr'
+run_message: >-
+  Phase B0 of supervised_54_d768_lr_recipe. Diagonal cell: current LR
+  (uniform 3e-3) crossed with the sane recipe (bs=512, max_epochs=20,
+  matching supervised_20 / supervised_27). Together with Phase A's A0/A1
+  and Phase B's B1, this fills the 2x2 LR x recipe factorial. Tests
+  whether the recipe alone closes the LP->FT gap or whether the encoder
+  LR is also load-bearing.
+  Treatment is 'midlayer' with layer_idx=3, identical to A0 except for
+  bs and max_epochs. Step count: at n=8M with bs=512 / 20ep =
+  ~312k steps (under the 400k max_steps cap); at n=100k / bs=512 / 20ep
+  = ~3920 steps; at n=10k / bs=512 / 20ep = ~400 steps.
+  1 arch x 2 inits x 3 train_sizes = 6 runs.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "24:00:00"
+  gres: gpu:8
+  num_processes: 1
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val2'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val2'
+
+architectures:
+  d768_L8: { d_model: 768, n_layers: 8, n_head: 12, layer_idx: 3 }
+
+inits:
+  random:
+    checkpoint: null
+  ssl_58_best:
+    checkpoint: 'auto_best'
+    ssl_exp_dirs:
+      d768_L8: 'scripts/experiments/ssl_58_autoencoder_grid/size_d768_L8_long'
+
+skip: []
+
+train_sizes: [10000, 100000, 8000000]
+
+classifier:
+  context: 32
+  weight_decay: 0.02
+  pct_start: 0.1
+  max_lr: 3e-3
+  head_lr: 3e-3
+  encoder_lr: 3e-3
+  batch_size: 512
+  cnn_variant: 'small_rf'
+  treatment: 'midlayer'
+
+scaling:
+  val_limit: 1000000
+  max_epochs: 20
+  min_steps: 100
+  max_steps: 400000
+  n_evals: 40
+  first_eval_step: 100
