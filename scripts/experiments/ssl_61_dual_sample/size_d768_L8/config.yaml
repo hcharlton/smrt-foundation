@@ -28,8 +28,8 @@ stage:
 
 probe_pos_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
 probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
-probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val'
-probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val'
+probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val1'
+probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val1'
 
 ssl_pair_val_train: 'data/01_processed/val_sets/ssl_pair_val_yoran_v1.memmap'
 ssl_pair_val_val:   'data/01_processed/val_sets/ssl_pair_val_ob007_v1.memmap'
