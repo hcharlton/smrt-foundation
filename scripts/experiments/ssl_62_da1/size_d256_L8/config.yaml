@@ -1,0 +1,54 @@
+experiment_type: 'ssl'
+experiment_name: '62_da1_d256_L8'
+run_message: >
+  ssl_62 — d256_L8, DA1 Sequel II single-source pretraining. Third arm
+  of the source-mixing comparison (ssl_58 yoran-only, ssl_61 mixed,
+  ssl_62 DA1-only). Same masked-autoencoder architecture and harness
+  as ssl_58 d=256; only `ssl_dataset` differs.
+  d=256, L=8, H=4, ctx=512, bs=256.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "48:00:00"
+  gres: gpu:8
+  num_processes: 8
+
+ssl_dataset: 'da1_raw.memmap'
+
+probe_pos_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val1'
+probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val1'
+
+ssl_pair_val_train: 'data/01_processed/val_sets/ssl_pair_val_yoran_v1.memmap'
+ssl_pair_val_val:   'data/01_processed/val_sets/ssl_pair_val_ob007_v1.memmap'
+
+resume_from: ''
+
+smrt2vec:
+  d_model: 256
+  n_layers: 8
+  n_head: 4
+  context: 512
+  p_mask: 0.15
+  mask_size: 10
+  total_steps: 1000000
+  ds_limit: 0
+  batch_size: 256
+  optimizer: 'AdamW'
+  max_lr: 3.0e-4
+  weight_decay: 0.02
+  pct_start: 0.03
+  grad_clip: 5.0
+  probe_every_steps: 10000
+  checkpoint_every_steps: 10000
+  resume_every_steps: 10000
+  chunk_size: 2048
+
+probe:
+  context: 32
+  batch_size: 512
+  epochs: 3
+  lr: 3.0e-3
+  ds_limit: 500000
