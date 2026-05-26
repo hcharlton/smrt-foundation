@@ -56,7 +56,6 @@ smrt2vec:
   probe_every_steps: 10000
   checkpoint_every_steps: 10000
   resume_every_steps: 10000
-  chunk_size: 2048
 
 probe:
   context: 32

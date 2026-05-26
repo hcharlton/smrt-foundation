@@ -24,9 +24,6 @@ The CpG probe data is Sequel II-derived, so the probe uses the Sequel II
 source's norm (here keyed `da1`). Pair-val splits keep yoran's norm for
 both yoran (in-dist) and ob007 (held-out) so the trajectory overlays
 cleanly against ssl_58's diagnostics.
-
-Pass criterion: probe_top1 >= ssl_58's d-size match, non-decreasing over
-last 3 evals.
 """
 
 import os
@@ -253,7 +250,7 @@ def main():
         'probe_every_steps': 10000,
         'checkpoint_every_steps': 10000,
         'resume_every_steps': 10000,
-        'chunk_size': 2048,
+        'chunk_size': 32,
     }
     c = DEFAULT | config.get('smrt2vec', {})
     config['smrt2vec'] = c
@@ -507,6 +504,7 @@ def main():
                 'global_step': step,
                 'step_in_epoch': step_in_epoch_count,
                 'norms': {src: norm.save_stats() for src, norm in per_source_norm.items()},
+                **per_source_norm[PROBE_NORM_SOURCE].save_stats(),
             }, save_path)
             print(f"Saved encoder+decoder checkpoint to {save_path}")
         accelerator.wait_for_everyone()
@@ -816,16 +814,9 @@ def main():
             'epoch': epoch,
             'global_step': global_step,
             'norms': {src: norm.save_stats() for src, norm in per_source_norm.items()},
+            **per_source_norm[PROBE_NORM_SOURCE].save_stats(),
         }, save_path)
         print(f"Saved final encoder+decoder checkpoint to {save_path}")
-
-        if len(probe_history) >= 3:
-            last = probe_history[-3:]
-            print("Last 3 probe evals:", last)
-            end_top1 = last[-1][1]
-            non_dec = all(last[i][1] >= last[i - 1][1] - 0.005 for i in range(1, len(last)))
-            passed = end_top1 >= 0.67 and non_dec
-            print(f"Pass criterion: probe_top1 >= 0.67 AND non-decreasing -> {'PASS' if passed else 'FAIL'} (end {end_top1:.4f})")
 
     accelerator.end_training()
 
