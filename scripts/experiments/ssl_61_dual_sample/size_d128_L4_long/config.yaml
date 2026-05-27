@@ -1,0 +1,64 @@
+experiment_type: 'ssl'
+experiment_name: '61_dual_sample_d128_L4_long'
+run_message: >
+  ssl_61 d128_L4 continuation. Resumes from size_d128_L4's 1M-step
+  Accelerate state; cosine LR already bottomed (schedule_steps=1M),
+  remaining steps run at min_lr = max_lr * 0.01 = 3e-6. Tests whether
+  probe_top1 keeps climbing past the cosine bottom or saturates.
+  Pattern mirrors ssl_58 d=*_long.
+  d=128, L=4, H=2, ctx=512, bs=512.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "48:00:00"
+  gres: gpu:8
+  num_processes: 8
+
+ssl_datasets:
+  da1: 'data/01_processed/ssl_sets/da1_raw.memmap'
+  yoran: 'data/01_processed/ssl_sets/yoran_raw.memmap'
+
+stage:
+  enabled: true
+  n_shards: 0
+  shuffle: false
+  seed: 42
+  parallel: 16
+
+probe_pos_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val1'
+probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val1'
+
+ssl_pair_val_train: 'data/01_processed/val_sets/ssl_pair_val_yoran_v1.memmap'
+ssl_pair_val_val:   'data/01_processed/val_sets/ssl_pair_val_ob007_v1.memmap'
+
+resume_from: 'scripts/experiments/ssl_61_dual_sample/size_d128_L4/checkpoints/latest'
+
+smrt2vec:
+  d_model: 128
+  n_layers: 4
+  n_head: 2
+  context: 512
+  p_mask: 0.15
+  mask_size: 10
+  total_steps: 10000000
+  schedule_steps: 1000000
+  ds_limit: 0
+  batch_size: 512
+  optimizer: 'AdamW'
+  max_lr: 3.0e-4
+  weight_decay: 0.02
+  pct_start: 0.03
+  grad_clip: 5.0
+  probe_every_steps: 10000
+  checkpoint_every_steps: 10000
+  resume_every_steps: 10000
+
+probe:
+  context: 32
+  batch_size: 512
+  epochs: 3
+  lr: 3.0e-3
+  ds_limit: 500000
