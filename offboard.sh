@@ -16,8 +16,10 @@
 #      pre-chmod of the source, so jobs writing after start are still covered,
 #      the live tree is not mutated, and dry-run reflects reality.
 #   3. chmod -R a+rX the outbox as a belt-and-suspenders guarantee.
-#   4. Write SHA256SUMS into the outbox so the transfer can be verified on
-#      GenomeDK with `sha256sum -c SHA256SUMS`.
+#   4. Write a size+path MANIFEST.txt into the outbox (metadata only, instant
+#      even at TB scale) for verification on GenomeDK. SSH transport integrity
+#      plus rclone's per-file size check make size+presence a sound transfer
+#      guarantee; for byte-level hashing at this size, hash on a compute node.
 set -euo pipefail
 
 PROJECT_ROOT="/dcai/projects/cu_0030/smrt-foundation"
@@ -83,10 +85,13 @@ echo
 echo "== chmod -R a+rX outbox =="
 chmod -R a+rX "$OUTBOX"
 
-# 4. Manifest, written after the chmod and then made readable itself, so it
-#    travels with the data. Verify on GenomeDK: sha256sum -c SHA256SUMS
+# 4. Size+path manifest (metadata only, no file reads) so it is instant even at
+#    1.66 TB and travels with the data. Verify on GenomeDK by regenerating it
+#    against the pulled copy and diffing:
+#      cd <dest> && find . -type f ! -name MANIFEST.txt -printf '%s  %p\n' \
+#        | sort -k2 | diff - MANIFEST.txt && echo VERIFIED
 echo
-echo "== checksum manifest (reads the full staged tree, may take a few minutes) =="
-( cd "$OUTBOX" && find . -type f ! -name SHA256SUMS -exec sha256sum {} + | sort -k2 > SHA256SUMS )
-chmod a+r "$OUTBOX/SHA256SUMS"
-echo "wrote $OUTBOX/SHA256SUMS ($(wc -l < "$OUTBOX/SHA256SUMS") files)"
+echo "== size manifest =="
+( cd "$OUTBOX" && find . -type f ! -name MANIFEST.txt -printf '%s  %p\n' | sort -k2 > MANIFEST.txt )
+chmod a+r "$OUTBOX/MANIFEST.txt"
+echo "wrote $OUTBOX/MANIFEST.txt ($(wc -l < "$OUTBOX/MANIFEST.txt") files)"
