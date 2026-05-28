@@ -1,0 +1,57 @@
+experiment_type: 'ssl'
+experiment_name: '62_da1_d768_L8_long'
+run_message: >
+  ssl_62 d768_L8 continuation, DA1 Sequel II single-source. Resumes
+  from size_d768_L8's 1M-step Accelerate state; cosine LR already
+  bottomed (schedule_steps=1M), remaining steps run at min_lr =
+  max_lr * 0.01 = 3e-6. Extends the DA1-only arm to match the step
+  budget of ssl_58 d768_L8_long and ssl_61 d768_L8_long for the
+  three-way source comparison at depth.
+  d=768, L=8, H=12, ctx=512, bs=64.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "24:00:00"
+  gres: gpu:8
+  num_processes: 8
+
+ssl_dataset: 'da1_raw.memmap'
+
+probe_pos_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+probe_neg_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+probe_pos_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val1'
+probe_neg_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val1'
+
+ssl_pair_val_train: 'data/01_processed/val_sets/ssl_pair_val_yoran_v1.memmap'
+ssl_pair_val_val:   'data/01_processed/val_sets/ssl_pair_val_ob007_v1.memmap'
+
+resume_from: 'scripts/experiments/ssl_62_da1/size_d768_L8/checkpoints/latest'
+
+smrt2vec:
+  d_model: 768
+  n_layers: 8
+  n_head: 12
+  context: 512
+  p_mask: 0.15
+  mask_size: 10
+  total_steps: 10000000
+  schedule_steps: 1000000
+  ds_limit: 0
+  batch_size: 64
+  optimizer: 'AdamW'
+  max_lr: 3.0e-4
+  weight_decay: 0.02
+  pct_start: 0.03
+  grad_clip: 5.0
+  probe_every_steps: 10000
+  checkpoint_every_steps: 10000
+  resume_every_steps: 10000
+  chunk_size: 2048
+
+probe:
+  context: 32
+  batch_size: 512
+  epochs: 3
+  lr: 3.0e-3
+  ds_limit: 500000
