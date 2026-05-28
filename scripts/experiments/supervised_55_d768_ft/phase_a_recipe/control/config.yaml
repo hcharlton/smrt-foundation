@@ -1,0 +1,55 @@
+experiment_type: 'supervised'
+experiment_name: '55_d768_ft_phase_a_control'
+run_message: >-
+  supervised_55 Phase A control. Reproduces supervised_53/midlayer at d=768:
+  uniform encoder LR 3e-3, bs=4096, 200 epochs, no label smoothing. This is
+  the overfitting baseline the recipe phase deconfounds (small_batch vs
+  short_sched) and the regularization arm (both_smooth) tries to fix.
+  Treatment midlayer (layer_idx=3). 1 arch x 2 inits x 2 sizes = 4 runs.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "24:00:00"
+  gres: gpu:8
+  num_processes: 1
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val2'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val2'
+
+architectures:
+  d768_L8: { d_model: 768, n_layers: 8, n_head: 12, layer_idx: 3 }
+
+inits:
+  random:
+    checkpoint: null
+  ssl_58_best:
+    checkpoint: 'auto_best'
+    ssl_exp_dirs:
+      d768_L8: 'scripts/experiments/ssl_58_autoencoder_grid/size_d768_L8_long'
+
+skip: []
+
+train_sizes: [10000, 100000]
+
+classifier:
+  context: 32
+  weight_decay: 0.02
+  pct_start: 0.1
+  max_lr: 3e-3
+  head_lr: 3e-3
+  encoder_lr: 3e-3
+  batch_size: 4096
+  cnn_variant: 'small_rf'
+  treatment: 'midlayer'
+  label_smoothing: 0.0
+
+scaling:
+  val_limit: 1000000
+  max_epochs: 200
+  min_steps: 100
+  max_steps: 400000
+  n_evals: 40
+  first_eval_step: 100

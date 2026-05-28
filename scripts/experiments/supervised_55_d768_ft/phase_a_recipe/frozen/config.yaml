@@ -1,0 +1,58 @@
+experiment_type: 'supervised'
+experiment_name: '55_d768_ft_phase_a_frozen'
+run_message: >-
+  supervised_55 Phase A, frozen-encoder linear probe (LP anchor). Encoder
+  frozen the whole run; optimizer touches only the head. Reproduces the ~0.71
+  SSL probe number inside the FT codepath so every recipe and method cell is
+  judged against an in-harness baseline rather than the externally-reported
+  probe. encoder_lr is unused under linear_probe and logged as 0.0. The
+  random-init cell is chance-level by construction (head-only LP on random
+  features) and is reported for symmetry.
+  Treatment linear_probe. 1 arch x 2 inits x 2 sizes = 4 runs.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "24:00:00"
+  gres: gpu:8
+  num_processes: 1
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val2'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val2'
+
+architectures:
+  d768_L8: { d_model: 768, n_layers: 8, n_head: 12 }
+
+inits:
+  random:
+    checkpoint: null
+  ssl_58_best:
+    checkpoint: 'auto_best'
+    ssl_exp_dirs:
+      d768_L8: 'scripts/experiments/ssl_58_autoencoder_grid/size_d768_L8_long'
+
+skip: []
+
+train_sizes: [10000, 100000]
+
+classifier:
+  context: 32
+  weight_decay: 0.02
+  pct_start: 0.1
+  max_lr: 3e-3
+  head_lr: 3e-3
+  encoder_lr: null
+  batch_size: 4096
+  cnn_variant: 'small_rf'
+  treatment: 'linear_probe'
+  label_smoothing: 0.0
+
+scaling:
+  val_limit: 1000000
+  max_epochs: 200
+  min_steps: 100
+  max_steps: 400000
+  n_evals: 40
+  first_eval_step: 100

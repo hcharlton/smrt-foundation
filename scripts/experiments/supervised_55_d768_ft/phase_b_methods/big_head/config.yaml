@@ -1,0 +1,58 @@
+experiment_type: 'supervised'
+experiment_name: '55_d768_ft_phase_b_big_head'
+run_message: >-
+  supervised_55 Phase B methods sweep, treatment=big_head
+  (DirectClassifierBigHead, deeper MLP head). cnn_variant=small_rf so it loads
+  the ssl_58 encoder. Capacity control for the method comparison: a larger head
+  has more room to fit -- with label_smoothing=0.1 in the shared Phase B recipe
+  this tests whether head capacity helps or just re-introduces the
+  overconfidence the smoothing is meant to cap. head 3e-3 / enc 3e-4, bs=512,
+  20ep.
+  1 arch x 2 inits x 2 sizes = 4 runs.
+
+resources:
+  cores: 32
+  memory: 256gb
+  walltime: "24:00:00"
+  gres: gpu:8
+  num_processes: 1
+
+pos_data_train: 'data/01_processed/val_sets/cpg_pos_v2.memmap/train'
+neg_data_train: 'data/01_processed/val_sets/cpg_neg_v2.memmap/train'
+pos_data_val: 'data/01_processed/val_sets/cpg_pos_v2.memmap/val2'
+neg_data_val: 'data/01_processed/val_sets/cpg_neg_v2.memmap/val2'
+
+architectures:
+  d768_L8: { d_model: 768, n_layers: 8, n_head: 12 }
+
+inits:
+  random:
+    checkpoint: null
+  ssl_58_best:
+    checkpoint: 'auto_best'
+    ssl_exp_dirs:
+      d768_L8: 'scripts/experiments/ssl_58_autoencoder_grid/size_d768_L8_long'
+
+skip: []
+
+train_sizes: [10000, 100000]
+
+classifier:
+  context: 32
+  weight_decay: 0.02
+  pct_start: 0.1
+  max_lr: 3e-3
+  head_lr: 3e-3
+  encoder_lr: 3e-4
+  batch_size: 512
+  cnn_variant: 'small_rf'
+  treatment: 'big_head'
+  label_smoothing: 0.1
+
+scaling:
+  val_limit: 1000000
+  max_epochs: 20
+  min_steps: 100
+  max_steps: 400000
+  n_evals: 40
+  first_eval_step: 100
