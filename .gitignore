@@ -17,6 +17,10 @@ simCLR.pdf
 simCLR2.pdf
 report/vis_nn
 randnn_images_neylon.ipynb
+report/report_v1.md
+report/rep_arch.md
+MANIFEST.txt
+*plot.summary.json
 *.out
 CLAUDE.md
 .claude/
